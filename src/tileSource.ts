@@ -1,9 +1,10 @@
 /**
- * PROVISIONAL tile-source contract.
+ * Tile-source contract.
  *
- * This interface is a working draft; it finalizes after the COPC reader
- * spike. Expect field additions (attribute selection, density hints) and
- * possible signature changes before 0.1.
+ * Two reference implementations ship with the library: `createHttpTileSource`
+ * (a revision-scoped hierarchy/tile HTTP protocol with PCT1 binary tiles) and
+ * `createCopcTileSource` (direct COPC reads, e.g. over HTTP Range requests).
+ * Anything exposing the same octree shape can implement it.
  */
 
 import type { Cube, Vec3, VoxelKey } from './octree';
@@ -27,6 +28,16 @@ export interface NodeInfo {
   readonly key: VoxelKey;
   /** Points stored in this node (0 is legal: structural node). */
   readonly pointCount: number;
+  /**
+   * Children known to exist. When absent, consumers derive children from the
+   * presence of sibling entries in the same (or previously loaded) pages.
+   */
+  readonly children?: readonly VoxelKey[];
+  /**
+   * True when this entry only points at a further hierarchy page rooted at
+   * `key`: call `nodes(key)` to materialize the subtree before using it.
+   */
+  readonly pageRef?: boolean;
 }
 
 /** Decoded payload of one octree node. */
