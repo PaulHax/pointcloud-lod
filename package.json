@@ -1,0 +1,34 @@
+{
+  "name": "vtk-pointcloud-lod",
+  "version": "0.0.1",
+  "description": "Octree LOD point-cloud streaming for vtk.js",
+  "type": "module",
+  "license": "BSD-3-Clause",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "src"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build": "vite build && tsc -p tsconfig.build.json"
+  },
+  "peerDependencies": {
+    "@kitware/vtk.js": ">=36"
+  },
+  "dependencies": {
+    "copc": "^0.0.8"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vite": "^8.1.5",
+    "vitest": "^4.1.10"
+  }
+}
