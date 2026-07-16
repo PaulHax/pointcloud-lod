@@ -22,17 +22,29 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
 ```
 
 - **TileSource** — abstract interface over an octree tile store: dataset
-  metadata, hierarchy pages, and per-node point payloads. The reference
-  implementation reads [COPC](https://copc.io/) files over HTTP Range
-  requests (via the `copc` package), so any static file host works.
-- **LOD controller** — pure logic deciding which nodes to show: frustum
-  culling, screen-space error, a visible-point budget, progressive
-  refinement with request cancellation, byte-budgeted LRU eviction, and
-  hole-free parent/child replacement.
-- **Renderer adapter** — turns loaded tiles into vtk.js actors, one
-  `vtkPolyData` + `vtkPointGaussianMapper` per tile.
+  metadata, hierarchy pages, and per-node point payloads. Two
+  implementations ship:
+  - `createCopcTileSource` reads [COPC](https://copc.io/) files directly
+    over HTTP Range requests (via the `copc` package), so any static file
+    host works with no tile server at all;
+  - `createHttpTileSource` speaks a small revision-scoped hierarchy/tile
+    HTTP protocol with a compact binary tile format (`PCT1`: Float64 tile
+    origin + tile-local Float32 positions + Uint8 RGB) for servers that
+    reproject or transform points per tile.
+- **LOD controller** (`createLodController`) — decides which nodes are
+  resident: frustum culling, screen-space error priority, a visible-point
+  budget with a parent-closed selection invariant (COPC hierarchies are
+  additive, so that invariant alone guarantees hole-free refinement),
+  coarse-first fetching with bounded concurrency and cancellation,
+  byte-budgeted LRU caching of deselected tiles, and batched delivery.
+- **Renderer adapter** (`createRendererAdapter`) — turns tile batches into
+  vtk.js actors, one `vtkPolyData` + `vtkPointGaussianMapper` per tile
+  (one gl.POINTS vertex per point, no cell topology), with an anchor base
+  matrix composed onto each tile's origin translation. This is the only
+  module importing `@kitware/vtk.js`; the `vtkPointGaussianMapper` it uses
+  is being upstreamed to vtk.js.
 
-Currently only the pure-logic core is implemented (octree keys/bounds,
-byte-budgeted LRU, point-budget node selection) plus the provisional
-`TileSource` contract. The COPC source, LOD controller loop, and renderer
-adapter come next.
+Camera math (`frustumPlanes`, `screenSpaceError`) is pure and
+renderer-agnostic: the controller takes a view-projection matrix and camera
+parameters as plain arrays, and requests renders only through an injected
+coalescing `scheduleRender` callback — the host owns render pacing.

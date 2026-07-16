@@ -34,3 +34,42 @@ export type {
   TileData,
   LoadTileOptions,
 } from './tileSource';
+
+export {
+  frustumPlanes,
+  cubeIntersectsFrustum,
+  distanceToCube,
+  screenSpaceError,
+  nodeScreenSpaceError,
+  type CameraView,
+  type Mat16,
+  type Plane,
+} from './camera';
+
+export {
+  createLodController,
+  type LodController,
+  type LodControllerOptions,
+  type LodControllerStats,
+  type TileBatch,
+} from './controller';
+
+export {
+  createHttpTileSource,
+  parsePct1,
+  RevisionGoneError,
+  PCT1_HEADER_BYTES,
+  type HttpTileSourceOptions,
+} from './httpTileSource';
+
+export {
+  createCopcTileSource,
+  type CopcTileSourceOptions,
+  type RangeGetter,
+} from './copcTileSource';
+
+export {
+  createRendererAdapter,
+  type RendererAdapter,
+  type RendererAdapterOptions,
+} from './rendererAdapter';
