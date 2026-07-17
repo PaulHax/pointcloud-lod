@@ -1,0 +1,62 @@
+name: CI
+
+# Test on every push/PR. On merge to main, semantic-release analyzes the
+# Conventional Commits since the last release, derives the next version, tags
+# it, publishes to npm, and creates a GitHub Release. Merges with no
+# releasable commits (only chore/docs/etc.) publish nothing.
+#
+# Auth is npm TRUSTED PUBLISHING (OIDC): no NPM_TOKEN secret — npm trusts this
+# workflow's GitHub identity via the id-token permission (needs
+# @semantic-release/npm >= 13.1.0 and npm >= 11.5.1), and provenance is
+# automatic. GITHUB_TOKEN is provided by Actions. Configure the trusted
+# publisher on the npm package (repo: PaulHax/pointcloud-lod, workflow:
+# publish.yml) before the first CI release.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  release:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create git tags + GitHub Releases
+      issues: write # semantic-release/github comments on released issues
+      pull-requests: write # ...and PRs
+      id-token: write # OIDC identity for npm trusted publishing + provenance
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # semantic-release needs full history + tags
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Upgrade npm (trusted publishing needs >= 11.5.1)
+        run: npm install -g npm@latest
+      - run: npm ci
+      - name: Release
+        run: npx semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

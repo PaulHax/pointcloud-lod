@@ -1,6 +1,6 @@
 {
   "name": "pointcloud-lod",
-  "version": "0.0.1",
+  "version": "0.0.0-development",
   "description": "Octree LOD point-cloud streaming for vtk.js",
   "type": "module",
   "license": "MIT",
@@ -50,7 +50,10 @@
     "copc": "^0.0.8"
   },
   "devDependencies": {
+    "@semantic-release/github": "^11.0.0",
+    "@semantic-release/npm": "^13.1.0",
     "@types/node": "^26.1.1",
+    "semantic-release": "^24.2.0",
     "typescript": "^7.0.2",
     "vite": "^8.1.5",
     "vitest": "^4.1.10"
