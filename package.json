@@ -1,5 +1,5 @@
 {
-  "name": "vtk-pointcloud-lod",
+  "name": "pointcloud-lod",
   "version": "0.0.1",
   "description": "Octree LOD point-cloud streaming for vtk.js",
   "type": "module",
@@ -7,11 +7,11 @@
   "author": "Paul Elliott",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/PaulHax/vtk-pointcloud-lod.git"
+    "url": "git+https://github.com/PaulHax/pointcloud-lod.git"
   },
-  "homepage": "https://github.com/PaulHax/vtk-pointcloud-lod#readme",
+  "homepage": "https://github.com/PaulHax/pointcloud-lod#readme",
   "bugs": {
-    "url": "https://github.com/PaulHax/vtk-pointcloud-lod/issues"
+    "url": "https://github.com/PaulHax/pointcloud-lod/issues"
   },
   "keywords": [
     "vtk",

@@ -1,4 +1,4 @@
-# vtk-pointcloud-lod
+# pointcloud-lod
 
 Octree LOD point-cloud streaming for [vtk.js](https://kitware.github.io/vtk-js/).
 
@@ -17,9 +17,9 @@ Install from GitHub. The `prepare` script builds `dist/` on install, so a
 git reference works with no extra steps:
 
 ```bash
-npm install github:PaulHax/vtk-pointcloud-lod
+npm install github:PaulHax/pointcloud-lod
 # or pin a commit for reproducible builds:
-npm install github:PaulHax/vtk-pointcloud-lod#<commit-sha>
+npm install github:PaulHax/pointcloud-lod#<commit-sha>
 ```
 
 `@kitware/vtk.js` (`>=36`) is an **optional** peer dependency: it is only
@@ -33,7 +33,7 @@ import {
   createCopcTileSource,
   createLodController,
   createRendererAdapter,
-} from "vtk-pointcloud-lod";
+} from "pointcloud-lod";
 
 // A coalescing render request the host owns (must not render synchronously
 // more than once per event-loop turn).

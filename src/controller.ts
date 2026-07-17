@@ -107,7 +107,7 @@ export const createLodController = (
     cacheBytes = 256 * 1024 * 1024,
     selectionDelayMs = 150,
     refinementCutoffPx = 1,
-    onError = (error) => console.warn('vtk-pointcloud-lod:', error),
+    onError = (error) => console.warn('pointcloud-lod:', error),
   } = options;
 
   let source = options.source;
