@@ -1,23 +1,27 @@
 """Generate the tiny deterministic COPC fixture used by copcTileSource tests.
 
-Run from the repo root with the telesculptor spike environment:
+The committed ``fixture.copc.laz`` is what the test suite actually reads, so
+you only need this script to regenerate it. It depends on a ``write_copc``
+helper (a copclib octree writer) that is not vendored in this repo. Point
+``COPC_WRITER_DIR`` at a directory containing a ``copc_writer`` module that
+exposes ``write_copc(path, xyz, rgb16, *, scale, offset, capacity, seed)``:
 
-    PYTHONPATH=<scratch>/copc-spike/pylibs \
-      <app-venv>/bin/python test/fixtures/generate_fixture.py
+    COPC_WRITER_DIR=/path/to/writer \
+      python test/fixtures/generate_fixture.py
 
-It reuses write_copc from plans/cloud/spike/spike_copc_common.py (copclib
-octree writer). The output is small enough to commit (< 100 KB).
+The output is small enough to commit (< 100 KB).
 """
 
+import os
 import pathlib
 import sys
 
 import numpy as np
 
-SPIKE_DIR = pathlib.Path("/home/paulhax/src/tele/plans/cloud/spike")
-sys.path.insert(0, str(SPIKE_DIR))
+WRITER_DIR = pathlib.Path(os.environ.get("COPC_WRITER_DIR", ".")).resolve()
+sys.path.insert(0, str(WRITER_DIR))
 
-from spike_copc_common import write_copc  # noqa: E402
+from copc_writer import write_copc  # noqa: E402
 
 OUT = pathlib.Path(__file__).parent / "fixture.copc.laz"
 

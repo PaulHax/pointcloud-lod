@@ -3,7 +3,26 @@
   "version": "0.0.1",
   "description": "Octree LOD point-cloud streaming for vtk.js",
   "type": "module",
-  "license": "BSD-3-Clause",
+  "license": "MIT",
+  "author": "Paul Elliott",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PaulHax/vtk-pointcloud-lod.git"
+  },
+  "homepage": "https://github.com/PaulHax/vtk-pointcloud-lod#readme",
+  "bugs": {
+    "url": "https://github.com/PaulHax/vtk-pointcloud-lod/issues"
+  },
+  "keywords": [
+    "vtk",
+    "vtk.js",
+    "point-cloud",
+    "lod",
+    "octree",
+    "copc",
+    "streaming",
+    "webgl"
+  ],
   "sideEffects": false,
   "files": [
     "dist",
@@ -15,10 +34,14 @@
       "import": "./dist/index.js"
     }
   },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "build": "vite build && tsc -p tsconfig.build.json"
+    "build": "vite build && tsc -p tsconfig.build.json",
+    "prepare": "npm run build"
   },
   "peerDependencies": {
     "@kitware/vtk.js": ">=36"
