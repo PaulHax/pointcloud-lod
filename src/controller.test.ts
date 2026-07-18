@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createLodController, type TileBatch } from './controller';
+import type { AdaptiveBudgetOptions } from './adaptiveBudget';
 import { keyToString, type VoxelKey } from './octree';
 import type {
   NodeInfo,
@@ -367,6 +368,113 @@ describe('createLodController', () => {
     await settle();
     expect(fake.loadCalls).toContain('0-0-0-0');
     expect(fake.loadCalls).not.toContain('1-0-0-0');
+    controller.dispose();
+  });
+});
+
+describe('createLodController — adaptive budget', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const makeAdaptive = (
+    tree: Record<string, FakeEntry>,
+    adaptive: boolean | AdaptiveBudgetOptions,
+    pointBudget: number,
+  ) => {
+    const fake = makeFakeSource(tree);
+    const sink = collectBatches();
+    const controller = createLodController({
+      source: fake.source,
+      onTiles: sink.onTiles,
+      scheduleRender: sink.scheduleRender,
+      pointBudget,
+      selectionDelayMs: 0,
+      interactionSettleMs: 300,
+      adaptive,
+    });
+    return { controller, ...fake, ...sink };
+  };
+
+  it('starts at the ceiling and reports the interaction regime', async () => {
+    const { controller } = makeAdaptive(SMALL_TREE, true, 2_000_000);
+    await settle();
+    expect(controller.stats().pointBudget).toBe(2_000_000);
+    expect(controller.stats().interacting).toBe(false);
+    controller.dispose();
+  });
+
+  it('keeps interaction and stationary budgets independent', async () => {
+    const { controller } = makeAdaptive(SMALL_TREE, { minSamples: 4 }, 2_000_000);
+    await settle();
+    controller.setCamera(VIEW); // t=0: interacting
+    await settle();
+    // Four slow frames (80ms) against the 33ms interaction target → one shrink.
+    for (let i = 0; i < 4; i += 1) {
+      vi.setSystemTime(i);
+      controller.recordFrame(80);
+    }
+    vi.setSystemTime(10);
+    expect(controller.stats().interacting).toBe(true);
+    expect(controller.stats().pointBudget).toBe(1_500_000); // interaction shrank
+    vi.setSystemTime(400); // past interactionSettleMs → settled
+    expect(controller.stats().interacting).toBe(false);
+    expect(controller.stats().pointBudget).toBe(2_000_000); // stationary untouched
+    controller.dispose();
+  });
+
+  it('a shrink from slow frames deselects a resident tile', async () => {
+    // Point counts scaled to millions so a budget change crosses a selection
+    // boundary: at 3M all three tiles fit; at 2.25M only the root and one child.
+    const bigTree: Record<string, FakeEntry> = {
+      '0-0-0-0': { pointCount: 1_000_000, children: ['1-0-0-0', '1-1-0-0'] },
+      '1-0-0-0': { pointCount: 1_000_000 },
+      '1-1-0-0': { pointCount: 1_000_000 },
+    };
+    const { controller, deferred } = makeAdaptive(
+      bigTree,
+      { minSamples: 4 },
+      3_000_000,
+    );
+    await settle();
+    controller.setCamera(VIEW); // t=0: interacting, budget 3M → all fit
+    await settle();
+    for (const d of deferred.values()) d.resolve();
+    await settle();
+    expect(controller.stats().residentTiles).toBe(3);
+
+    // Slow interaction frames shrink the budget to 2.25M → one child drops.
+    for (let i = 0; i < 4; i += 1) {
+      vi.setSystemTime(i);
+      controller.recordFrame(80);
+    }
+    await settle();
+    vi.setSystemTime(10);
+    expect(controller.stats().pointBudget).toBe(2_250_000);
+    expect(controller.stats().residentTiles).toBe(2);
+    controller.dispose();
+  });
+
+  it('setPointBudget lowers the ceiling and clamps the effective budget', async () => {
+    const { controller } = makeAdaptive(SMALL_TREE, true, 2_000_000);
+    await settle();
+    expect(controller.stats().pointBudget).toBe(2_000_000);
+    controller.setPointBudget(1_000_000); // new ceiling
+    expect(controller.stats().pointBudget).toBe(1_000_000);
+    controller.dispose();
+  });
+
+  it('recordFrame is a no-op when adaptive is disabled', async () => {
+    const { controller } = makeController(SMALL_TREE, { pointBudget: 500 });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    for (let i = 0; i < 20; i += 1) controller.recordFrame(5000);
+    expect(controller.stats().pointBudget).toBe(500);
     controller.dispose();
   });
 });

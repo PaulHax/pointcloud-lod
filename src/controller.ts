@@ -17,6 +17,11 @@ import {
   cubeIntersectsFrustum,
   type CameraView,
 } from './camera';
+import {
+  createAdaptiveBudget,
+  type AdaptiveBudget,
+  type AdaptiveBudgetOptions,
+} from './adaptiveBudget';
 import { selectNodes } from './budget';
 import { createLruCache } from './lru';
 import {
@@ -44,8 +49,23 @@ export interface LodControllerOptions {
    * tile. Must not render synchronously more than once per event loop turn.
    */
   scheduleRender: () => void;
-  /** Maximum points resident at once. Default 2,000,000. */
+  /**
+   * Maximum points resident at once. Default 2,000,000. With `adaptive`
+   * enabled this is the ceiling (the user quality control); the loop keeps the
+   * effective budget at or below it.
+   */
   pointBudget?: number;
+  /**
+   * Adapt the visible-point budget to measured render duration (Phase 5). Pass
+   * `true` for defaults, an options object to tune, or omit/false for a fixed
+   * `pointBudget`. When enabled, feed each render's wall-time to `recordFrame`.
+   */
+  adaptive?: AdaptiveBudgetOptions | boolean;
+  /**
+   * How long after the last camera change the controller still treats itself
+   * as "interacting" for adaptive budgeting, ms. Default 300.
+   */
+  interactionSettleMs?: number;
   /** Parallel tile fetches. Default 6. */
   fetchConcurrency?: number;
   /** CPU cache for deselected tiles, bytes. Default 256 MiB. */
@@ -66,12 +86,26 @@ export interface LodControllerStats {
   readonly residentPoints: number;
   readonly cachedBytes: number;
   readonly inFlight: number;
+  /** Effective visible-point budget currently driving selection. */
+  readonly pointBudget: number;
+  /** Whether the controller currently treats itself as interacting. */
+  readonly interacting: boolean;
 }
 
 export interface LodController {
   /** Update the camera; selection reruns debounced (leading edge immediate). */
   setCamera(view: CameraView): void;
+  /**
+   * Set the visible-point budget. With `adaptive` enabled this sets the
+   * ceiling (the user quality control); otherwise it is the fixed budget.
+   */
   setPointBudget(points: number): void;
+  /**
+   * Report one rendered frame's duration (ms) to the adaptive budget loop.
+   * No-op unless `adaptive` is enabled. The host measures the render wall-time
+   * and calls this once per painted frame.
+   */
+  recordFrame(durationMs: number): void;
   /**
    * Swap the tile source (e.g. a new asset revision behind a new endpoint).
    * All resident tiles, caches, hierarchy state, and in-flight requests are
@@ -106,6 +140,7 @@ export const createLodController = (
     fetchConcurrency = 6,
     cacheBytes = 256 * 1024 * 1024,
     selectionDelayMs = 150,
+    interactionSettleMs = 300,
     refinementCutoffPx = 1,
     onError = (error) => console.warn('pointcloud-lod:', error),
   } = options;
@@ -114,6 +149,39 @@ export const createLodController = (
   let pointBudget = options.pointBudget ?? 2_000_000;
   let view: CameraView | null = null;
   let disposed = false;
+
+  // Adaptive budget (Phase 5): when enabled, `pointBudget` above is the
+  // ceiling and the loop moves the effective budget between a floor and it,
+  // tracking a target frame time. When disabled, `pointBudget` is fixed.
+  const adaptiveBudget: AdaptiveBudget | null = options.adaptive
+    ? createAdaptiveBudget({
+        ...(typeof options.adaptive === 'object' ? options.adaptive : {}),
+        maxBudget: pointBudget,
+        initialBudget:
+          (typeof options.adaptive === 'object'
+            ? options.adaptive.initialBudget
+            : undefined) ?? pointBudget,
+        minBudget: Math.min(
+          (typeof options.adaptive === 'object'
+            ? options.adaptive.minBudget
+            : undefined) ?? 200_000,
+          pointBudget,
+        ),
+      })
+    : null;
+
+  let lastCameraChange = Number.NEGATIVE_INFINITY;
+  // Effective budget applied by the most recent selection; lets `recordFrame`
+  // reselect only when the adaptive budget (or interaction regime) has moved.
+  let lastSelectionBudget = pointBudget;
+
+  const isInteracting = (now: number): boolean =>
+    now - lastCameraChange < interactionSettleMs;
+
+  const currentBudget = (now: number): number =>
+    adaptiveBudget === null
+      ? pointBudget
+      : adaptiveBudget.budget(isInteracting(now));
 
   // Bumped on setSource/dispose; every async continuation checks it.
   let epoch = 0;
@@ -228,6 +296,8 @@ export const createLodController = (
 
   const runSelection = (): void => {
     if (disposed || view === null) return;
+    const budget = currentBudget(Date.now());
+    lastSelectionBudget = budget;
     const currentView = view;
     const meta = source.metadata();
     const planes = frustumPlanes(currentView.viewProj);
@@ -249,7 +319,7 @@ export const createLodController = (
     const neededPages: VoxelKey[] = [];
     const selection = selectNodes({
       root: ROOT_KEY,
-      pointBudget,
+      pointBudget: budget,
       priority: sse,
       getNode: (key) => {
         const keyString = keyToString(key);
@@ -359,18 +429,36 @@ export const createLodController = (
     setCamera(nextView) {
       if (disposed) return;
       view = nextView;
+      lastCameraChange = Date.now();
       requestSelection();
     },
 
     setPointBudget(points) {
       if (disposed) return;
       pointBudget = points;
+      if (adaptiveBudget !== null) {
+        // The config budget is the ceiling; the loop owns the effective value.
+        adaptiveBudget.setMaxBudget(points);
+      }
       runSelection();
+    },
+
+    recordFrame(durationMs) {
+      if (disposed || adaptiveBudget === null) return;
+      const now = Date.now();
+      adaptiveBudget.recordFrame(durationMs, {
+        interacting: isInteracting(now),
+        now,
+      });
+      // Reselect only when the effective budget (value or regime) actually
+      // moved — recordFrame fires every frame; adjustments are rare.
+      if (currentBudget(now) !== lastSelectionBudget) requestSelection();
     },
 
     setSource(nextSource) {
       if (disposed) return;
       dropEverything();
+      adaptiveBudget?.reset();
       source = nextSource;
       scheduleFlush();
       loadPage(ROOT_KEY);
@@ -382,11 +470,14 @@ export const createLodController = (
     },
 
     stats() {
+      const now = Date.now();
       return {
         residentTiles: resident.size,
         residentPoints,
         cachedBytes: cache.totalBytes(),
         inFlight: inFlight.size,
+        pointBudget: currentBudget(now),
+        interacting: isInteracting(now),
       };
     },
 
