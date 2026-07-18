@@ -178,6 +178,34 @@ describe('createAdaptiveBudget', () => {
     expect(feed(budget, 2, false, 40, 0, 1000)).toBe(100_000);
   });
 
+  it('reset respects a ceiling lowered after construction', () => {
+    // setSource → reset() must not resurrect an initial budget above a
+    // ceiling the user lowered in the meantime (the quality slider).
+    const budget = createAdaptiveBudget(OPTS); // initial 2M
+    budget.setMaxBudget(500_000);
+    budget.reset();
+    expect(budget.budget(false)).toBe(500_000);
+    expect(budget.budget(true)).toBe(500_000);
+  });
+
+  it('setMaxBudget discards samples measured under the old budget', () => {
+    const budget = createAdaptiveBudget(OPTS); // minSamples 8
+    // 7 slow frames — one short of adjusting.
+    feed(budget, 40, false, 7, 0, 1000);
+    expect(budget.stats().stationary.samples).toBe(7);
+    // Lowering the ceiling changes the budget; the retained samples measured
+    // the old (higher) budget's cost and must be discarded, or the very next
+    // frame would trigger a bogus extra shrink below the new ceiling.
+    budget.setMaxBudget(1_500_000);
+    expect(budget.stats().stationary.samples).toBe(0);
+    budget.recordFrame(40, { interacting: false, now: 8000 });
+    expect(budget.budget(false)).toBe(1_500_000); // no adjust on 1 fresh sample
+    // A ceiling change that leaves a budget untouched keeps its window.
+    feed(budget, 40, false, 3, 9000, 1000);
+    budget.setMaxBudget(1_500_000);
+    expect(budget.stats().stationary.samples).toBe(4);
+  });
+
   it('grows on 0 ms frames instead of freezing', () => {
     // An integer-ms host reads sub-millisecond frames as 0; those are valid
     // samples and must still let the budget grow toward the ceiling.

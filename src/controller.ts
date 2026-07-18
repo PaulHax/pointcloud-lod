@@ -444,12 +444,35 @@ export const createLodController = (
     pendingAdded = [];
   };
 
+  // Hosts feed the camera on every render, unconditionally; an unchanged view
+  // must be a no-op. Stamping it as a camera change would mark any render as
+  // "interacting" — including renders the settle-timer reselect itself
+  // triggers — flipping the regime back and oscillating between the two
+  // budgets forever.
+  const sameView = (a: CameraView, b: CameraView): boolean => {
+    if (
+      a.fovY !== b.fovY ||
+      a.viewportHeight !== b.viewportHeight ||
+      a.position[0] !== b.position[0] ||
+      a.position[1] !== b.position[1] ||
+      a.position[2] !== b.position[2] ||
+      a.viewProj.length !== b.viewProj.length
+    ) {
+      return false;
+    }
+    for (let i = 0; i < a.viewProj.length; i += 1) {
+      if (a.viewProj[i] !== b.viewProj[i]) return false;
+    }
+    return true;
+  };
+
   // Bootstrap: hierarchy root page loads eagerly; selection waits for camera.
   loadPage(ROOT_KEY);
 
   return {
     setCamera(nextView) {
       if (disposed) return;
+      if (view !== null && sameView(view, nextView)) return;
       view = nextView;
       lastCameraChange = Date.now();
       // Re-arm on every camera change so the timer only fires once the camera

@@ -229,13 +229,23 @@ export const createAdaptiveBudget = (
       // Don't pin the ceiling up to the floor — a low ceiling must win so the
       // effective budget never exceeds the user's requested quality.
       maxBudget = Math.max(1, Math.round(points));
-      stationary.budget = clamp(stationary.budget);
-      interaction.budget = clamp(interaction.budget);
+      for (const track of [stationary, interaction]) {
+        const next = clamp(track.budget);
+        if (next !== track.budget) {
+          track.budget = next;
+          // Same invariant as adjust(): the retained samples measured the old
+          // budget's cost; discard them so the next adjustment waits for
+          // frames rendered under the new one.
+          track.samples.length = 0;
+        }
+      }
     },
 
     reset() {
-      stationary.budget = initialBudget;
-      interaction.budget = initialBudget;
+      // Re-clamp: the ceiling may have been lowered (setMaxBudget) since
+      // construction, and the restored budget must never exceed it.
+      stationary.budget = clamp(initialBudget);
+      interaction.budget = clamp(initialBudget);
       stationary.samples.length = 0;
       interaction.samples.length = 0;
       stationary.lastAdjust = Number.NEGATIVE_INFINITY;

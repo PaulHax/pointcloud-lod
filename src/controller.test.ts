@@ -506,6 +506,31 @@ describe('createLodController — adaptive budget', () => {
     controller.dispose();
   });
 
+  it('an unchanged camera view does not re-enter the interaction regime', async () => {
+    // Hosts call setCamera before every paint with a freshly built (but often
+    // identical) view — including paints triggered by the settle reselect
+    // itself. An identical view must not stamp a camera change, or the regime
+    // would flip back to interaction and oscillate between the two budgets.
+    const { controller } = makeAdaptive(SMALL_TREE, { minSamples: 4 }, 2_000_000);
+    await settle();
+    controller.setCamera(VIEW); // t=0: a real camera change → interacting
+    await settle();
+    expect(controller.stats().interacting).toBe(true);
+
+    vi.setSystemTime(400); // past interactionSettleMs → settled
+    vi.advanceTimersByTime(400); // settle timer fires
+    expect(controller.stats().interacting).toBe(false);
+
+    // A per-render feed of an equal (fresh object) view stays stationary.
+    controller.setCamera({ ...VIEW, position: [...VIEW.position] });
+    expect(controller.stats().interacting).toBe(false);
+
+    // A genuinely different view re-enters interaction.
+    controller.setCamera({ ...VIEW, viewportHeight: 200 });
+    expect(controller.stats().interacting).toBe(true);
+    controller.dispose();
+  });
+
   it('recordFrame is a no-op when adaptive is disabled', async () => {
     const { controller } = makeController(SMALL_TREE, { pointBudget: 500 });
     await settle();
