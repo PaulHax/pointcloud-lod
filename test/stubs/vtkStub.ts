@@ -55,9 +55,11 @@ export const makeActor = (): StubActor => {
 export interface StubMapper {
   setInputData: (data: unknown) => void;
   setStatic: (value: boolean) => void;
+  setWorldSize: (size: number) => void;
   delete: () => void;
   inputData: unknown;
   static: boolean;
+  worldSize: number;
   deleted: boolean;
 }
 
@@ -67,12 +69,16 @@ export const makeMapper = (): StubMapper => {
   const mapper: StubMapper = {
     inputData: null,
     static: false,
+    worldSize: 0,
     deleted: false,
     setInputData(data) {
       mapper.inputData = data;
     },
     setStatic(value) {
       mapper.static = value;
+    },
+    setWorldSize(size) {
+      mapper.worldSize = size;
     },
     delete() {
       mapper.deleted = true;

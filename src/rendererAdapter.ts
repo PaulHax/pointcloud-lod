@@ -17,7 +17,7 @@ import vtkActor from '@kitware/vtk.js/Rendering/Core/Actor';
 import vtkPointGaussianMapper from '@kitware/vtk.js/Rendering/Core/PointGaussianMapper';
 
 import type { TileBatch } from './controller';
-import { keyToString, type Vec3 } from './octree';
+import { keyToString, pointSpacing, type Vec3, type VoxelKey } from './octree';
 import type { TileData } from './tileSource';
 
 /** Column-major 4x4 multiply: out = a · b. */
@@ -46,6 +46,20 @@ const translation = (origin: Vec3): number[] => [
   1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, origin[0], origin[1], origin[2], 1,
 ];
 
+/**
+ * World-space splat sizing: each tile's splat diameter becomes
+ * `nodeSpacing(level) * factor` world units (spacing halves per octree
+ * level), so coarse tiles close into a surface up close instead of thinning
+ * into sparse pixels. Assumes a rigid base matrix; a scaling anchor will not
+ * rescale the splats.
+ */
+export interface WorldSizing {
+  /** Point spacing at the octree root (TileSourceMetadata.spacing). */
+  readonly rootSpacing: number;
+  /** Diameter multiplier on the node spacing. Default 1. */
+  readonly factor?: number;
+}
+
 export interface RendererAdapterOptions {
   /** vtk.js renderer the tile actors are added to. */
   renderer: { addActor(actor: unknown): void; removeActor(actor: unknown): void };
@@ -55,6 +69,8 @@ export interface RendererAdapterOptions {
   pointSize?: number;
   /** Initial visibility. Default true. */
   visible?: boolean;
+  /** Enable world-space splat sizing; omit for screen-pixel sizing. */
+  worldSizing?: WorldSizing;
 }
 
 export interface RendererAdapter {
@@ -66,6 +82,8 @@ export interface RendererAdapter {
    */
   setBaseMatrix(matrix: ArrayLike<number> | null): void;
   setPointSize(pixels: number): void;
+  /** Change or disable (null) world-space splat sizing for all tiles. */
+  setWorldSizing(sizing: WorldSizing | null): void;
   setVisible(visible: boolean): void;
   tileCount(): number;
   /** Remove and release every tile actor. Idempotent. */
@@ -77,6 +95,7 @@ interface TileActors {
   mapper: any;
   polyData: any;
   origin: Vec3;
+  level: number;
 }
 
 export const createRendererAdapter = (
@@ -85,6 +104,7 @@ export const createRendererAdapter = (
   const { renderer, scheduleRender } = options;
   let pointSize = options.pointSize ?? 2;
   let visible = options.visible ?? true;
+  let worldSizing = options.worldSizing ?? null;
   let baseMatrix: ArrayLike<number> = IDENTITY;
   const tiles = new Map<string, TileActors>();
   let disposed = false;
@@ -92,7 +112,14 @@ export const createRendererAdapter = (
   const tileMatrix = (origin: Vec3): number[] =>
     multiplyMat4(baseMatrix, translation(origin));
 
-  const createTile = (tile: TileData): TileActors => {
+  // 0 disables the mapper's world-space mode (screen-pixel sizing).
+  const tileWorldSize = (level: number): number =>
+    worldSizing === null
+      ? 0
+      : pointSpacing(worldSizing.rootSpacing, level) *
+        (worldSizing.factor ?? 1);
+
+  const createTile = (key: VoxelKey, tile: TileData): TileActors => {
     const polyData = vtkPolyData.newInstance();
     polyData.getPoints().setData(tile.positions, 3);
     if (tile.rgb !== undefined) {
@@ -107,12 +134,13 @@ export const createRendererAdapter = (
     const mapper = vtkPointGaussianMapper.newInstance();
     mapper.setInputData(polyData);
     mapper.setStatic?.(true);
+    mapper.setWorldSize?.(tileWorldSize(key.level));
     const actor = vtkActor.newInstance();
     actor.setMapper(mapper);
     actor.getProperty().setPointSize(pointSize);
     actor.setVisibility(visible);
     actor.setUserMatrix(tileMatrix(tile.origin));
-    return { actor, mapper, polyData, origin: tile.origin };
+    return { actor, mapper, polyData, origin: tile.origin, level: key.level };
   };
 
   const releaseTile = (entry: TileActors): void => {
@@ -136,7 +164,7 @@ export const createRendererAdapter = (
       for (const { key, tile } of batch.added) {
         const keyString = keyToString(key);
         if (tiles.has(keyString)) continue;
-        const entry = createTile(tile);
+        const entry = createTile(key, tile);
         tiles.set(keyString, entry);
         renderer.addActor(entry.actor);
         changed = true;
@@ -158,6 +186,23 @@ export const createRendererAdapter = (
       pointSize = pixels;
       for (const entry of tiles.values()) {
         entry.actor.getProperty().setPointSize(pixels);
+      }
+      scheduleRender();
+    },
+
+    setWorldSizing(sizing) {
+      // Value-compared no-op guard: hosts re-apply config before paints, and
+      // an unconditional scheduleRender here would re-schedule every frame.
+      const same =
+        sizing === worldSizing ||
+        (sizing !== null &&
+          worldSizing !== null &&
+          sizing.rootSpacing === worldSizing.rootSpacing &&
+          (sizing.factor ?? 1) === (worldSizing.factor ?? 1));
+      if (disposed || same) return;
+      worldSizing = sizing;
+      for (const entry of tiles.values()) {
+        entry.mapper.setWorldSize?.(tileWorldSize(entry.level));
       }
       scheduleRender();
     },
