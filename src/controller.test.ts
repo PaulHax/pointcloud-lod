@@ -427,7 +427,7 @@ describe('createLodController — adaptive budget', () => {
     controller.dispose();
   });
 
-  it('a shrink from slow frames deselects a resident tile', async () => {
+  it('a shrink during interaction retains visible resident tiles', async () => {
     // Point counts scaled to millions so a budget change crosses a selection
     // boundary: at 3M all three tiles fit; at 2.25M only the root and one child.
     const bigTree: Record<string, FakeEntry> = {
@@ -435,7 +435,7 @@ describe('createLodController — adaptive budget', () => {
       '1-0-0-0': { pointCount: 1_000_000 },
       '1-1-0-0': { pointCount: 1_000_000 },
     };
-    const { controller, deferred } = makeAdaptive(
+    const { controller, deferred, batches } = makeAdaptive(
       bigTree,
       { minSamples: 4 },
       3_000_000,
@@ -446,8 +446,11 @@ describe('createLodController — adaptive budget', () => {
     for (const d of deferred.values()) d.resolve();
     await settle();
     expect(controller.stats().residentTiles).toBe(3);
+    batches.length = 0;
 
-    // Slow interaction frames shrink the budget to 2.25M → one child drops.
+    // Slow interaction frames shrink the budget to 2.25M. The deselected
+    // child is still on screen mid-gesture, so it stays resident — removing
+    // and re-adding it moments later would read as per-tile flashing.
     for (let i = 0; i < 4; i += 1) {
       vi.setSystemTime(i);
       controller.recordFrame(80);
@@ -455,7 +458,33 @@ describe('createLodController — adaptive budget', () => {
     await settle();
     vi.setSystemTime(10);
     expect(controller.stats().pointBudget).toBe(2_250_000);
-    expect(controller.stats().residentTiles).toBe(2);
+    expect(controller.stats().residentTiles).toBe(3);
+    expect(batches.flatMap((b) => b.removed)).toHaveLength(0);
+    controller.dispose();
+  });
+
+  it('consolidates retained tiles once the camera settles (adaptive off)', async () => {
+    // Retention + settle consolidation are regime behaviors, not adaptive
+    // ones: a fixed-budget drop mid-gesture must not flash either.
+    const { controller, deferred } = makeAdaptive(SMALL_TREE, false, 1000);
+    await settle();
+    controller.setCamera(VIEW); // t=0: interacting
+    await settle();
+    for (const d of deferred.values()) d.resolve();
+    await settle();
+    expect(controller.stats().residentTiles).toBe(3);
+
+    // Lower the fixed budget mid-gesture: both children (60 points each) fall
+    // out of the 150-point selection but stay resident — still on screen.
+    controller.setPointBudget(150);
+    await settle();
+    expect(controller.stats().residentTiles).toBe(3);
+
+    // Once the camera has been still for the settle window, the retained
+    // children are dropped in one consolidation pass.
+    vi.advanceTimersByTime(300);
+    await settle();
+    expect(controller.stats().residentTiles).toBe(1);
     controller.dispose();
   });
 
@@ -478,17 +507,19 @@ describe('createLodController — adaptive budget', () => {
     await settle();
     expect(controller.stats().residentTiles).toBe(3);
 
-    // Slow interaction frames shrink the interaction budget → one tile drops.
+    // Slow interaction frames shrink the interaction budget; the deselected
+    // tile is retained (anti-flashing) but the budget has moved.
     for (let i = 0; i < 4; i += 1) {
       vi.setSystemTime(i);
       controller.recordFrame(80);
     }
     await settle();
-    expect(controller.stats().residentTiles).toBe(2);
+    expect(controller.stats().pointBudget).toBe(2_250_000);
+    expect(controller.stats().residentTiles).toBe(3);
 
     // No further frames — the host renders on demand and goes quiet. Advancing
     // past the settle window fires the settle timer, which re-applies the
-    // (untouched) stationary 3M budget and restores the third tile from cache.
+    // (untouched) stationary 3M budget; the retained tile is selected again.
     vi.advanceTimersByTime(400);
     await settle();
     expect(controller.stats().interacting).toBe(false);
