@@ -23,7 +23,11 @@ const tile = (
 const KEY_A = { level: 1, x: 0, y: 0, z: 0 };
 const KEY_B = { level: 1, x: 1, y: 0, z: 0 };
 
-const makeAdapter = (options?: { pointSize?: number; visible?: boolean }) => {
+const makeAdapter = (options?: {
+  pointSize?: number;
+  visible?: boolean;
+  worldSizing?: { rootSpacing: number; factor?: number };
+}) => {
   const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
   const scheduleRender = vi.fn();
   const adapter = createRendererAdapter({
@@ -134,6 +138,51 @@ describe('createRendererAdapter', () => {
     expect(actorInstances[0]!.userMatrix!.slice(12, 15)).toEqual([101, 0, 0]);
     expect(actorInstances[0]!.pointSize).toBe(5);
     expect(actorInstances[0]!.visibility).toBe(false);
+  });
+
+  it('sizes splats in world units from the node spacing at each level', () => {
+    const { adapter } = makeAdapter({
+      worldSizing: { rootSpacing: 4, factor: 2 },
+    });
+    adapter.applyBatch({
+      added: [
+        { key: KEY_A, tile: tile([0, 0, 0]) }, // level 1: spacing 2
+        { key: { level: 2, x: 0, y: 0, z: 0 }, tile: tile([1, 0, 0]) },
+      ],
+      removed: [],
+    });
+    expect(mapperInstances.map((m) => m.worldSize)).toEqual([4, 2]);
+  });
+
+  it('defaults to screen-pixel sizing (worldSize 0)', () => {
+    const { adapter } = makeAdapter();
+    adapter.applyBatch({ added: [{ key: KEY_A, tile: tile([0, 0, 0]) }], removed: [] });
+    expect(mapperInstances[0]!.worldSize).toBe(0);
+  });
+
+  it('setWorldSizing re-sizes resident tiles and can disable world mode', () => {
+    const { adapter, scheduleRender } = makeAdapter();
+    adapter.applyBatch({ added: [{ key: KEY_A, tile: tile([0, 0, 0]) }], removed: [] });
+
+    scheduleRender.mockClear();
+    adapter.setWorldSizing({ rootSpacing: 8 }); // factor defaults to 1
+    expect(mapperInstances[0]!.worldSize).toBe(4);
+    expect(scheduleRender).toHaveBeenCalledTimes(1);
+
+    // New tiles inherit the current sizing.
+    adapter.applyBatch({ added: [{ key: KEY_B, tile: tile([1, 0, 0]) }], removed: [] });
+    expect(mapperInstances[1]!.worldSize).toBe(4);
+
+    adapter.setWorldSizing(null);
+    expect(mapperInstances.map((m) => m.worldSize)).toEqual([0, 0]);
+
+    // Value-equal re-applies are no-ops (hosts re-send config every paint).
+    adapter.setWorldSizing({ rootSpacing: 8, factor: 2 });
+    scheduleRender.mockClear();
+    adapter.setWorldSizing({ rootSpacing: 8, factor: 2 });
+    adapter.setWorldSizing(null);
+    adapter.setWorldSizing(null);
+    expect(scheduleRender).toHaveBeenCalledTimes(1);
   });
 
   it('dispose releases everything and is idempotent', () => {

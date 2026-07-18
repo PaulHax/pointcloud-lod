@@ -83,4 +83,5 @@ export {
   createRendererAdapter,
   type RendererAdapter,
   type RendererAdapterOptions,
+  type WorldSizing,
 } from './rendererAdapter';
