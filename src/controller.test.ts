@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createLodController, type TileBatch } from './controller';
 import type { AdaptiveBudgetOptions } from './adaptiveBudget';
+import { createMemoryPool } from './memoryPool';
 import { keyToString, type VoxelKey } from './octree';
 import type {
   NodeInfo,
@@ -384,7 +385,8 @@ describe('createLodController — adaptive budget', () => {
   const makeAdaptive = (
     tree: Record<string, FakeEntry>,
     adaptive: boolean | AdaptiveBudgetOptions,
-    pointBudget: number,
+    initialBudget: number,
+    memory?: number,
   ) => {
     const fake = makeFakeSource(tree);
     const sink = collectBatches();
@@ -392,15 +394,24 @@ describe('createLodController — adaptive budget', () => {
       source: fake.source,
       onTiles: sink.onTiles,
       scheduleRender: sink.scheduleRender,
-      pointBudget,
+      // Adaptive mode has no configured point ceiling: the initial budget
+      // rides the adaptive options; pointBudget is the fixed-mode budget.
+      ...(adaptive === false
+        ? { pointBudget: initialBudget }
+        : {
+            adaptive: {
+              initialBudget,
+              ...(typeof adaptive === 'object' ? adaptive : {}),
+            },
+          }),
       selectionDelayMs: 0,
       interactionSettleMs: 300,
-      adaptive,
+      ...(memory !== undefined ? { memory } : {}),
     });
     return { controller, ...fake, ...sink };
   };
 
-  it('starts at the ceiling and reports the interaction regime', async () => {
+  it('starts at the initial budget and reports the interaction regime', async () => {
     const { controller } = makeAdaptive(SMALL_TREE, true, 2_000_000);
     await settle();
     expect(controller.stats().pointBudget).toBe(2_000_000);
@@ -528,12 +539,33 @@ describe('createLodController — adaptive budget', () => {
     controller.dispose();
   });
 
-  it('setPointBudget lowers the ceiling and clamps the effective budget', async () => {
+  it('setPointBudget is a no-op with adaptive enabled — there is no point ceiling', async () => {
     const { controller } = makeAdaptive(SMALL_TREE, true, 2_000_000);
     await settle();
     expect(controller.stats().pointBudget).toBe(2_000_000);
-    controller.setPointBudget(1_000_000); // new ceiling
-    expect(controller.stats().pointBudget).toBe(1_000_000);
+    controller.setPointBudget(1_000_000);
+    expect(controller.stats().pointBudget).toBe(2_000_000);
+    controller.dispose();
+  });
+
+  it('grows past any former fixed ceiling while frames are fast', async () => {
+    // The old design pinned the budget at a configured point count; now only
+    // frame time and memory govern. With fast frames and ample memory the
+    // budget keeps climbing 25% per adjustment, sailing past 3M.
+    const { controller } = makeAdaptive(
+      SMALL_TREE,
+      { minSamples: 4, cooldownMs: 0 },
+      3_000_000,
+    );
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    vi.setSystemTime(400); // settled regime
+    for (let i = 0; i < 20; i += 1) {
+      vi.setSystemTime(400 + i);
+      controller.recordFrame(1); // far under the 16ms stationary target
+    }
+    expect(controller.stats().pointBudget).toBeGreaterThan(3_000_000);
     controller.dispose();
   });
 
@@ -569,6 +601,102 @@ describe('createLodController — adaptive budget', () => {
     await settle();
     for (let i = 0; i < 20; i += 1) controller.recordFrame(5000);
     expect(controller.stats().pointBudget).toBe(500);
+    controller.dispose();
+  });
+
+  // Below the 100k-resident-point measurement threshold the controller
+  // converts bytes to points with the 16 bytes/point fallback, so a byte
+  // budget of 16 * N caps selection at N points.
+  const BYTES_PER_POINT = 16;
+
+  it('the memory budget caps the adaptive budget', async () => {
+    const { controller, deferred } = makeAdaptive(
+      SMALL_TREE,
+      true,
+      2_000_000,
+      150 * BYTES_PER_POINT,
+    );
+    await settle();
+    expect(controller.stats().pointBudget).toBe(150);
+    controller.setCamera(VIEW);
+    await settle();
+    for (const d of deferred.values()) d.resolve();
+    await settle();
+    // Root (100 points) fits the 150-point ceiling; the 60-point children
+    // would overshoot and stay out.
+    expect(controller.stats().residentTiles).toBe(1);
+    expect(controller.stats().residentPoints).toBe(100);
+    controller.dispose();
+  });
+
+  it('the memory budget caps a fixed budget too', async () => {
+    const fake = makeFakeSource(SMALL_TREE);
+    const sink = collectBatches();
+    const controller = createLodController({
+      source: fake.source,
+      onTiles: sink.onTiles,
+      scheduleRender: sink.scheduleRender,
+      pointBudget: 1000,
+      selectionDelayMs: 0,
+      memory: 150 * BYTES_PER_POINT,
+    });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    for (const d of fake.deferred.values()) d.resolve();
+    await settle();
+    expect(controller.stats().pointBudget).toBe(150);
+    expect(controller.stats().residentTiles).toBe(1);
+    controller.dispose();
+  });
+
+  it('controllers on a shared pool split the byte budget and rebalance', async () => {
+    const pool = createMemoryPool({ totalBytes: 300 * BYTES_PER_POINT });
+    const first = makeFakeSource(SMALL_TREE);
+    const sink = collectBatches();
+    const controller = createLodController({
+      source: first.source,
+      onTiles: sink.onTiles,
+      scheduleRender: sink.scheduleRender,
+      adaptive: true,
+      selectionDelayMs: 0,
+      memory: pool,
+    });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    for (const d of first.deferred.values()) d.resolve();
+    await settle();
+    // Alone in the pool: the full 300-point ceiling fits all three tiles.
+    expect(controller.stats().memoryBudgetBytes).toBe(300 * BYTES_PER_POINT);
+    expect(controller.stats().residentTiles).toBe(3);
+
+    // A second cloud joins: shares drop to 150 points each and the first
+    // controller reselects down — N clouds must not multiply GPU memory by N.
+    // Advance past the settle window first: mid-interaction the controller
+    // deliberately retains still-visible tiles instead of dropping them.
+    vi.setSystemTime(1000);
+    const second = makeFakeSource(SMALL_TREE);
+    const other = createLodController({
+      source: second.source,
+      onTiles: () => {},
+      scheduleRender: () => {},
+      adaptive: true,
+      selectionDelayMs: 0,
+      memory: pool,
+    });
+    await settle();
+    expect(controller.stats().memoryBudgetBytes).toBe(150 * BYTES_PER_POINT);
+    expect(controller.stats().residentTiles).toBe(1);
+
+    // The second cloud leaves: the survivor's share grows back and the
+    // children are reselected.
+    other.dispose();
+    await settle();
+    for (const d of first.deferred.values()) d.resolve();
+    await settle();
+    expect(controller.stats().memoryBudgetBytes).toBe(300 * BYTES_PER_POINT);
+    expect(controller.stats().residentTiles).toBe(3);
     controller.dispose();
   });
 });
