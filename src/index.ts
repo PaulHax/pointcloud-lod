@@ -55,6 +55,15 @@ export {
 } from './controller';
 
 export {
+  createMemoryPool,
+  defaultMemoryBudgetBytes,
+  DEFAULT_MEMORY_BUDGET_BYTES,
+  type MemoryPool,
+  type MemoryPoolMember,
+  type MemoryPoolOptions,
+} from './memoryPool';
+
+export {
   createAdaptiveBudget,
   percentile,
   type AdaptiveBudget,

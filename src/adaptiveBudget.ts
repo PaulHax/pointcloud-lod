@@ -36,8 +36,10 @@ export interface AdaptiveBudgetOptions {
   /** Hard floor; the loop never drops a budget below this. Default 200_000. */
   minBudget?: number;
   /**
-   * Hard ceiling; the user quality control. The loop never raises a budget
-   * above this. Default 3_000_000.
+   * Hard ceiling. Default unbounded: frame time is the governor, and the LOD
+   * controller supplies a memory-derived ceiling via `setMaxBudget` — the
+   * loop cannot sense GPU memory, and frame time stays healthy right up
+   * until an allocation fails, so the ceiling must come from outside.
    */
   maxBudget?: number;
   /** Target frame time while the camera is settled, ms. Default 16 (~60 fps). */
@@ -93,8 +95,8 @@ export interface AdaptiveBudget {
   /** Current budget for a regime, without recording a sample. */
   budget(interacting: boolean): number;
   /**
-   * Raise or lower the ceiling (the user quality control). Budgets already
-   * above the new ceiling drop to it immediately.
+   * Raise or lower the ceiling (e.g. when the memory-derived cap moves).
+   * Budgets already above the new ceiling drop to it immediately.
    */
   setMaxBudget(points: number): void;
   /** Reset both tracks to the initial budget and clear their windows. */
@@ -105,7 +107,7 @@ export interface AdaptiveBudget {
 const DEFAULTS = {
   initialBudget: 2_000_000,
   minBudget: 200_000,
-  maxBudget: 3_000_000,
+  maxBudget: Number.POSITIVE_INFINITY,
   stationaryTargetMs: 16,
   interactionTargetMs: 33,
   windowSize: 30,

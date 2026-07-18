@@ -25,6 +25,11 @@ import {
 import { selectNodes } from './budget';
 import { createLruCache } from './lru';
 import {
+  createMemoryPool,
+  type MemoryPool,
+  type MemoryPoolMember,
+} from './memoryPool';
+import {
   ROOT_KEY,
   childKeys,
   keyFromString,
@@ -50,9 +55,10 @@ export interface LodControllerOptions {
    */
   scheduleRender: () => void;
   /**
-   * Maximum points resident at once. Default 2,000,000. With `adaptive`
-   * enabled this is the ceiling (the user quality control); the loop keeps the
-   * effective budget at or below it.
+   * Fixed visible-point budget when `adaptive` is off. Default 2,000,000.
+   * Ignored with `adaptive` enabled — there is no configured point ceiling;
+   * frame time and the memory budget are the governors. The memory-derived
+   * point cap applies in both modes.
    */
   pointBudget?: number;
   /**
@@ -61,6 +67,16 @@ export interface LodControllerOptions {
    * `pointBudget`. When enabled, feed each render's wall-time to `recordFrame`.
    */
   adaptive?: AdaptiveBudgetOptions | boolean;
+  /**
+   * GPU-memory budget for resident tile bytes. Pass a `MemoryPool` to share
+   * one byte budget across controllers on the same GPU (each gets an even
+   * share), a number of bytes for a private budget, or omit for a private
+   * budget sized by `defaultMemoryBudgetBytes()`. The controller converts its
+   * byte share into a point ceiling using the measured bytes-per-point of
+   * resident tiles, so the frame-time loop can never climb into an
+   * out-of-memory failure it has no way to sense.
+   */
+  memory?: MemoryPool | number;
   /**
    * How long after the last camera change the controller still treats itself
    * as "interacting" for adaptive budgeting, ms. Default 300.
@@ -84,10 +100,16 @@ export interface LodControllerOptions {
 export interface LodControllerStats {
   readonly residentTiles: number;
   readonly residentPoints: number;
+  /** Bytes of resident tile data (the GPU-memory proxy). */
+  readonly residentBytes: number;
   readonly cachedBytes: number;
   readonly inFlight: number;
   /** Effective visible-point budget currently driving selection. */
   readonly pointBudget: number;
+  /** This controller's byte share of its memory pool. */
+  readonly memoryBudgetBytes: number;
+  /** Memory-derived point ceiling the budget can never exceed. */
+  readonly memoryCeilingPoints: number;
   /** Whether the controller currently treats itself as interacting. */
   readonly interacting: boolean;
 }
@@ -96,8 +118,9 @@ export interface LodController {
   /** Update the camera; selection reruns debounced (leading edge immediate). */
   setCamera(view: CameraView): void;
   /**
-   * Set the visible-point budget. With `adaptive` enabled this sets the
-   * ceiling (the user quality control); otherwise it is the fixed budget.
+   * Set the fixed visible-point budget (non-adaptive mode only; with
+   * `adaptive` enabled the budget is governed by frame time and memory and
+   * this is a no-op).
    */
   setPointBudget(points: number): void;
   /**
@@ -150,24 +173,13 @@ export const createLodController = (
   let view: CameraView | null = null;
   let disposed = false;
 
-  // Adaptive budget (Phase 5): when enabled, `pointBudget` above is the
-  // ceiling and the loop moves the effective budget between a floor and it,
-  // tracking a target frame time. When disabled, `pointBudget` is fixed.
+  // Adaptive budget (Phase 5): when enabled, the loop moves the effective
+  // budget between a floor and the memory-derived ceiling, tracking a target
+  // frame time. When disabled, `pointBudget` is fixed (memory still caps it).
   const adaptiveBudget: AdaptiveBudget | null = options.adaptive
-    ? createAdaptiveBudget({
-        ...(typeof options.adaptive === 'object' ? options.adaptive : {}),
-        maxBudget: pointBudget,
-        initialBudget:
-          (typeof options.adaptive === 'object'
-            ? options.adaptive.initialBudget
-            : undefined) ?? pointBudget,
-        minBudget: Math.min(
-          (typeof options.adaptive === 'object'
-            ? options.adaptive.minBudget
-            : undefined) ?? 200_000,
-          pointBudget,
-        ),
-      })
+    ? createAdaptiveBudget(
+        typeof options.adaptive === 'object' ? options.adaptive : {},
+      )
     : null;
 
   let lastCameraChange = Number.NEGATIVE_INFINITY;
@@ -183,7 +195,7 @@ export const createLodController = (
 
   const currentBudget = (now: number): number =>
     adaptiveBudget === null
-      ? pointBudget
+      ? Math.min(pointBudget, memoryCeilingPoints())
       : adaptiveBudget.budget(isInteracting(now));
 
   // Bumped on setSource/dispose; every async continuation checks it.
@@ -196,8 +208,59 @@ export const createLodController = (
   /** Tiles currently delivered to the consumer. */
   const resident = new Map<string, TileData>();
   let residentPoints = 0;
+  let residentBytes = 0;
   /** Deselected tiles kept for cheap reselection. */
   const cache = createLruCache<string, TileData>({ maxBytes: cacheBytes });
+
+  // Memory governor: the byte share converts to a point ceiling via the
+  // measured bytes-per-point of resident tiles (falling back to an estimate
+  // until enough points are resident to measure). The frame-time loop cannot
+  // sense GPU memory — frames stay fast right up until an allocation fails —
+  // so this ceiling is what keeps "adaptive" from meaning "climb until the
+  // context is lost".
+  const memoryPool: MemoryPool =
+    typeof options.memory === 'object'
+      ? options.memory
+      : createMemoryPool(
+          typeof options.memory === 'number'
+            ? { totalBytes: options.memory }
+            : {},
+        );
+  const poolMember: MemoryPoolMember = memoryPool.register(() => {
+    if (disposed) return;
+    applyMemoryCeiling();
+    requestSelection();
+  });
+
+  const FALLBACK_BYTES_PER_POINT = 16;
+  const MEASURE_MIN_POINTS = 100_000;
+
+  const bytesPerPoint = (): number =>
+    residentPoints >= MEASURE_MIN_POINTS
+      ? residentBytes / residentPoints
+      : FALLBACK_BYTES_PER_POINT;
+
+  const memoryCeilingPoints = (): number =>
+    Math.max(1, Math.floor(poolMember.budgetBytes() / bytesPerPoint()));
+
+  // Last ceiling handed to the adaptive loop. The bytes-per-point estimate
+  // drifts as tiles arrive, and setMaxBudget discards a track's samples when
+  // it clamps a budget — a small dead-band keeps estimate jitter from
+  // re-clamping every selection.
+  let appliedCeiling = 0;
+  const applyMemoryCeiling = (): void => {
+    if (adaptiveBudget === null) return;
+    const ceiling = memoryCeilingPoints();
+    if (
+      appliedCeiling > 0 &&
+      Math.abs(ceiling - appliedCeiling) / appliedCeiling <= 0.02
+    ) {
+      return;
+    }
+    appliedCeiling = ceiling;
+    adaptiveBudget.setMaxBudget(ceiling);
+  };
+  applyMemoryCeiling();
 
   let target: ReadonlySet<string> = new Set<string>();
   const inFlight = new Map<string, AbortController>();
@@ -281,6 +344,7 @@ export const createLodController = (
           if (target.has(keyString)) {
             resident.set(keyString, tile);
             residentPoints += tile.pointCount;
+            residentBytes += tileBytes(tile);
             pendingAdded.push({ key, tile });
             scheduleFlush();
           } else {
@@ -300,6 +364,9 @@ export const createLodController = (
   const runSelection = (): void => {
     if (disposed || view === null) return;
     const now = Date.now();
+    // Re-derive the memory ceiling first: resident bytes (and with them the
+    // bytes-per-point estimate) changed since the last selection.
+    applyMemoryCeiling();
     const budget = currentBudget(now);
     const interacting = isInteracting(now);
     lastSelectionBudget = budget;
@@ -367,6 +434,7 @@ export const createLodController = (
       }
       resident.delete(keyString);
       residentPoints -= tile.pointCount;
+      residentBytes -= tileBytes(tile);
       cache.set(keyString, tile, tileBytes(tile));
       pendingRemoved.push(keyFromString(keyString));
     }
@@ -387,6 +455,7 @@ export const createLodController = (
         cache.delete(keyString);
         resident.set(keyString, cached);
         residentPoints += cached.pointCount;
+        residentBytes += tileBytes(cached);
         pendingAdded.push({ key: keyFromString(keyString), tile: cached });
       } else {
         toFetch.push(keyString);
@@ -468,6 +537,7 @@ export const createLodController = (
     }
     resident.clear();
     residentPoints = 0;
+    residentBytes = 0;
     pendingAdded = [];
     retainedResident = false;
   };
@@ -512,11 +582,10 @@ export const createLodController = (
 
     setPointBudget(points) {
       if (disposed) return;
+      // Adaptive mode has no configured point ceiling — frame time and the
+      // memory budget govern; a fixed point count has nothing to say.
+      if (adaptiveBudget !== null) return;
       pointBudget = points;
-      if (adaptiveBudget !== null) {
-        // The config budget is the ceiling; the loop owns the effective value.
-        adaptiveBudget.setMaxBudget(points);
-      }
       runSelection();
     },
 
@@ -552,9 +621,12 @@ export const createLodController = (
       return {
         residentTiles: resident.size,
         residentPoints,
+        residentBytes,
         cachedBytes: cache.totalBytes(),
         inFlight: inFlight.size,
         pointBudget: currentBudget(now),
+        memoryBudgetBytes: poolMember.budgetBytes(),
+        memoryCeilingPoints: memoryCeilingPoints(),
         interacting: isInteracting(now),
       };
     },
@@ -568,6 +640,7 @@ export const createLodController = (
       clearSettleTimer();
       const removed = [...resident.keys()].map(keyFromString);
       dropEverything();
+      poolMember.release();
       disposed = true;
       pendingRemoved = [];
       if (removed.length > 0) {
