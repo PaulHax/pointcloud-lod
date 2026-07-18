@@ -174,6 +174,9 @@ export const createLodController = (
   // Effective budget applied by the most recent selection; lets `recordFrame`
   // reselect only when the adaptive budget (or interaction regime) has moved.
   let lastSelectionBudget = pointBudget;
+  // True when the last selection kept a deselected-but-visible resident tile
+  // alive to avoid mid-gesture flashing; the settle reselect consolidates.
+  let retainedResident = false;
 
   const isInteracting = (now: number): boolean =>
     now - lastCameraChange < interactionSettleMs;
@@ -296,7 +299,9 @@ export const createLodController = (
 
   const runSelection = (): void => {
     if (disposed || view === null) return;
-    const budget = currentBudget(Date.now());
+    const now = Date.now();
+    const budget = currentBudget(now);
+    const interacting = isInteracting(now);
     lastSelectionBudget = budget;
     const currentView = view;
     const meta = source.metadata();
@@ -341,9 +346,25 @@ export const createLodController = (
     target = selection.selected;
     for (const key of neededPages) loadPage(key);
 
-    // Deselected residents move to the LRU (evicting only unselected tiles).
+    // Deselected residents move to the LRU (evicting only unselected tiles) —
+    // except mid-interaction: dropping a still-visible tile (a budget shrink
+    // or SSE change during a gesture) only to re-add it moments later reads as
+    // per-tile flashing. Retain in-frustum residents while interacting; the
+    // settle reselect consolidates once the camera stops. Off-frustum
+    // residents are invisible and drop immediately in either regime.
+    retainedResident = false;
     for (const [keyString, tile] of [...resident]) {
       if (target.has(keyString)) continue;
+      if (
+        interacting &&
+        cubeIntersectsFrustum(
+          planes,
+          nodeCube(meta.cube, keyFromString(keyString)),
+        )
+      ) {
+        retainedResident = true;
+        continue;
+      }
       resident.delete(keyString);
       residentPoints -= tile.pointCount;
       cache.set(keyString, tile, tileBytes(tile));
@@ -384,9 +405,11 @@ export const createLodController = (
 
   let lastSelection = Number.NEGATIVE_INFINITY;
   let selectionTimer: ReturnType<typeof setTimeout> | null = null;
-  // Fires once the camera has been still for interactionSettleMs, so the
-  // interaction→stationary budget flip is applied even when the host renders
-  // on demand and stops calling recordFrame after the last interaction frame.
+  // Fires once the camera has been still for interactionSettleMs, so that
+  // (a) the interaction→stationary budget flip is applied even when the host
+  // renders on demand and stops calling recordFrame after the last
+  // interaction frame, and (b) residents retained mid-gesture to avoid
+  // flashing are consolidated against the settled selection.
   let settleTimer: ReturnType<typeof setTimeout> | null = null;
 
   const clearSettleTimer = (): void => {
@@ -401,9 +424,13 @@ export const createLodController = (
     settleTimer = setTimeout(() => {
       settleTimer = null;
       if (disposed) return;
-      // The regime has flipped to stationary; if that changed the effective
-      // budget from the last selection, reselect to apply settled detail.
-      if (currentBudget(Date.now()) !== lastSelectionBudget) runSelection();
+      // The regime has flipped to stationary; reselect if that changed the
+      // effective budget from the last selection, or if the last selection
+      // retained tiles it would otherwise have dropped (mid-gesture
+      // anti-flashing) — the settled pass applies the real selection.
+      if (currentBudget(Date.now()) !== lastSelectionBudget || retainedResident) {
+        runSelection();
+      }
     }, interactionSettleMs);
   };
 
@@ -442,6 +469,7 @@ export const createLodController = (
     resident.clear();
     residentPoints = 0;
     pendingAdded = [];
+    retainedResident = false;
   };
 
   // Hosts feed the camera on every render, unconditionally; an unchanged view
@@ -476,8 +504,9 @@ export const createLodController = (
       view = nextView;
       lastCameraChange = Date.now();
       // Re-arm on every camera change so the timer only fires once the camera
-      // has been still for the full settle window.
-      if (adaptiveBudget !== null) armSettleTimer();
+      // has been still for the full settle window. Armed even without an
+      // adaptive budget: retained-resident consolidation needs it too.
+      armSettleTimer();
       requestSelection();
     },
 
