@@ -384,6 +384,28 @@ export const createLodController = (
 
   let lastSelection = Number.NEGATIVE_INFINITY;
   let selectionTimer: ReturnType<typeof setTimeout> | null = null;
+  // Fires once the camera has been still for interactionSettleMs, so the
+  // interaction→stationary budget flip is applied even when the host renders
+  // on demand and stops calling recordFrame after the last interaction frame.
+  let settleTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearSettleTimer = (): void => {
+    if (settleTimer !== null) {
+      clearTimeout(settleTimer);
+      settleTimer = null;
+    }
+  };
+
+  const armSettleTimer = (): void => {
+    clearSettleTimer();
+    settleTimer = setTimeout(() => {
+      settleTimer = null;
+      if (disposed) return;
+      // The regime has flipped to stationary; if that changed the effective
+      // budget from the last selection, reselect to apply settled detail.
+      if (currentBudget(Date.now()) !== lastSelectionBudget) runSelection();
+    }, interactionSettleMs);
+  };
 
   const requestSelection = (): void => {
     const now = Date.now();
@@ -430,6 +452,9 @@ export const createLodController = (
       if (disposed) return;
       view = nextView;
       lastCameraChange = Date.now();
+      // Re-arm on every camera change so the timer only fires once the camera
+      // has been still for the full settle window.
+      if (adaptiveBudget !== null) armSettleTimer();
       requestSelection();
     },
 
@@ -457,6 +482,7 @@ export const createLodController = (
 
     setSource(nextSource) {
       if (disposed) return;
+      clearSettleTimer();
       dropEverything();
       adaptiveBudget?.reset();
       source = nextSource;
@@ -487,6 +513,7 @@ export const createLodController = (
         clearTimeout(selectionTimer);
         selectionTimer = null;
       }
+      clearSettleTimer();
       const removed = [...resident.keys()].map(keyFromString);
       dropEverything();
       disposed = true;

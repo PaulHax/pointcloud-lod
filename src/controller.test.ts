@@ -459,6 +459,44 @@ describe('createLodController — adaptive budget', () => {
     controller.dispose();
   });
 
+  it('applies the stationary budget after the camera settles, with no further frames', async () => {
+    // Same millions-scaled tree: 3M fits all three tiles, 2.25M only two.
+    const bigTree: Record<string, FakeEntry> = {
+      '0-0-0-0': { pointCount: 1_000_000, children: ['1-0-0-0', '1-1-0-0'] },
+      '1-0-0-0': { pointCount: 1_000_000 },
+      '1-1-0-0': { pointCount: 1_000_000 },
+    };
+    const { controller, deferred } = makeAdaptive(
+      bigTree,
+      { minSamples: 4 },
+      3_000_000,
+    );
+    await settle();
+    controller.setCamera(VIEW); // t=0: arms the settle timer (fires at 300ms)
+    await settle();
+    for (const d of deferred.values()) d.resolve();
+    await settle();
+    expect(controller.stats().residentTiles).toBe(3);
+
+    // Slow interaction frames shrink the interaction budget → one tile drops.
+    for (let i = 0; i < 4; i += 1) {
+      vi.setSystemTime(i);
+      controller.recordFrame(80);
+    }
+    await settle();
+    expect(controller.stats().residentTiles).toBe(2);
+
+    // No further frames — the host renders on demand and goes quiet. Advancing
+    // past the settle window fires the settle timer, which re-applies the
+    // (untouched) stationary 3M budget and restores the third tile from cache.
+    vi.advanceTimersByTime(400);
+    await settle();
+    expect(controller.stats().interacting).toBe(false);
+    expect(controller.stats().pointBudget).toBe(3_000_000);
+    expect(controller.stats().residentTiles).toBe(3);
+    controller.dispose();
+  });
+
   it('setPointBudget lowers the ceiling and clamps the effective budget', async () => {
     const { controller } = makeAdaptive(SMALL_TREE, true, 2_000_000);
     await settle();

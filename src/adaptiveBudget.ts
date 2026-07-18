@@ -150,9 +150,16 @@ export const createAdaptiveBudget = (
   const maxStep = Math.max(0, options.maxStep ?? DEFAULTS.maxStep);
   const cooldownMs = Math.max(0, options.cooldownMs ?? DEFAULTS.cooldownMs);
   const minSamples = Math.max(1, Math.floor(options.minSamples ?? DEFAULTS.minSamples));
+  // A window smaller than minSamples could never reach the threshold, which
+  // would silently freeze the loop; cap the requirement at the window size.
+  const effectiveMinSamples = Math.min(minSamples, windowSize);
 
-  const clamp = (points: number): number =>
-    Math.round(Math.min(Math.max(points, minBudget), maxBudget));
+  const clamp = (points: number): number => {
+    // The ceiling wins if it was lowered below the floor (a low quality
+    // setting): honor the requested ceiling exactly rather than the floor.
+    const lower = Math.min(minBudget, maxBudget);
+    return Math.round(Math.min(Math.max(points, lower), maxBudget));
+  };
 
   const initialBudget = clamp(options.initialBudget ?? DEFAULTS.initialBudget);
 
@@ -165,11 +172,15 @@ export const createAdaptiveBudget = (
     interacting ? interactionTargetMs : stationaryTargetMs;
 
   const adjust = (track: Track, targetMs: number, now: number): void => {
-    if (track.samples.length < minSamples) return;
+    if (track.samples.length < effectiveMinSamples) return;
     if (now - track.lastAdjust < cooldownMs) return;
 
     const estimate = percentile(track.samples, percentileP);
-    if (!Number.isFinite(estimate) || estimate <= 0) return;
+    // recordFrame already rejected non-finite/negative durations, so estimate
+    // is finite and >= 0. A 0 ms estimate is legitimate (very fast frames) and
+    // must be allowed to grow the budget — only the grow branch sees it, where
+    // target/0 clamps to the +maxStep cap — so bail only on non-finite here.
+    if (!Number.isFinite(estimate)) return;
 
     const slowLimit = targetMs * (1 + hysteresis);
     const fastLimit = targetMs * (1 - hysteresis);
@@ -215,7 +226,9 @@ export const createAdaptiveBudget = (
     },
 
     setMaxBudget(points) {
-      maxBudget = Math.max(minBudget, Math.round(points));
+      // Don't pin the ceiling up to the floor — a low ceiling must win so the
+      // effective budget never exceeds the user's requested quality.
+      maxBudget = Math.max(1, Math.round(points));
       stationary.budget = clamp(stationary.budget);
       interaction.budget = clamp(interaction.budget);
     },
@@ -237,7 +250,8 @@ export const createAdaptiveBudget = (
           track.samples.length > 0 ? percentile(track.samples, percentileP) : null,
       });
       return {
-        minBudget,
+        // Report the effective floor: a ceiling lowered below it wins.
+        minBudget: Math.min(minBudget, maxBudget),
         maxBudget,
         stationary: trackStats(stationary),
         interaction: trackStats(interaction),
