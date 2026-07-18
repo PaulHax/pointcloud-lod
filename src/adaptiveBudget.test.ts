@@ -167,6 +167,31 @@ describe('createAdaptiveBudget', () => {
     expect(grown).toBeGreaterThan(1_000_000);
   });
 
+  it('a ceiling lowered below the floor wins (budget never exceeds it)', () => {
+    const budget = createAdaptiveBudget(OPTS); // floor 200k, start 2M
+    budget.setMaxBudget(100_000); // below the floor
+    expect(budget.budget(false)).toBe(100_000);
+    expect(budget.budget(true)).toBe(100_000);
+    expect(budget.stats().maxBudget).toBe(100_000);
+    expect(budget.stats().minBudget).toBe(100_000); // effective floor yields
+    // Growth stays capped at the low ceiling.
+    expect(feed(budget, 2, false, 40, 0, 1000)).toBe(100_000);
+  });
+
+  it('grows on 0 ms frames instead of freezing', () => {
+    // An integer-ms host reads sub-millisecond frames as 0; those are valid
+    // samples and must still let the budget grow toward the ceiling.
+    const budget = createAdaptiveBudget({ ...OPTS, initialBudget: 1_000_000 });
+    expect(feed(budget, 0, false, 8)).toBe(1_000_000 * 1.25); // one step up
+  });
+
+  it('adapts when windowSize is below minSamples (no dead zone)', () => {
+    const budget = createAdaptiveBudget({ ...OPTS, windowSize: 5, minSamples: 8 });
+    // The window caps at 5 (< minSamples 8); effectiveMinSamples drops to 5 so
+    // the loop still acts instead of freezing.
+    expect(feed(budget, 40, false, 6)).toBe(2_000_000 * 0.75);
+  });
+
   it('ignores non-finite and negative frame durations', () => {
     const budget = createAdaptiveBudget(OPTS);
     for (let i = 0; i < 20; i += 1) {
