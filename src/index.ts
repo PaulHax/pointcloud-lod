@@ -55,6 +55,17 @@ export {
 } from './controller';
 
 export {
+  createAdaptiveBudget,
+  percentile,
+  type AdaptiveBudget,
+  type AdaptiveBudgetOptions,
+  type AdaptiveBudgetStats,
+  type AdaptiveBudgetTrackStats,
+  type BudgetRegime,
+  type RecordFrameOptions,
+} from './adaptiveBudget';
+
+export {
   createHttpTileSource,
   parsePct1,
   RevisionGoneError,
