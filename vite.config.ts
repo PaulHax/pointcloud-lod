@@ -7,9 +7,14 @@ const stub = (name: string): string =>
 export default defineConfig({
   build: {
     lib: {
-      entry: 'src/index.ts',
+      // Two entries: the core is vtk.js-free, the adapter imports vtk.js at
+      // module scope. Keeping them separate lets core-only consumers install
+      // without the peer.
+      entry: {
+        index: 'src/index.ts',
+        rendererAdapter: 'src/rendererAdapter.ts',
+      },
       formats: ['es'],
-      fileName: 'index',
     },
     rollupOptions: {
       // Never bundle the vtk.js peer or the copc reader; consumers resolve them.
