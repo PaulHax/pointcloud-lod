@@ -219,6 +219,64 @@ describe('createLodController', () => {
     controller.dispose();
   });
 
+  it('ignores a superseded fetch that resolves after its replacement', async () => {
+    // Aborting is advisory: the COPC getter takes no signal, so a superseded
+    // request still resolves. The stale continuation must not retire the live
+    // in-flight slot (which would uncap fetchConcurrency) or double-count
+    // resident points.
+    const resolvers: Array<(tile: TileData) => void> = [];
+    const source: TileSource = {
+      metadata: () => METADATA,
+      async nodes() {
+        return [
+          {
+            key: { level: 0, x: 0, y: 0, z: 0 },
+            pointCount: 100,
+            children: [],
+          },
+        ];
+      },
+      // Deliberately ignores opts.signal: models an uncancellable getter.
+      loadTile: () => new Promise<TileData>((r) => resolvers.push(r)),
+    };
+    const sink = collectBatches();
+    const controller = createLodController({
+      source,
+      onTiles: sink.onTiles,
+      scheduleRender: sink.scheduleRender,
+      pointBudget: 1000,
+      selectionDelayMs: 0,
+    });
+
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    expect(resolvers).toHaveLength(1);
+
+    // Look away (aborts, but the fetch stays live), then look back: the same
+    // key is refetched into a fresh in-flight slot.
+    controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    expect(resolvers).toHaveLength(2);
+    expect(controller.stats().inFlight).toBe(1);
+
+    // The stale first fetch lands. It must not free the live slot.
+    resolvers[0]!(makeTile(100));
+    await settle();
+    expect(controller.stats().inFlight).toBe(1);
+    expect(controller.stats().residentTiles).toBe(0);
+
+    // The live fetch still completes normally, exactly once.
+    resolvers[1]!(makeTile(100));
+    await settle();
+    expect(controller.stats().inFlight).toBe(0);
+    expect(controller.stats().residentTiles).toBe(1);
+    expect(controller.stats().residentPoints).toBe(100);
+    controller.dispose();
+  });
+
   it('reuses cached tiles without refetching', async () => {
     const { controller, deferred, loadCalls } = makeController(SMALL_TREE);
     await settle();

@@ -340,8 +340,18 @@ export const createLodController = (
         .loadTile(key, { signal: abort.signal })
         .then((tile) => {
           if (disposed || requestEpoch !== epoch) return;
+          // Aborting is advisory: the COPC getter takes no signal, so a
+          // superseded request still resolves. Only the continuation that owns
+          // the current in-flight slot may retire it or claim residency —
+          // otherwise a stale arrival frees a live slot (uncapping
+          // fetchConcurrency) and double-counts resident points and bytes.
+          if (inFlight.get(keyString) !== abort) {
+            cache.set(keyString, tile, tileBytes(tile));
+            pump();
+            return;
+          }
           inFlight.delete(keyString);
-          if (target.has(keyString)) {
+          if (target.has(keyString) && !resident.has(keyString)) {
             resident.set(keyString, tile);
             residentPoints += tile.pointCount;
             residentBytes += tileBytes(tile);
@@ -354,7 +364,7 @@ export const createLodController = (
         })
         .catch((error) => {
           if (disposed || requestEpoch !== epoch) return;
-          inFlight.delete(keyString);
+          if (inFlight.get(keyString) === abort) inFlight.delete(keyString);
           if (!isAbortError(error)) onError(error);
           pump();
         });
