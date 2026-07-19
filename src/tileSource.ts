@@ -16,11 +16,6 @@ export interface TileSourceMetadata {
   readonly cube: Cube;
   /** Point spacing at the root level; halves per level. */
   readonly spacing: number;
-  /**
-   * Optional world offset applied to tile origins (e.g. a large UTM offset
-   * kept out of Float32 tile-local coordinates).
-   */
-  readonly offset?: Vec3;
 }
 
 /** One hierarchy entry, as delivered by a hierarchy page. */
