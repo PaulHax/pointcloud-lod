@@ -3,7 +3,7 @@
 Octree LOD point-cloud streaming for [vtk.js](https://kitware.github.io/vtk-js/).
 
 **Status: early development.** APIs are provisional and will change without
-notice. Not published to npm yet — install straight from GitHub (see below).
+notice.
 
 ## What it is
 
@@ -13,18 +13,30 @@ the current camera are fetched, decoded, and kept resident.
 
 ## Install
 
-Install from GitHub. The `prepare` script builds `dist/` on install, so a
-git reference works with no extra steps:
+```bash
+npm install pointcloud-lod
+```
+
+To track unreleased work, install from GitHub instead — the `prepare` script
+builds `dist/` on install, so a git reference works with no extra steps:
 
 ```bash
-npm install github:PaulHax/pointcloud-lod
-# or pin a commit for reproducible builds:
 npm install github:PaulHax/pointcloud-lod#<commit-sha>
 ```
 
-`@kitware/vtk.js` (`>=36`) is an **optional** peer dependency: it is only
-needed for the renderer adapter. The tile sources, LOD controller, and camera
-math have no vtk.js dependency and run standalone (e.g. in a worker or a test).
+### Requirements
+
+The package has two entry points, and only one of them needs vtk.js:
+
+- **`pointcloud-lod`** — tile sources, LOD controller, and camera math. No
+  vtk.js dependency; runs standalone (e.g. in a worker or a test).
+- **`pointcloud-lod/vtk`** — the renderer adapter. This requires
+  `vtkPointGaussianMapper`, which is **not present in any released
+  `@kitware/vtk.js`**. Until it lands upstream you must build vtk.js from
+  [the fork](https://github.com/PaulHax/vtk-js) at commit `804faaf46b`.
+
+vtk.js is deliberately not declared as a peer dependency: no published version
+satisfies the adapter, so any semver range would be false.
 
 ## Usage
 
@@ -32,8 +44,8 @@ math have no vtk.js dependency and run standalone (e.g. in a worker or a test).
 import {
   createCopcTileSource,
   createLodController,
-  createRendererAdapter,
 } from "pointcloud-lod";
+import { createRendererAdapter } from "pointcloud-lod/vtk";
 
 // A coalescing render request the host owns (must not render synchronously
 // more than once per event-loop turn).
@@ -96,8 +108,9 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
   vtk.js actors, one `vtkPolyData` + `vtkPointGaussianMapper` per tile
   (one gl.POINTS vertex per point, no cell topology), with an anchor base
   matrix composed onto each tile's origin translation. This is the only
-  module importing `@kitware/vtk.js`; the `vtkPointGaussianMapper` it uses
-  is being upstreamed to vtk.js.
+  module importing `@kitware/vtk.js`, which is why it ships under a separate
+  `pointcloud-lod/vtk` entry point. The `vtkPointGaussianMapper` it uses is
+  not yet in a released vtk.js — see [Requirements](#requirements).
 
 Camera math (`frustumPlanes`, `screenSpaceError`) is pure and
 renderer-agnostic: the controller takes a view-projection matrix and camera
