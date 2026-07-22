@@ -40,6 +40,16 @@ export interface NodeSelection {
   readonly selected: ReadonlySet<string>;
   /** Sum of `pointCount` over the selection; never exceeds the budget. */
   readonly totalPoints: number;
+  /** Candidates examined, including entries unavailable from the hierarchy. */
+  readonly consideredNodes: number;
+  /** Candidates for which `getNode` returned hierarchy data. */
+  readonly availableNodes: number;
+  /** Available nodes admitted to the parent-closed selection. */
+  readonly selectedNodes: number;
+  /** Available nodes rejected only because their points did not fit. */
+  readonly budgetSkippedNodes: number;
+  /** Points stored in the nodes rejected only by the point budget. */
+  readonly budgetSkippedPoints: number;
 }
 
 export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
@@ -47,9 +57,14 @@ export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
 
   const selected = new Set<string>();
   let totalPoints = 0;
+  let consideredNodes = 0;
+  let availableNodes = 0;
+  let budgetSkippedNodes = 0;
+  let budgetSkippedPoints = 0;
   let candidates: VoxelKey[] = [root];
 
   while (candidates.length > 0) {
+    consideredNodes += candidates.length;
     const ranked = candidates
       .map((key) => ({ key, node: getNode(key), priority: priority(key) }))
       .filter(
@@ -57,12 +72,15 @@ export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
           c.node !== undefined,
       )
       .sort((a, b) => b.priority - a.priority);
+    availableNodes += ranked.length;
 
     const nextCandidates: VoxelKey[] = [];
     for (const { key, node } of ranked) {
       if (totalPoints + node.pointCount > pointBudget) {
         // Skipped: its subtree stays out (parent invariant), but cheaper
         // siblings later in the ranking may still fit.
+        budgetSkippedNodes += 1;
+        budgetSkippedPoints += node.pointCount;
         continue;
       }
       selected.add(keyToString(key));
@@ -72,7 +90,15 @@ export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
     candidates = nextCandidates;
   }
 
-  return { selected, totalPoints };
+  return {
+    selected,
+    totalPoints,
+    consideredNodes,
+    availableNodes,
+    selectedNodes: selected.size,
+    budgetSkippedNodes,
+    budgetSkippedPoints,
+  };
 };
 
 /** Convenience: a `HierarchyNode.children` list of all 8 octree children. */

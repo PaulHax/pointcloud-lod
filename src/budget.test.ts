@@ -39,6 +39,13 @@ describe('selectNodes', () => {
 
     expect([...result.selected]).toEqual(['0-0-0-0']);
     expect(result.totalPoints).toBe(100);
+    expect(result).toMatchObject({
+      consideredNodes: 1,
+      availableNodes: 1,
+      selectedNodes: 1,
+      budgetSkippedNodes: 0,
+      budgetSkippedPoints: 0,
+    });
   });
 
   it('selects nothing when the root alone exceeds the budget', () => {
@@ -51,6 +58,8 @@ describe('selectNodes', () => {
 
     expect(result.selected.size).toBe(0);
     expect(result.totalPoints).toBe(0);
+    expect(result.budgetSkippedNodes).toBe(1);
+    expect(result.budgetSkippedPoints).toBe(100);
   });
 
   it('selects a whole small tree that fits the budget', () => {
@@ -90,6 +99,8 @@ describe('selectNodes', () => {
       new Set(['0-0-0-0', '1-1-0-0', '1-0-1-0']),
     );
     expect(result.totalPoints).toBe(220);
+    expect(result.budgetSkippedNodes).toBe(1);
+    expect(result.budgetSkippedPoints).toBe(60);
   });
 
   it('a skipped node cannot fit later even if siblings left room', () => {
@@ -169,6 +180,8 @@ describe('selectNodes', () => {
 
     expect(result.selected).toEqual(new Set(['0-0-0-0']));
     expect(result.totalPoints).toBe(10);
+    expect(result.consideredNodes).toBe(2);
+    expect(result.availableNodes).toBe(1);
   });
 
   it('returns empty for an unknown root', () => {

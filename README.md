@@ -9,7 +9,10 @@ notice.
 
 A standalone library that streams massive point clouds into vtk.js scenes by
 walking an octree level-of-detail hierarchy: only the tiles that matter for
-the current camera are fetched, decoded, and kept resident.
+the current camera are fetched, decoded, and submitted to the renderer. Decoded
+CPU payloads, renderer/GPU residency, and active draw are separate lifecycle
+states; hiding a controller releases renderer resources while its byte-bounded
+decoded cache remains reusable.
 
 ## Install
 
@@ -41,10 +44,7 @@ satisfies the adapter, so any semver range would be false.
 ## Usage
 
 ```js
-import {
-  createCopcTileSource,
-  createLodController,
-} from "pointcloud-lod";
+import { createCopcTileSource, createLodController } from "pointcloud-lod";
 import { createRendererAdapter } from "pointcloud-lod/vtk";
 
 // A coalescing render request the host owns (must not render synchronously
@@ -53,7 +53,9 @@ const scheduleRender = () => renderWindow.render();
 
 // 1. A tile source. COPC reads a static .copc.laz over HTTP Range requests,
 //    so any static file host works with no tile server:
-const source = await createCopcTileSource({ source: "https://host/cloud.copc.laz" });
+const source = await createCopcTileSource({
+  source: "https://host/cloud.copc.laz",
+});
 
 // 2. A renderer adapter turns tile batches into vtk.js actors in your renderer.
 const adapter = createRendererAdapter({ renderer, scheduleRender });

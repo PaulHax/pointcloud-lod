@@ -11,20 +11,17 @@
  * render pacing — e.g. a shared-context integration).
  */
 
-import vtkDataArray from '@kitware/vtk.js/Common/Core/DataArray';
-import vtkPolyData from '@kitware/vtk.js/Common/DataModel/PolyData';
-import vtkActor from '@kitware/vtk.js/Rendering/Core/Actor';
-import vtkPointGaussianMapper from '@kitware/vtk.js/Rendering/Core/PointGaussianMapper';
+import vtkDataArray from "@kitware/vtk.js/Common/Core/DataArray";
+import vtkPolyData from "@kitware/vtk.js/Common/DataModel/PolyData";
+import vtkActor from "@kitware/vtk.js/Rendering/Core/Actor";
+import vtkPointGaussianMapper from "@kitware/vtk.js/Rendering/Core/PointGaussianMapper";
 
-import type { TileBatch } from './controller';
-import { keyToString, pointSpacing, type Vec3, type VoxelKey } from './octree';
-import type { TileData } from './tileSource';
+import type { TileBatch } from "./controller";
+import { keyToString, pointSpacing, type Vec3, type VoxelKey } from "./octree";
+import type { TileData } from "./tileSource";
 
 /** Column-major 4x4 multiply: out = a · b. */
-const multiplyMat4 = (
-  a: ArrayLike<number>,
-  b: ArrayLike<number>,
-): number[] => {
+const multiplyMat4 = (a: ArrayLike<number>, b: ArrayLike<number>): number[] => {
   const out = new Array<number>(16);
   for (let column = 0; column < 4; column += 1) {
     for (let row = 0; row < 4; row += 1) {
@@ -43,7 +40,22 @@ const IDENTITY: readonly number[] = [
 ];
 
 const translation = (origin: Vec3): number[] => [
-  1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, origin[0], origin[1], origin[2], 1,
+  1,
+  0,
+  0,
+  0,
+  0,
+  1,
+  0,
+  0,
+  0,
+  0,
+  1,
+  0,
+  origin[0],
+  origin[1],
+  origin[2],
+  1,
 ];
 
 /**
@@ -62,7 +74,10 @@ export interface WorldSizing {
 
 export interface RendererAdapterOptions {
   /** vtk.js renderer the tile actors are added to. */
-  renderer: { addActor(actor: unknown): void; removeActor(actor: unknown): void };
+  renderer: {
+    addActor(actor: unknown): void;
+    removeActor(actor: unknown): void;
+  };
   /** Coalescing render request (see module doc). */
   scheduleRender: () => void;
   /** Initial point size in pixels. Default 2. */
@@ -86,8 +101,24 @@ export interface RendererAdapter {
   setWorldSizing(sizing: WorldSizing | null): void;
   setVisible(visible: boolean): void;
   tileCount(): number;
+  /** Renderer-owned resource and active-draw accounting. */
+  stats(): RendererAdapterStats;
   /** Remove and release every tile actor. Idempotent. */
   dispose(): void;
+}
+
+export interface RendererAdapterStats {
+  /** Tiles with live polydata, mapper, and actor resources. */
+  readonly gpuResidentTiles: number;
+  readonly gpuResidentPoints: number;
+  /**
+   * Tracked vertex/color buffer bytes plus a small per-tile object estimate;
+   * driver allocation overhead is not observable through WebGL.
+   */
+  readonly gpuResidentBytes: number;
+  /** Tiles and points whose actors currently participate in drawing. */
+  readonly activeDrawTiles: number;
+  readonly activeDrawPoints: number;
 }
 
 interface TileActors {
@@ -96,6 +127,8 @@ interface TileActors {
   polyData: any;
   origin: Vec3;
   level: number;
+  pointCount: number;
+  resourceBytes: number;
 }
 
 export const createRendererAdapter = (
@@ -125,7 +158,7 @@ export const createRendererAdapter = (
     if (tile.rgb !== undefined) {
       polyData.getPointData().setScalars(
         vtkDataArray.newInstance({
-          name: 'RGB',
+          name: "RGB",
           values: tile.rgb,
           numberOfComponents: 3,
         }),
@@ -140,7 +173,16 @@ export const createRendererAdapter = (
     actor.getProperty().setPointSize(pointSize);
     actor.setVisibility(visible);
     actor.setUserMatrix(tileMatrix(tile.origin));
-    return { actor, mapper, polyData, origin: tile.origin, level: key.level };
+    return {
+      actor,
+      mapper,
+      polyData,
+      origin: tile.origin,
+      level: key.level,
+      pointCount: tile.pointCount,
+      resourceBytes:
+        tile.positions.byteLength + (tile.rgb?.byteLength ?? 0) + 64,
+    };
   };
 
   const releaseTile = (entry: TileActors): void => {
@@ -218,6 +260,22 @@ export const createRendererAdapter = (
 
     tileCount() {
       return tiles.size;
+    },
+
+    stats() {
+      let gpuResidentPoints = 0;
+      let gpuResidentBytes = 0;
+      for (const entry of tiles.values()) {
+        gpuResidentPoints += entry.pointCount;
+        gpuResidentBytes += entry.resourceBytes;
+      }
+      return {
+        gpuResidentTiles: tiles.size,
+        gpuResidentPoints,
+        gpuResidentBytes,
+        activeDrawTiles: visible ? tiles.size : 0,
+        activeDrawPoints: visible ? gpuResidentPoints : 0,
+      };
     },
 
     dispose() {
