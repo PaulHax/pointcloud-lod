@@ -1,5 +1,6 @@
 import {
   createAdaptiveBudget,
+  DEFAULTS,
   type AdaptiveBudget,
   type AdaptiveBudgetOptions,
   type AdaptiveBudgetStats,
@@ -80,7 +81,10 @@ export const createViewGovernor = (
     ...budgetOptions
   } = options;
   const vtkFrameFraction = Math.min(Math.max(rawVtkFraction, 0.05), 1);
-  const emergencyCooldownMs = Math.max(0, budgetOptions.cooldownMs ?? 400);
+  const emergencyCooldownMs = Math.max(
+    0,
+    budgetOptions.cooldownMs ?? DEFAULTS.cooldownMs,
+  );
   const budget: AdaptiveBudget = createAdaptiveBudget(budgetOptions);
   const members = new Set<MemberState>();
   let interactionDepth = 0;
@@ -204,8 +208,8 @@ export const createViewGovernor = (
         return;
       }
       const target = inInteractionRegime
-        ? budgetOptions.interactionTargetMs ?? 33
-        : budgetOptions.stationaryTargetMs ?? 16;
+        ? budgetOptions.interactionTargetMs ?? DEFAULTS.interactionTargetMs
+        : budgetOptions.stationaryTargetMs ?? DEFAULTS.stationaryTargetMs;
       const observedMs = Math.max(...candidates);
       // Emergency cuts protect live gestures. Once input has stopped, isolated
       // long tasks and missed frames use the sampled stationary controller so

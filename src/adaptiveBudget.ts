@@ -36,13 +36,6 @@ export interface AdaptiveBudgetOptions {
   interactionInitialBudget?: number;
   /** Hard floor; the loop never drops a budget below this. Default 200_000. */
   minBudget?: number;
-  /**
-   * Hard ceiling. Default unbounded: frame time is the governor. The loop
-   * cannot sense GPU memory — frame time stays healthy right up until an
-   * allocation fails — so a memory-derived ceiling must come from outside,
-   * either here or through `setMaxBudget`.
-   */
-  maxBudget?: number;
   /** Target frame time while the camera is settled, ms. Default 16 (~60 fps). */
   stationaryTargetMs?: number;
   /** Target frame time while the camera moves, ms. Default 33 (~30 fps). */
@@ -76,7 +69,6 @@ export interface AdaptiveBudgetTrackStats {
 
 export interface AdaptiveBudgetStats {
   readonly minBudget: number;
-  readonly maxBudget: number;
   readonly stationary: AdaptiveBudgetTrackStats;
   readonly interaction: AdaptiveBudgetTrackStats;
 }
@@ -102,23 +94,16 @@ export interface AdaptiveBudget {
    * Always clears timing samples from the preceding run.
    */
   restartAt(interacting: boolean, points: number, now: number): number;
-  /**
-   * Raise or lower the ceiling (e.g. when the memory-derived cap moves).
-   * Budgets already above the new ceiling drop to it immediately.
-   */
-  setMaxBudget(points: number): void;
   /** Immediately reduce one track, bypassing sample and cooldown thresholds. */
   reduceNow(interacting: boolean, factor?: number): number;
-  /** Reset both tracks to the initial budget and clear their windows. */
-  reset(): void;
   stats(): AdaptiveBudgetStats;
 }
 
-const DEFAULTS = {
+/** Shared so the governor's thresholds cannot drift from the loop's. */
+export const DEFAULTS = {
   initialBudget: 2_000_000,
   interactionInitialBudget: 1_000_000,
   minBudget: 200_000,
-  maxBudget: Number.POSITIVE_INFINITY,
   stationaryTargetMs: 16,
   interactionTargetMs: 33,
   windowSize: 30,
@@ -153,7 +138,6 @@ export const createAdaptiveBudget = (
   options: AdaptiveBudgetOptions = {},
 ): AdaptiveBudget => {
   const minBudget = Math.max(1, options.minBudget ?? DEFAULTS.minBudget);
-  let maxBudget = Math.max(minBudget, options.maxBudget ?? DEFAULTS.maxBudget);
   const stationaryTargetMs =
     options.stationaryTargetMs ?? DEFAULTS.stationaryTargetMs;
   const interactionTargetMs =
@@ -175,12 +159,8 @@ export const createAdaptiveBudget = (
   // would silently freeze the loop; cap the requirement at the window size.
   const effectiveMinSamples = Math.min(minSamples, windowSize);
 
-  const clamp = (points: number): number => {
-    // The ceiling wins if it was lowered below the floor (a low quality
-    // setting): honor the requested ceiling exactly rather than the floor.
-    const lower = Math.min(minBudget, maxBudget);
-    return Math.round(Math.min(Math.max(points, lower), maxBudget));
-  };
+  const clamp = (points: number): number =>
+    Math.round(Math.max(points, minBudget));
 
   const initialBudget = clamp(options.initialBudget ?? DEFAULTS.initialBudget);
   const interactionInitialBudget = clamp(
@@ -257,21 +237,6 @@ export const createAdaptiveBudget = (
       return track.budget;
     },
 
-    setMaxBudget(points) {
-      // Don't pin the ceiling up to the floor — a low ceiling must win so the
-      // effective budget never exceeds the user's requested quality.
-      maxBudget = Math.max(1, Math.round(points));
-      for (const track of [stationary, interaction]) {
-        const next = clamp(track.budget);
-        if (next !== track.budget) {
-          track.budget = next;
-          // Same invariant as adjust(): the retained samples measured the old
-          // budget's cost; discard them so the next adjustment waits for
-          // frames rendered under the new one.
-          track.samples.length = 0;
-        }
-      }
-    },
 
     reduceNow(interacting, factor = 0.5) {
       const track = trackFor(interacting);
@@ -286,17 +251,6 @@ export const createAdaptiveBudget = (
       return track.budget;
     },
 
-    reset() {
-      // Re-clamp: the ceiling may have been lowered (setMaxBudget) since
-      // construction, and the restored budget must never exceed it.
-      stationary.budget = clamp(initialBudget);
-      interaction.budget = clamp(interactionInitialBudget);
-      stationary.samples.length = 0;
-      interaction.samples.length = 0;
-      stationary.lastAdjust = Number.NEGATIVE_INFINITY;
-      interaction.lastAdjust = Number.NEGATIVE_INFINITY;
-    },
-
     stats() {
       const trackStats = (track: Track): AdaptiveBudgetTrackStats => ({
         budget: track.budget,
@@ -305,9 +259,7 @@ export const createAdaptiveBudget = (
           track.samples.length > 0 ? percentile(track.samples, percentileP) : null,
       });
       return {
-        // Report the effective floor: a ceiling lowered below it wins.
-        minBudget: Math.min(minBudget, maxBudget),
-        maxBudget,
+        minBudget,
         stationary: trackStats(stationary),
         interaction: trackStats(interaction),
       };

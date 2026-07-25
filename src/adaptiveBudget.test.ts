@@ -46,7 +46,6 @@ const OPTS: AdaptiveBudgetOptions = {
   initialBudget: 2_000_000,
   interactionInitialBudget: 2_000_000,
   minBudget: 200_000,
-  maxBudget: 3_000_000,
   stationaryTargetMs: 16,
   interactionTargetMs: 33,
   windowSize: 30,
@@ -125,14 +124,6 @@ describe('createAdaptiveBudget', () => {
     expect(budget.budget(false)).toBe(500_000);
   });
 
-  it('never rises above maxBudget', () => {
-    const budget = createAdaptiveBudget({ ...OPTS, initialBudget: 2_900_000 });
-    for (let round = 0; round < 40; round += 1) {
-      feed(budget, 2, false, 8, round * 10_000, 1000);
-    }
-    expect(budget.budget(false)).toBe(3_000_000);
-  });
-
   it('tracks interaction and stationary budgets independently', () => {
     const budget = createAdaptiveBudget(OPTS);
     // Slow while interacting, fast while stationary — the two diverge.
@@ -198,63 +189,6 @@ describe('createAdaptiveBudget', () => {
     expect(feed(still, 33, false, 12)).toBeLessThan(2_000_000); // shrinks stationary
   });
 
-  it('setMaxBudget lowers a budget that now exceeds the ceiling', () => {
-    const budget = createAdaptiveBudget(OPTS); // budgets start at 2M
-    budget.setMaxBudget(1_000_000);
-    expect(budget.budget(false)).toBe(1_000_000);
-    expect(budget.budget(true)).toBe(1_000_000);
-    // And it caps future growth.
-    expect(feed(budget, 2, false, 40, 0, 1000)).toBe(1_000_000);
-  });
-
-  it('setMaxBudget raising the ceiling lets the loop grow again', () => {
-    const budget = createAdaptiveBudget({ ...OPTS, maxBudget: 1_000_000 });
-    feed(budget, 2, false, 40, 0, 1000);
-    expect(budget.budget(false)).toBe(1_000_000); // pinned at old ceiling
-    budget.setMaxBudget(3_000_000);
-    const grown = feed(budget, 2, false, 8, 100_000, 1000);
-    expect(grown).toBeGreaterThan(1_000_000);
-  });
-
-  it('a ceiling lowered below the floor wins (budget never exceeds it)', () => {
-    const budget = createAdaptiveBudget(OPTS); // floor 200k, start 2M
-    budget.setMaxBudget(100_000); // below the floor
-    expect(budget.budget(false)).toBe(100_000);
-    expect(budget.budget(true)).toBe(100_000);
-    expect(budget.stats().maxBudget).toBe(100_000);
-    expect(budget.stats().minBudget).toBe(100_000); // effective floor yields
-    // Growth stays capped at the low ceiling.
-    expect(feed(budget, 2, false, 40, 0, 1000)).toBe(100_000);
-  });
-
-  it('reset respects a ceiling lowered after construction', () => {
-    // setSource → reset() must not resurrect an initial budget above a
-    // ceiling the user lowered in the meantime (the quality slider).
-    const budget = createAdaptiveBudget(OPTS); // initial 2M
-    budget.setMaxBudget(500_000);
-    budget.reset();
-    expect(budget.budget(false)).toBe(500_000);
-    expect(budget.budget(true)).toBe(500_000);
-  });
-
-  it('setMaxBudget discards samples measured under the old budget', () => {
-    const budget = createAdaptiveBudget(OPTS); // minSamples 8
-    // 7 slow frames — one short of adjusting.
-    feed(budget, 40, false, 7, 0, 1000);
-    expect(budget.stats().stationary.samples).toBe(7);
-    // Lowering the ceiling changes the budget; the retained samples measured
-    // the old (higher) budget's cost and must be discarded, or the very next
-    // frame would trigger a bogus extra shrink below the new ceiling.
-    budget.setMaxBudget(1_500_000);
-    expect(budget.stats().stationary.samples).toBe(0);
-    budget.recordFrame(40, { interacting: false, now: 8000 });
-    expect(budget.budget(false)).toBe(1_500_000); // no adjust on 1 fresh sample
-    // A ceiling change that leaves a budget untouched keeps its window.
-    feed(budget, 40, false, 3, 9000, 1000);
-    budget.setMaxBudget(1_500_000);
-    expect(budget.stats().stationary.samples).toBe(4);
-  });
-
   it('grows on 0 ms frames instead of freezing', () => {
     // An integer-ms host reads sub-millisecond frames as 0; those are valid
     // samples and must still let the budget grow toward the ceiling.
@@ -278,15 +212,6 @@ describe('createAdaptiveBudget', () => {
     }
     expect(budget.budget(false)).toBe(2_000_000);
     expect(budget.budget(true)).toBe(2_000_000);
-    expect(budget.stats().stationary.samples).toBe(0);
-  });
-
-  it('reset restores the initial budget and clears the windows', () => {
-    const budget = createAdaptiveBudget(OPTS);
-    feed(budget, 40, false, 8, 0, 1000);
-    expect(budget.budget(false)).toBeLessThan(2_000_000);
-    budget.reset();
-    expect(budget.budget(false)).toBe(2_000_000);
     expect(budget.stats().stationary.samples).toBe(0);
   });
 

@@ -227,7 +227,6 @@ describe("createViewGovernor", () => {
   it("does not turn stationary long-task spikes into a budget sawtooth", () => {
     const governor = createViewGovernor({
       initialBudget: 1_000_000,
-      maxBudget: 2_000_000,
       cooldownMs: 0,
     });
     governor.register({ setPointBudget: vi.fn() });
