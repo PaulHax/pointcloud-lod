@@ -42,6 +42,8 @@ export interface ViewGovernorOptions extends AdaptiveBudgetOptions {
 export interface ViewGovernorStats {
   readonly interacting: boolean;
   readonly interactionDepth: number;
+  /** Whether the released view is preserving its learned interaction density. */
+  readonly stationaryLocked: boolean;
   readonly aggregateBudget: number;
   readonly activeMembers: number;
   readonly adaptive: AdaptiveBudgetStats;
@@ -71,7 +73,7 @@ export const createViewGovernor = (
 ): ViewGovernor => {
   const {
     vtkFrameFraction: rawVtkFraction = 0.7,
-    interactionSettleMs = 300,
+    interactionSettleMs = 750,
     ...budgetOptions
   } = options;
   const vtkFrameFraction = Math.min(Math.max(rawVtkFraction, 0.05), 1);
@@ -80,6 +82,7 @@ export const createViewGovernor = (
   const members = new Set<MemberState>();
   let interactionDepth = 0;
   let settling = false;
+  let stationaryLocked = false;
   let disposed = false;
   let settleTimer: ReturnType<typeof setTimeout> | null = null;
   let emergencyCooldownUntil = Number.NEGATIVE_INFINITY;
@@ -145,6 +148,7 @@ export const createViewGovernor = (
       if (interactionDepth !== 1) return;
       clearSettle();
       settling = false;
+      stationaryLocked = false;
       distribute();
     },
 
@@ -156,7 +160,12 @@ export const createViewGovernor = (
       clearSettle();
       settleTimer = setTimeout(() => {
         settleTimer = null;
+        // Preserve exactly the density just drawn during interaction. The
+        // released view may settle splat size, but point count remains stable
+        // until the next camera interaction.
+        budget.restartAt(false, budget.budget(true), Date.now());
         settling = false;
+        stationaryLocked = true;
         distribute();
       }, Math.max(0, interactionSettleMs));
     },
@@ -175,6 +184,10 @@ export const createViewGovernor = (
         (finiteNonNegative(metrics.inputDelayMs) && metrics.inputDelayMs > 50) ||
         (finiteNonNegative(metrics.longTaskMs) && metrics.longTaskMs > 50);
       const inInteractionRegime = interacting();
+      if (!inInteractionRegime && stationaryLocked) {
+        distribute();
+        return;
+      }
       const target = inInteractionRegime
         ? budgetOptions.interactionTargetMs ?? 33
         : budgetOptions.stationaryTargetMs ?? 16;
@@ -204,6 +217,7 @@ export const createViewGovernor = (
       return {
         interacting: interacting(),
         interactionDepth,
+        stationaryLocked,
         aggregateBudget: budget.budget(interacting()),
         activeMembers: [...members].filter((member) => member.active).length,
         adaptive: budget.stats(),

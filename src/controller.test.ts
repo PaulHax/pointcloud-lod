@@ -19,21 +19,35 @@ const VIEW = {
   viewProj: IDENTITY,
   position: [0, 0, 0] as [number, number, number],
   fovY: Math.PI / 2,
-  viewportHeight: 100,
+  viewportHeightCssPx: 100,
 };
 
 const METADATA: TileSourceMetadata = {
   pointCount: 1000,
-  cube: { center: [0, 0, 0], halfSize: 0.5 },
-  spacing: 0.1,
 };
 
 interface FakeEntry {
   pointCount: number;
+  bounds?: {
+    min: [number, number, number];
+    max: [number, number, number];
+  };
+  spacing?: number;
   children?: string[];
   pageRef?: boolean;
   /** Entries revealed by loading the page rooted at this key. */
-  pageNodes?: Record<string, { pointCount: number; children?: string[] }>;
+  pageNodes?: Record<
+    string,
+    {
+      pointCount: number;
+      bounds?: {
+        min: [number, number, number];
+        max: [number, number, number];
+      };
+      spacing?: number;
+      children?: string[];
+    }
+  >;
 }
 
 interface Deferred {
@@ -59,7 +73,16 @@ const makeFakeSource = (tree: Record<string, FakeEntry>) => {
   const toInfos = (
     entries: Record<
       string,
-      { pointCount: number; children?: string[]; pageRef?: boolean }
+      {
+        pointCount: number;
+        bounds?: {
+          min: [number, number, number];
+          max: [number, number, number];
+        };
+        spacing?: number;
+        children?: string[];
+        pageRef?: boolean;
+      }
     >,
   ): NodeInfo[] =>
     Object.entries(entries).map(([keyString, entry]) => {
@@ -67,6 +90,11 @@ const makeFakeSource = (tree: Record<string, FakeEntry>) => {
       return {
         key: { level: level!, x: x!, y: y!, z: z! },
         pointCount: entry.pointCount,
+        bounds: entry.bounds ?? {
+          min: [-0.5, -0.5, -0.5],
+          max: [0.5, 0.5, 0.5],
+        },
+        spacing: entry.spacing ?? 0.1 / 2 ** level!,
         children: entry.children?.map((c) => {
           const [cl, cx, cy, cz] = c.split("-").map(Number);
           return { level: cl!, x: cx!, y: cy!, z: cz! };
@@ -234,6 +262,8 @@ describe("createLodController", () => {
           {
             key: { level: 0, x: 0, y: 0, z: 0 },
             pointCount: 100,
+            bounds: { min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5] },
+            spacing: 0.1,
             children: [],
           },
         ];
@@ -454,15 +484,17 @@ describe("createLodController", () => {
 
   it("does not fetch culled subtrees", async () => {
     const tree: Record<string, FakeEntry> = {
-      "0-0-0-0": { pointCount: 10, children: ["1-0-0-0"] },
-      "1-0-0-0": { pointCount: 40 },
-    };
-    const meta: TileSourceMetadata = {
-      ...METADATA,
-      cube: { center: [0, 0, 0], halfSize: 8 },
+      "0-0-0-0": {
+        pointCount: 10,
+        bounds: { min: [-8, -8, -8], max: [8, 8, 8] },
+        children: ["1-0-0-0"],
+      },
+      "1-0-0-0": {
+        pointCount: 40,
+        bounds: { min: [-8, -8, -8], max: [0, 0, 0] },
+      },
     };
     const fake = makeFakeSource(tree);
-    fake.source.metadata = () => meta;
     const sink = collectBatches();
     const controller = createLodController({
       source: fake.source,
@@ -481,6 +513,317 @@ describe("createLodController", () => {
     await settle();
     expect(fake.loadCalls).toContain("0-0-0-0");
     expect(fake.loadCalls).not.toContain("1-0-0-0");
+    controller.dispose();
+  });
+});
+
+describe("createLodController — ready frontier and presentation", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const makePresented = (
+    tree: Record<string, FakeEntry>,
+    options: {
+      pointBudget?: number;
+      presentation:
+        | { mode: "fixed"; diameterCssPx: number }
+        | {
+            mode: "auto";
+            userScale: number;
+            minDiameterCssPx?: number;
+            maxDiameterCssPx?: number;
+          };
+    },
+  ) => {
+    const fake = makeFakeSource(tree);
+    const sink = collectBatches();
+    const diameters: number[] = [];
+    const controller = createLodController({
+      source: fake.source,
+      onTiles: sink.onTiles,
+      scheduleRender: sink.scheduleRender,
+      pointBudget: options.pointBudget ?? 1000,
+      selectionDelayMs: 0,
+      interactionSettleMs: 300,
+      presentation: options.presentation,
+      onPointDiameterCssPx: (value) => diameters.push(value),
+    });
+    return { controller, diameters, ...fake, ...sink };
+  };
+
+  it("reports leaf, tile-readiness, and budget terminal coverage", async () => {
+    const tree: Record<string, FakeEntry> = {
+      "0-0-0-0": {
+        pointCount: 100,
+        spacing: 4,
+        children: ["1-0-0-0", "1-1-0-0"],
+      },
+      "1-0-0-0": { pointCount: 10, spacing: 1 },
+      "1-1-0-0": { pointCount: 10, spacing: 1 },
+    };
+    const { controller, deferred } = makePresented(tree, {
+      pointBudget: 110,
+      presentation: { mode: "fixed", diameterCssPx: 3 },
+    });
+    await settle();
+    controller.setCamera({ ...VIEW, position: [0, 0, 10] });
+    await settle();
+
+    deferred.get("0-0-0-0")!.resolve();
+    await settle();
+    expect(controller.stats().selection.readyTerminalFrontier).toMatchObject({
+      count: 1,
+      leafNodes: 0,
+      tileBlockedNodes: 1,
+      budgetBlockedNodes: 1,
+    });
+
+    const selectedChild = [...deferred.keys()].find(
+      (key) => key !== "0-0-0-0",
+    )!;
+    deferred.get(selectedChild)!.resolve();
+    await settle();
+    expect(controller.stats().selection.readyTerminalFrontier).toMatchObject({
+      count: 2,
+      leafNodes: 1,
+      tileBlockedNodes: 0,
+      budgetBlockedNodes: 1,
+    });
+    controller.dispose();
+  });
+
+  it("reports cutoff terminals instead of storage-level descendants", async () => {
+    const { controller, deferred } = makePresented(SMALL_TREE, {
+      presentation: { mode: "fixed", diameterCssPx: 2 },
+    });
+    await settle();
+    controller.setRefinementCutoffPx(1_000_000);
+    controller.setCamera({ ...VIEW, position: [0, 0, 10] });
+    await settle();
+    deferred.get("0-0-0-0")!.resolve();
+    await settle();
+
+    expect(controller.stats().selection.readyTerminalFrontier).toMatchObject({
+      count: 1,
+      cutoffNodes: 1,
+      leafNodes: 0,
+    });
+    controller.dispose();
+  });
+
+  it("projects the spacing supplied by each hierarchy node", async () => {
+    const tree: Record<string, FakeEntry> = {
+      "0-0-0-0": {
+        pointCount: 100,
+        spacing: 100,
+        children: ["1-0-0-0"],
+      },
+      "1-0-0-0": { pointCount: 10, spacing: 0.001 },
+    };
+    const { controller, deferred } = makePresented(tree, {
+      presentation: { mode: "fixed", diameterCssPx: 2 },
+    });
+    await settle();
+    controller.setCamera({ ...VIEW, position: [0, 0, 10] });
+    await settle();
+    for (const pending of deferred.values()) pending.resolve();
+    await settle();
+
+    const p75 =
+      controller.stats().selection.readyTerminalFrontier.projectedSpacingCssPx
+        .p75;
+    expect(p75).not.toBeNull();
+    expect(p75!).toBeLessThan(0.01);
+    controller.dispose();
+  });
+
+  it("keeps the ready parent terminal while a hierarchy page is unavailable", async () => {
+    let resolveChildPage!: (infos: NodeInfo[]) => void;
+    let resolveRootTile!: (tile: TileData) => void;
+    const source: TileSource = {
+      metadata: () => ({ pointCount: 110 }),
+      async nodes(key) {
+        if (key.level === 0) {
+          return [
+            {
+              key: { level: 0, x: 0, y: 0, z: 0 },
+              pointCount: 100,
+              bounds: { min: [-1, -1, -1], max: [1, 1, 1] },
+              spacing: 1,
+              children: [{ level: 1, x: 0, y: 0, z: 0 }],
+            },
+            {
+              key: { level: 1, x: 0, y: 0, z: 0 },
+              pointCount: 0,
+              bounds: { min: [-1, -1, -1], max: [0, 0, 0] },
+              spacing: 0.5,
+              pageRef: true,
+            },
+          ];
+        }
+        return new Promise<NodeInfo[]>((resolve) => {
+          resolveChildPage = resolve;
+        });
+      },
+      loadTile(key) {
+        if (key.level === 0) {
+          return new Promise<TileData>((resolve) => {
+            resolveRootTile = resolve;
+          });
+        }
+        return new Promise<TileData>(() => {});
+      },
+    };
+    const controller = createLodController({
+      source,
+      onTiles: () => {},
+      scheduleRender: () => {},
+      selectionDelayMs: 0,
+    });
+    await settle();
+    controller.setCamera({ ...VIEW, position: [0, 0, 10] });
+    await settle();
+    resolveRootTile(makeTile(100));
+    await settle();
+    expect(controller.stats().selection.readyTerminalFrontier).toMatchObject({
+      count: 1,
+      hierarchyBlockedNodes: 1,
+    });
+
+    resolveChildPage([
+      {
+        key: { level: 1, x: 0, y: 0, z: 0 },
+        pointCount: 10,
+        bounds: { min: [-1, -1, -1], max: [0, 0, 0] },
+        spacing: 0.5,
+      },
+    ]);
+    await settle();
+    expect(controller.stats().selection.readyTerminalFrontier).toMatchObject({
+      count: 1,
+      hierarchyBlockedNodes: 0,
+      tileBlockedNodes: 1,
+    });
+    controller.dispose();
+  });
+
+  it("uses the density-aware p75 with clamps throughout interaction", async () => {
+    const leaf: Record<string, FakeEntry> = {
+      "0-0-0-0": {
+        pointCount: 100,
+        bounds: { min: [-1, -1, -1], max: [1, 1, 1] },
+        spacing: 0.9,
+      },
+    };
+    const { controller, deferred, diameters } = makePresented(leaf, {
+      presentation: { mode: "auto", userScale: 1 },
+    });
+    expect(diameters).toEqual([2]);
+    await settle();
+    controller.setCamera({ ...VIEW, position: [0, 0, 10] });
+    await settle();
+    deferred.get("0-0-0-0")!.resolve();
+    await settle();
+    expect(controller.stats().presentation.diameterCssPx).toBeCloseTo(4);
+
+    vi.advanceTimersByTime(300);
+    await settle();
+    expect(
+      controller.stats().selection.readyTerminalFrontier.projectedSpacingCssPx
+        .p75,
+    ).toBeCloseTo(5);
+    expect(controller.stats().presentation.diameterCssPx).toBeCloseTo(4);
+
+    controller.beginInteraction();
+    expect(controller.stats().presentation.diameterCssPx).toBeCloseTo(4);
+    expect(controller.stats().presentation.targetDiameterCssPx).toBeCloseTo(4);
+    controller.endInteraction();
+    expect(controller.stats().presentation.diameterCssPx).toBeCloseTo(4);
+    vi.advanceTimersByTime(300);
+    await settle();
+    expect(controller.stats().presentation.diameterCssPx).toBeCloseTo(4);
+
+    controller.setPresentation({
+      mode: "auto",
+      userScale: 0.5,
+      minDiameterCssPx: 1.5,
+      maxDiameterCssPx: 5,
+    });
+    expect(controller.stats().presentation.diameterCssPx).toBe(2.5);
+    controller.dispose();
+  });
+
+  it("applies Auto size changes during interaction without a release phase", async () => {
+    const leaf: Record<string, FakeEntry> = {
+      "0-0-0-0": {
+        pointCount: 100,
+        bounds: { min: [-1, -1, -1], max: [1, 1, 1] },
+        spacing: 0.9,
+      },
+    };
+    const { controller, deferred } = makePresented(leaf, {
+      presentation: { mode: "auto", userScale: 1 },
+    });
+    await settle();
+    controller.setCamera({ ...VIEW, position: [0, 0, 10] });
+    await settle();
+    deferred.get("0-0-0-0")!.resolve();
+    await settle();
+    vi.advanceTimersByTime(300);
+    await settle();
+    controller.beginInteraction();
+    controller.setPresentation({
+      mode: "auto",
+      userScale: 0.75,
+    });
+    expect(controller.stats().presentation.diameterCssPx).toBeCloseTo(3);
+    expect(controller.stats().presentation.targetDiameterCssPx).toBeCloseTo(3);
+
+    controller.endInteraction();
+    expect(controller.stats().presentation.diameterCssPx).toBeCloseTo(3);
+
+    vi.advanceTimersByTime(300);
+    await settle();
+    expect(controller.stats().presentation.diameterCssPx).toBeCloseTo(3);
+    controller.dispose();
+  });
+
+  it("applies repeated settled Auto scale changes immediately", async () => {
+    const leaf: Record<string, FakeEntry> = {
+      "0-0-0-0": {
+        pointCount: 100,
+        bounds: { min: [-1, -1, -1], max: [1, 1, 1] },
+        spacing: 0.9,
+      },
+    };
+    const { controller, deferred, diameters } = makePresented(leaf, {
+      presentation: { mode: "auto", userScale: 1 },
+    });
+    await settle();
+    controller.setCamera({ ...VIEW, position: [0, 0, 10] });
+    await settle();
+    deferred.get("0-0-0-0")!.resolve();
+    await settle();
+    vi.advanceTimersByTime(2000);
+    await settle();
+    expect(controller.stats().presentation.diameterCssPx).toBe(4);
+
+    controller.setPresentation({ mode: "auto", userScale: 1.2 });
+    let stats = controller.stats().presentation;
+    expect(stats.diameterCssPx).toBeCloseTo(4.8);
+    expect(stats.targetDiameterCssPx).toBeCloseTo(4.8);
+
+    controller.setPresentation({ mode: "auto", userScale: 1.4 });
+    stats = controller.stats().presentation;
+    expect(stats.diameterCssPx).toBeCloseTo(5.6);
+    expect(stats.targetDiameterCssPx).toBeCloseTo(5.6);
+    expect(diameters.at(-2)).toBeCloseTo(4.8);
+    expect(diameters.at(-1)).toBeCloseTo(5.6);
     controller.dispose();
   });
 });
@@ -748,7 +1091,7 @@ describe("createLodController — adaptive budget", () => {
     expect(controller.stats().interacting).toBe(false);
 
     // A genuinely different view re-enters interaction.
-    controller.setCamera({ ...VIEW, viewportHeight: 200 });
+    controller.setCamera({ ...VIEW, viewportHeightCssPx: 200 });
     expect(controller.stats().interacting).toBe(true);
     controller.dispose();
   });
@@ -954,6 +1297,8 @@ describe("createLodController — diagnostic stats", () => {
           {
             key: { level: 0, x: 0, y: 0, z: 0 },
             pointCount: 100,
+            bounds: { min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5] },
+            spacing: 0.1,
             children: [],
           },
         ];
@@ -1091,7 +1436,9 @@ describe("createLodController — diagnostic stats", () => {
       before.selection.generation,
     );
     expect(cutoff.selection.sseStoppedNodes).toBeGreaterThan(0);
-    expect(cutoff.selection.frontierSse.count).toBeGreaterThan(0);
+    expect(cutoff.selection.readyTerminalFrontier.cutoffNodes).toBeGreaterThan(
+      0,
+    );
 
     for (const d of deferred.values()) d.resolve();
     await settle();

@@ -17,7 +17,7 @@ import vtkActor from "@kitware/vtk.js/Rendering/Core/Actor";
 import vtkPointGaussianMapper from "@kitware/vtk.js/Rendering/Core/PointGaussianMapper";
 
 import type { TileBatch } from "./controller";
-import { keyToString, pointSpacing, type Vec3, type VoxelKey } from "./octree";
+import { keyToString, type Vec3 } from "./octree";
 import type { TileData } from "./tileSource";
 
 /** Column-major 4x4 multiply: out = a · b. */
@@ -69,20 +69,6 @@ const translation = (origin: Vec3): number[] => [
   1,
 ];
 
-/**
- * World-space splat sizing: each tile's splat diameter becomes
- * `nodeSpacing(level) * factor` world units (spacing halves per octree
- * level), so coarse tiles close into a surface up close instead of thinning
- * into sparse pixels. Assumes a rigid base matrix; a scaling anchor will not
- * rescale the splats.
- */
-export interface WorldSizing {
-  /** Point spacing at the octree root (TileSourceMetadata.spacing). */
-  readonly rootSpacing: number;
-  /** Diameter multiplier on the node spacing. Default 1. */
-  readonly factor?: number;
-}
-
 export interface RendererAdapterOptions {
   /** vtk.js renderer the tile actors are added to. */
   renderer: {
@@ -91,12 +77,12 @@ export interface RendererAdapterOptions {
   };
   /** Coalescing render request (see module doc). */
   scheduleRender: () => void;
-  /** Initial point size in pixels. Default 2. */
-  pointSize?: number;
+  /** Initial uniform point diameter in CSS pixels. Default 2. */
+  diameterCssPx?: number;
+  /** Initial CSS-to-framebuffer scale. Default 1. */
+  devicePixelRatio?: number;
   /** Initial visibility. Default true. */
   visible?: boolean;
-  /** Enable world-space splat sizing; omit for screen-pixel sizing. */
-  worldSizing?: WorldSizing;
 }
 
 export interface RendererAdapter {
@@ -107,10 +93,11 @@ export interface RendererAdapter {
    * UserMatrix); each tile renders with `base · translate(tile.origin)`.
    */
   setBaseMatrix(matrix: ArrayLike<number> | null): void;
-  setPointSize(pixels: number): void;
-  /** Change or disable (null) world-space splat sizing for all tiles. */
-  setWorldSizing(sizing: WorldSizing | null): void;
+  setPointDiameterCssPx(diameterCssPx: number): void;
+  setDevicePixelRatio(devicePixelRatio: number): void;
   setVisible(visible: boolean): void;
+  /** Set this adapter's allocation from the shared GPU-memory pool. */
+  setResourceCeilingBytes(bytes: number): void;
   tileCount(): number;
   /** Renderer-owned resource and active-draw accounting. */
   stats(): RendererAdapterStats;
@@ -130,6 +117,10 @@ export interface RendererAdapterStats {
   /** Tiles and points whose actors currently participate in drawing. */
   readonly activeDrawTiles: number;
   readonly activeDrawPoints: number;
+  readonly diameterCssPx: number;
+  readonly devicePixelRatio: number;
+  /** Upper bound before clipping/depth: circular submitted splat area. */
+  readonly submittedSplatAreaDevicePx2: number;
 }
 
 interface TileActors {
@@ -137,33 +128,35 @@ interface TileActors {
   mapper: any;
   polyData: any;
   origin: Vec3;
-  level: number;
   pointCount: number;
   resourceBytes: number;
+  positions: Float32Array;
+  rgb: Uint8Array | undefined;
 }
 
 export const createRendererAdapter = (
   options: RendererAdapterOptions,
 ): RendererAdapter => {
   const { renderer, scheduleRender } = options;
-  let pointSize = options.pointSize ?? 2;
+  let diameterCssPx = options.diameterCssPx ?? 2;
+  let devicePixelRatio = options.devicePixelRatio ?? 1;
+  if (!Number.isFinite(diameterCssPx) || diameterCssPx <= 0) {
+    throw new Error("diameterCssPx must be finite and > 0");
+  }
+  if (!Number.isFinite(devicePixelRatio) || devicePixelRatio <= 0) {
+    throw new Error("devicePixelRatio must be finite and > 0");
+  }
   let visible = options.visible ?? true;
-  let worldSizing = options.worldSizing ?? null;
   let baseMatrix: ArrayLike<number> = IDENTITY;
   const tiles = new Map<string, TileActors>();
+  const pendingRelease = new Map<string, TileActors>();
+  let resourceCeilingBytes = 256 * 1024 * 1024;
   let disposed = false;
 
   const tileMatrix = (origin: Vec3): number[] =>
     multiplyMat4(baseMatrix, translation(origin));
 
-  // 0 disables the mapper's world-space mode (screen-pixel sizing).
-  const tileWorldSize = (level: number): number =>
-    worldSizing === null
-      ? 0
-      : pointSpacing(worldSizing.rootSpacing, level) *
-        (worldSizing.factor ?? 1);
-
-  const createTile = (key: VoxelKey, tile: TileData): TileActors => {
+  const createTile = (tile: TileData): TileActors => {
     const polyData = vtkPolyData.newInstance();
     polyData.getPoints().setData(tile.positions, 3);
     if (tile.rgb !== undefined) {
@@ -178,10 +171,12 @@ export const createRendererAdapter = (
     const mapper = vtkPointGaussianMapper.newInstance();
     mapper.setInputData(polyData);
     mapper.setStatic?.(true);
-    mapper.setWorldSize?.(tileWorldSize(key.level));
+    // The actor property remains in CSS pixels. The custom dense-point mapper
+    // multiplies it by scaleFactor before assigning physical gl_PointSize.
+    mapper.setScaleFactor(devicePixelRatio);
     const actor = vtkActor.newInstance();
     actor.setMapper(mapper);
-    actor.getProperty().setPointSize(pointSize);
+    actor.getProperty().setPointSize(diameterCssPx);
     actor.setVisibility(visible);
     actor.setUserMatrix(tileMatrix(tile.origin));
     return {
@@ -189,10 +184,11 @@ export const createRendererAdapter = (
       mapper,
       polyData,
       origin: tile.origin,
-      level: key.level,
       pointCount: tile.pointCount,
       resourceBytes:
         tile.positions.byteLength + (tile.rgb?.byteLength ?? 0) + 64,
+      positions: tile.positions,
+      rgb: tile.rgb,
     };
   };
 
@@ -203,21 +199,65 @@ export const createRendererAdapter = (
     entry.polyData.delete?.();
   };
 
+  const resourceBytes = (): number => {
+    let bytes = 0;
+    for (const entry of tiles.values()) bytes += entry.resourceBytes;
+    for (const entry of pendingRelease.values()) bytes += entry.resourceBytes;
+    return bytes;
+  };
+
+  const trimPool = (additionalBytes = 0): void => {
+    while (
+      pendingRelease.size > 0 &&
+      resourceBytes() + additionalBytes > resourceCeilingBytes
+    ) {
+      const [key, entry] = pendingRelease.entries().next().value as [
+        string,
+        TileActors,
+      ];
+      pendingRelease.delete(key);
+      releaseTile(entry);
+    }
+  };
+
   return {
     applyBatch(batch) {
       if (disposed) return;
       let changed = false;
       for (const key of batch.removed) {
-        const entry = tiles.get(keyToString(key));
+        const keyString = keyToString(key);
+        const entry = tiles.get(keyString);
         if (entry === undefined) continue;
-        tiles.delete(keyToString(key));
-        releaseTile(entry);
+        tiles.delete(keyString);
+        // Stop drawing the stale selection synchronously, but retain its
+        // resources for bounded reuse. Releasing and reallocating a refined
+        // cloud's actors at every interaction boundary creates input long tasks.
+        entry.actor.setVisibility(false);
+        pendingRelease.set(keyString, entry);
         changed = true;
       }
       for (const { key, tile } of batch.added) {
+        if (!visible) continue;
         const keyString = keyToString(key);
         if (tiles.has(keyString)) continue;
-        const entry = createTile(key, tile);
+        const stale = pendingRelease.get(keyString);
+        if (stale !== undefined) {
+          pendingRelease.delete(keyString);
+          if (stale.positions === tile.positions && stale.rgb === tile.rgb) {
+            stale.actor.getProperty().setPointSize(diameterCssPx);
+            stale.mapper.setScaleFactor(devicePixelRatio);
+            stale.actor.setUserMatrix(tileMatrix(stale.origin));
+            stale.actor.setVisibility(visible);
+            tiles.set(keyString, stale);
+            changed = true;
+            continue;
+          }
+          releaseTile(stale);
+        }
+        const tileResourceBytes =
+          tile.positions.byteLength + (tile.rgb?.byteLength ?? 0) + 64;
+        trimPool(tileResourceBytes);
+        const entry = createTile(tile);
         tiles.set(keyString, entry);
         renderer.addActor(entry.actor);
         changed = true;
@@ -238,28 +278,34 @@ export const createRendererAdapter = (
       scheduleRender();
     },
 
-    setPointSize(pixels) {
-      if (disposed || pixels === pointSize) return;
-      pointSize = pixels;
+    setPointDiameterCssPx(nextDiameterCssPx) {
+      if (
+        disposed ||
+        !Number.isFinite(nextDiameterCssPx) ||
+        nextDiameterCssPx <= 0 ||
+        nextDiameterCssPx === diameterCssPx
+      ) {
+        return;
+      }
+      diameterCssPx = nextDiameterCssPx;
       for (const entry of tiles.values()) {
-        entry.actor.getProperty().setPointSize(pixels);
+        entry.actor.getProperty().setPointSize(nextDiameterCssPx);
       }
       scheduleRender();
     },
 
-    setWorldSizing(sizing) {
-      // Value-compared no-op guard: hosts re-apply config before paints, and
-      // an unconditional scheduleRender here would re-schedule every frame.
-      const same =
-        sizing === worldSizing ||
-        (sizing !== null &&
-          worldSizing !== null &&
-          sizing.rootSpacing === worldSizing.rootSpacing &&
-          (sizing.factor ?? 1) === (worldSizing.factor ?? 1));
-      if (disposed || same) return;
-      worldSizing = sizing;
+    setDevicePixelRatio(nextDevicePixelRatio) {
+      if (
+        disposed ||
+        !Number.isFinite(nextDevicePixelRatio) ||
+        nextDevicePixelRatio <= 0 ||
+        nextDevicePixelRatio === devicePixelRatio
+      ) {
+        return;
+      }
+      devicePixelRatio = nextDevicePixelRatio;
       for (const entry of tiles.values()) {
-        entry.mapper.setWorldSize?.(tileWorldSize(entry.level));
+        entry.mapper.setScaleFactor(nextDevicePixelRatio);
       }
       scheduleRender();
     },
@@ -267,10 +313,26 @@ export const createRendererAdapter = (
     setVisible(nextVisible) {
       if (disposed || nextVisible === visible) return;
       visible = nextVisible;
-      for (const entry of tiles.values()) {
-        entry.actor.setVisibility(nextVisible);
+      if (!visible) {
+        // Hidden clouds own no GPU resources. Controller removal batches that
+        // follow this state change are harmless no-ops in the adapter.
+        for (const entry of tiles.values()) {
+          entry.actor.setVisibility(false);
+          releaseTile(entry);
+        }
+        for (const entry of pendingRelease.values()) releaseTile(entry);
+        tiles.clear();
+        pendingRelease.clear();
+      } else {
+        for (const entry of tiles.values()) entry.actor.setVisibility(true);
       }
       scheduleRender();
+    },
+
+    setResourceCeilingBytes(bytes) {
+      if (disposed || !Number.isFinite(bytes) || bytes < 0) return;
+      resourceCeilingBytes = bytes;
+      trimPool();
     },
 
     tileCount() {
@@ -280,16 +342,25 @@ export const createRendererAdapter = (
     stats() {
       let gpuResidentPoints = 0;
       let gpuResidentBytes = 0;
-      for (const entry of tiles.values()) {
+      for (const entry of [...tiles.values(), ...pendingRelease.values()]) {
         gpuResidentPoints += entry.pointCount;
         gpuResidentBytes += entry.resourceBytes;
       }
+      let activeDrawPoints = 0;
+      for (const entry of tiles.values()) activeDrawPoints += entry.pointCount;
       return {
-        gpuResidentTiles: tiles.size,
+        gpuResidentTiles: tiles.size + pendingRelease.size,
         gpuResidentPoints,
         gpuResidentBytes,
         activeDrawTiles: visible ? tiles.size : 0,
-        activeDrawPoints: visible ? gpuResidentPoints : 0,
+        activeDrawPoints: visible ? activeDrawPoints : 0,
+        diameterCssPx,
+        devicePixelRatio,
+        submittedSplatAreaDevicePx2: visible
+          ? activeDrawPoints *
+            (Math.PI / 4) *
+            (diameterCssPx * devicePixelRatio) ** 2
+          : 0,
       };
     },
 
@@ -297,7 +368,9 @@ export const createRendererAdapter = (
       if (disposed) return;
       disposed = true;
       for (const entry of tiles.values()) releaseTile(entry);
+      for (const entry of pendingRelease.values()) releaseTile(entry);
       tiles.clear();
+      pendingRelease.clear();
     },
   };
 };

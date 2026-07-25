@@ -150,6 +150,25 @@ describe('createAdaptiveBudget', () => {
     expect(budget.budget(false)).toBe(2_000_000);
   });
 
+  it('restarts a stale track at an observed budget and discards stale samples', () => {
+    const budget = createAdaptiveBudget({
+      ...OPTS,
+      initialBudget: 1_000_000,
+      interactionInitialBudget: 2_000_000,
+    });
+    budget.recordFrame(40, { interacting: false, now: 0 });
+    expect(budget.stats().stationary.samples).toBe(1);
+
+    expect(budget.restartAt(false, budget.budget(true), 100)).toBe(
+      2_000_000,
+    );
+    expect(budget.stats().stationary.samples).toBe(0);
+    budget.recordFrame(40, { interacting: false, now: 150 });
+    expect(budget.stats().stationary.samples).toBe(1);
+    expect(budget.restartAt(false, 1_000_000, 200)).toBe(1_000_000);
+    expect(budget.stats().stationary.samples).toBe(0);
+  });
+
   it('decreases faster than it increases by default', () => {
     const shrinking = createAdaptiveBudget({ ...OPTS, maxStep: undefined });
     expect(feed(shrinking, 10_000, false, 8)).toBe(1_000_000);

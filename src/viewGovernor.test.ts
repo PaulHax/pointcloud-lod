@@ -19,7 +19,7 @@ describe("createViewGovernor", () => {
     expect(b).toHaveBeenLastCalledWith(750_000);
   });
 
-  it("uses the conservative budget through nested interaction and settling", () => {
+  it("uses the interaction budget through nested interaction and release", () => {
     const governor = createViewGovernor({
       initialBudget: 1_000_000,
       interactionInitialBudget: 300_000,
@@ -37,7 +37,73 @@ describe("createViewGovernor", () => {
     vi.advanceTimersByTime(99);
     expect(governor.stats().interacting).toBe(true);
     vi.advanceTimersByTime(1);
-    expect(setBudget).toHaveBeenLastCalledWith(1_000_000);
+    expect(setBudget).toHaveBeenLastCalledWith(300_000);
+  });
+
+  it("carries learned interaction detail into the stationary handoff", () => {
+    const governor = createViewGovernor({
+      initialBudget: 1_000_000,
+      interactionInitialBudget: 1_000_000,
+      interactionSettleMs: 100,
+      minSamples: 1,
+      cooldownMs: 0,
+      maxIncreaseStep: 1,
+    });
+    const setBudget = vi.fn();
+    governor.register({ setPointBudget: setBudget });
+    governor.beginInteraction();
+    governor.recordHostFrame({ hostFrameMs: 1, now: 0 });
+    expect(setBudget).toHaveBeenLastCalledWith(2_000_000);
+
+    governor.endInteraction();
+    vi.advanceTimersByTime(100);
+
+    expect(governor.stats().interacting).toBe(false);
+    expect(governor.stats().stationaryLocked).toBe(true);
+    expect(governor.stats().aggregateBudget).toBe(2_000_000);
+    expect(setBudget).toHaveBeenLastCalledWith(2_000_000);
+    expect(governor.stats().adaptive.stationary.samples).toBe(0);
+  });
+
+  it("preserves released density until the next interaction", () => {
+    const governor = createViewGovernor({
+      initialBudget: 1_000_000,
+      interactionInitialBudget: 1_000_000,
+      interactionSettleMs: 100,
+      minSamples: 8,
+      cooldownMs: 0,
+    });
+    governor.register({ setPointBudget: vi.fn() });
+
+    for (let index = 0; index < 7; index += 1) {
+      governor.recordHostFrame({ hostFrameMs: 40, now: index });
+    }
+    expect(governor.stats().adaptive.stationary.samples).toBe(7);
+
+    governor.beginInteraction();
+    governor.endInteraction();
+    vi.advanceTimersByTime(100);
+    expect(governor.stats().adaptive.stationary.samples).toBe(0);
+    const handoffNow = Date.now();
+
+    governor.recordHostFrame({
+      hostFrameMs: 100,
+      now: handoffNow + 1,
+    });
+    expect(governor.stats().aggregateBudget).toBe(1_000_000);
+    expect(governor.stats().adaptive.stationary.samples).toBe(0);
+
+    for (let index = 0; index < 16; index += 1) {
+      governor.recordHostFrame({
+        hostFrameMs: index < 8 ? 40 : 1,
+        now: handoffNow + 2 + index,
+      });
+    }
+    expect(governor.stats().aggregateBudget).toBe(1_000_000);
+    expect(governor.stats().adaptive.stationary.samples).toBe(0);
+
+    governor.beginInteraction();
+    expect(governor.stats().stationaryLocked).toBe(false);
   });
 
   it("reduces immediately on a severely missed host frame during interaction", () => {

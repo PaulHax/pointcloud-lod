@@ -5,7 +5,7 @@
  * any renderer, worker, or test without a GL context.
  */
 
-import type { Cube, Vec3 } from './octree';
+import type { Bounds, Vec3 } from "./octree";
 
 /** Column-major 4x4 matrix, OpenGL layout (translation in indices 12..14). */
 export type Mat16 = ArrayLike<number>;
@@ -17,8 +17,8 @@ export interface CameraView {
   readonly position: Vec3;
   /** Vertical field of view, radians. */
   readonly fovY: number;
-  /** Viewport height in device pixels. */
-  readonly viewportHeight: number;
+  /** Viewport height in CSS pixels. */
+  readonly viewportHeightCssPx: number;
 }
 
 /** Half-space `dot(normal, p) + d >= 0` containing the frustum interior. */
@@ -57,34 +57,29 @@ export const frustumPlanes = (m: Mat16): Plane[] => {
 };
 
 /**
- * Conservative cube-vs-frustum test using the positive-vertex distance: true
- * when the cube may intersect the frustum, false only when it is fully
+ * Conservative AABB-vs-frustum test using the positive-vertex distance: true
+ * when the bounds may intersect the frustum, false only when they are fully
  * outside at least one plane.
  */
-export const cubeIntersectsFrustum = (
+export const boundsIntersectsFrustum = (
   planes: readonly Plane[],
-  cube: Cube,
+  bounds: Bounds,
 ): boolean => {
-  const { center, halfSize } = cube;
   for (const { normal, d } of planes) {
-    const reach =
-      halfSize *
-      (Math.abs(normal[0]) + Math.abs(normal[1]) + Math.abs(normal[2]));
-    const distance =
-      normal[0] * center[0] +
-      normal[1] * center[1] +
-      normal[2] * center[2] +
-      d;
-    if (distance + reach < 0) return false;
+    const x = normal[0] >= 0 ? bounds.max[0] : bounds.min[0];
+    const y = normal[1] >= 0 ? bounds.max[1] : bounds.min[1];
+    const z = normal[2] >= 0 ? bounds.max[2] : bounds.min[2];
+    const distance = normal[0] * x + normal[1] * y + normal[2] * z + d;
+    if (distance < 0) return false;
   }
   return true;
 };
 
-/** Distance from a point to the surface of a cube; 0 inside. */
-export const distanceToCube = (point: Vec3, cube: Cube): number => {
-  const dx = Math.max(Math.abs(point[0] - cube.center[0]) - cube.halfSize, 0);
-  const dy = Math.max(Math.abs(point[1] - cube.center[1]) - cube.halfSize, 0);
-  const dz = Math.max(Math.abs(point[2] - cube.center[2]) - cube.halfSize, 0);
+/** Distance from a point to the surface of an AABB; 0 inside. */
+export const distanceToBounds = (point: Vec3, bounds: Bounds): number => {
+  const dx = Math.max(bounds.min[0] - point[0], 0, point[0] - bounds.max[0]);
+  const dy = Math.max(bounds.min[1] - point[1], 0, point[1] - bounds.max[1]);
+  const dz = Math.max(bounds.min[2] - point[2], 0, point[2] - bounds.max[2]);
   return Math.hypot(dx, dy, dz);
 };
 
@@ -97,10 +92,10 @@ export const distanceToCube = (point: Vec3, cube: Cube): number => {
 export const screenSpaceError = (
   spacing: number,
   distance: number,
-  viewportHeight: number,
+  viewportHeightCssPx: number,
   fovY: number,
 ): number =>
-  (spacing * viewportHeight) /
+  (spacing * viewportHeightCssPx) /
   (2 * Math.max(distance, 1e-9) * Math.tan(fovY / 2));
 
 /**
@@ -108,13 +103,13 @@ export const screenSpaceError = (
  * at the node's distance from the camera.
  */
 export const nodeScreenSpaceError = (
-  cube: Cube,
+  bounds: Bounds,
   spacing: number,
   view: CameraView,
 ): number =>
   screenSpaceError(
     spacing,
-    distanceToCube(view.position, cube),
-    view.viewportHeight,
+    distanceToBounds(view.position, bounds),
+    view.viewportHeightCssPx,
     view.fovY,
   );

@@ -9,16 +9,23 @@
  * is out of scope here.
  */
 
-import { Copc, Getter, type Hierarchy } from 'copc';
+import { Copc, Getter, type Hierarchy } from "copc";
 
-import { keyFromString, keyToString, nodeCube, type VoxelKey } from './octree';
+import {
+  keyFromString,
+  keyToString,
+  nodeBounds,
+  nodeCube,
+  pointSpacing,
+  type VoxelKey,
+} from "./octree";
 import type {
   LoadTileOptions,
   NodeInfo,
   TileData,
   TileSource,
   TileSourceMetadata,
-} from './tileSource';
+} from "./tileSource";
 
 export type RangeGetter = (begin: number, end: number) => Promise<Uint8Array>;
 
@@ -30,8 +37,8 @@ export interface CopcTileSourceOptions {
 const ABORT_CHECK_STRIDE = 4096;
 
 const abortError = (): Error => {
-  const error = new Error('The operation was aborted');
-  error.name = 'AbortError';
+  const error = new Error("The operation was aborted");
+  error.name = "AbortError";
   return error;
 };
 
@@ -40,7 +47,7 @@ export const createCopcTileSource = async (
   options: CopcTileSourceOptions,
 ): Promise<TileSource> => {
   const getter: RangeGetter =
-    typeof options.source === 'string'
+    typeof options.source === "string"
       ? Getter.http(options.source)
       : options.source;
 
@@ -49,16 +56,15 @@ export const createCopcTileSource = async (
   const halfSize = (maxX - minX) / 2;
   const metadata: TileSourceMetadata = {
     pointCount: copc.header.pointCount,
-    cube: {
-      center: [minX + halfSize, minY + halfSize, minZ + halfSize],
-      halfSize,
-    },
-    spacing: copc.info.spacing,
+  };
+  const rootCube = {
+    center: [minX + halfSize, minY + halfSize, minZ + halfSize] as const,
+    halfSize,
   };
 
   const nodeMap = new Map<string, Hierarchy.Node>();
   const pageMap = new Map<string, Hierarchy.Page>([
-    ['0-0-0-0', copc.info.rootHierarchyPage],
+    ["0-0-0-0", copc.info.rootHierarchyPage],
   ]);
 
   return {
@@ -75,27 +81,30 @@ export const createCopcTileSource = async (
       for (const [nodeKey, node] of Object.entries(subtree.nodes)) {
         if (node === undefined) continue;
         nodeMap.set(nodeKey, node);
+        const nodeVoxelKey = keyFromString(nodeKey);
         infos.push({
-          key: keyFromString(nodeKey),
+          key: nodeVoxelKey,
           pointCount: node.pointCount,
+          bounds: nodeBounds(rootCube, nodeVoxelKey),
+          spacing: pointSpacing(copc.info.spacing, nodeVoxelKey.level),
         });
       }
       for (const [pageKey, subPage] of Object.entries(subtree.pages)) {
         if (subPage === undefined) continue;
         pageMap.set(pageKey, subPage);
+        const pageVoxelKey = keyFromString(pageKey);
         infos.push({
-          key: keyFromString(pageKey),
+          key: pageVoxelKey,
           pointCount: 0,
+          bounds: nodeBounds(rootCube, pageVoxelKey),
+          spacing: pointSpacing(copc.info.spacing, pageVoxelKey.level),
           pageRef: true,
         });
       }
       return infos;
     },
 
-    async loadTile(
-      key: VoxelKey,
-      opts?: LoadTileOptions,
-    ): Promise<TileData> {
+    async loadTile(key: VoxelKey, opts?: LoadTileOptions): Promise<TileData> {
       const keyString = keyToString(key);
       const node = nodeMap.get(keyString);
       if (node === undefined) {
@@ -108,24 +117,28 @@ export const createCopcTileSource = async (
       if (signal?.aborted) throw abortError();
 
       const pointCount = view.pointCount;
-      const { center: origin } = nodeCube(metadata.cube, key);
-      const getX = view.getter('X');
-      const getY = view.getter('Y');
-      const getZ = view.getter('Z');
+      const { center: origin } = nodeCube(rootCube, key);
+      const getX = view.getter("X");
+      const getY = view.getter("Y");
+      const getZ = view.getter("Z");
       const hasRgb =
-        view.dimensions['Red'] !== undefined &&
-        view.dimensions['Green'] !== undefined &&
-        view.dimensions['Blue'] !== undefined;
+        view.dimensions["Red"] !== undefined &&
+        view.dimensions["Green"] !== undefined &&
+        view.dimensions["Blue"] !== undefined;
 
       const positions = new Float32Array(pointCount * 3);
       const rawRgb = hasRgb ? new Uint16Array(pointCount * 3) : null;
-      const getR = hasRgb ? view.getter('Red') : null;
-      const getG = hasRgb ? view.getter('Green') : null;
-      const getB = hasRgb ? view.getter('Blue') : null;
+      const getR = hasRgb ? view.getter("Red") : null;
+      const getG = hasRgb ? view.getter("Green") : null;
+      const getB = hasRgb ? view.getter("Blue") : null;
 
       let maxChannel = 0;
       for (let i = 0; i < pointCount; i += 1) {
-        if (signal !== undefined && i % ABORT_CHECK_STRIDE === 0 && signal.aborted) {
+        if (
+          signal !== undefined &&
+          i % ABORT_CHECK_STRIDE === 0 &&
+          signal.aborted
+        ) {
           throw abortError();
         }
         positions[i * 3] = getX(i) - origin[0];

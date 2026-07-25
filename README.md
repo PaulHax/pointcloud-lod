@@ -65,11 +65,14 @@ const adapter = createRendererAdapter({ renderer, scheduleRender });
 const controller = createLodController({
   source,
   onTiles: (batch) => adapter.applyBatch(batch),
+  onPointDiameterCssPx: (diameter) => adapter.setPointDiameterCssPx(diameter),
+  presentation: { mode: "auto", userScale: 1 },
   scheduleRender,
 });
 
 // Feed the controller a plain camera description on every camera change:
-controller.setCamera({ viewProj, position, fovY, viewportHeight });
+controller.setCamera({ viewProj, position, fovY, viewportHeightCssPx });
+adapter.setDevicePixelRatio(window.devicePixelRatio);
 
 // Tear down when done (both are idempotent):
 controller.dispose();
@@ -91,7 +94,8 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
 ```
 
 - **TileSource** — abstract interface over an octree tile store: dataset
-  metadata, hierarchy pages, and per-node point payloads. Two
+  metadata, hierarchy pages with conservative render-space bounds and effective
+  spacing for every node, and per-node point payloads. Two
   implementations ship:
   - `createCopcTileSource` reads [COPC](https://copc.io/) files directly
     over HTTP Range requests (via the `copc` package), so any static file
@@ -106,6 +110,9 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
   additive, so that invariant alone guarantees hole-free refinement),
   coarse-first fetching with bounded concurrency and cancellation,
   byte-budgeted LRU caching of deselected tiles, and batched delivery.
+  Fixed presentation keeps one CSS-pixel diameter; Auto presentation derives
+  one damped settled diameter from the p75 projected spacing of the ready
+  terminal coverage frontier and uses two CSS pixels during interaction.
 - **Renderer adapter** (`createRendererAdapter`) — turns tile batches into
   vtk.js actors, one `vtkPolyData` + `vtkPointGaussianMapper` per tile
   (one gl.POINTS vertex per point, no cell topology), with an anchor base
@@ -113,6 +120,8 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
   module importing `@kitware/vtk.js`, which is why it ships under a separate
   `pointcloud-lod/vtk` entry point. The `vtkPointGaussianMapper` it uses is
   not yet in a released vtk.js — see [Requirements](#requirements).
+  CSS diameter stays separate from framebuffer density: the adapter applies
+  device pixel ratio through the mapper at the final rendering boundary.
 
 Camera math (`frustumPlanes`, `screenSpaceError`) is pure and
 renderer-agnostic: the controller takes a view-projection matrix and camera

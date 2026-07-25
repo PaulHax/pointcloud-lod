@@ -104,6 +104,11 @@ export interface AdaptiveBudget {
   /** Current budget for a regime, without recording a sample. */
   budget(interacting: boolean): number;
   /**
+   * Start a fresh measurement run at an observed budget.
+   * Always clears timing samples from the preceding run.
+   */
+  restartAt(interacting: boolean, points: number, now: number): number;
+  /**
    * Raise or lower the ceiling (e.g. when the memory-derived cap moves).
    * Budgets already above the new ceiling drop to it immediately.
    */
@@ -248,6 +253,14 @@ export const createAdaptiveBudget = (
 
     budget(interacting) {
       return trackFor(interacting).budget;
+    },
+
+    restartAt(interacting, points, now) {
+      const track = trackFor(interacting);
+      track.budget = clamp(points);
+      track.samples.length = 0;
+      track.lastAdjust = now;
+      return track.budget;
     },
 
     setMaxBudget(points) {

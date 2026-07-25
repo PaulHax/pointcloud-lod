@@ -14,7 +14,7 @@
 import {
   frustumPlanes,
   nodeScreenSpaceError,
-  cubeIntersectsFrustum,
+  boundsIntersectsFrustum,
   type CameraView,
 } from "./camera";
 import {
@@ -37,8 +37,7 @@ import {
   childKeys,
   keyFromString,
   keyToString,
-  nodeCube,
-  pointSpacing,
+  type Bounds,
   type VoxelKey,
 } from "./octree";
 import type { TileData, TileSource } from "./tileSource";
@@ -47,6 +46,22 @@ export interface TileBatch {
   readonly added: readonly { key: VoxelKey; tile: TileData }[];
   readonly removed: readonly VoxelKey[];
 }
+
+export interface FixedPointPresentation {
+  readonly mode: "fixed";
+  readonly diameterCssPx: number;
+}
+
+export interface AutoPointPresentation {
+  readonly mode: "auto";
+  /** Multiplier applied after deriving the density-aware Auto diameter. */
+  readonly userScale: number;
+  /** Bounds for the unscaled density-aware diameter. */
+  readonly minDiameterCssPx?: number;
+  readonly maxDiameterCssPx?: number;
+}
+
+export type PointPresentation = FixedPointPresentation | AutoPointPresentation;
 
 export interface LodControllerOptions {
   source: TileSource;
@@ -82,7 +97,7 @@ export interface LodControllerOptions {
   memory?: MemoryPool | number;
   /**
    * How long after the last camera change the controller still treats itself
-   * as "interacting" for adaptive budgeting, ms. Default 300.
+   * as "interacting" for adaptive budgeting, ms. Default 750.
    */
   interactionSettleMs?: number;
   /** Parallel tile fetches. Default 6. */
@@ -102,6 +117,10 @@ export interface LodControllerOptions {
    * refined further. Default 1.
    */
   refinementCutoffPx?: number;
+  /** Point presentation. Default `{mode: "fixed", diameterCssPx: 2}`. */
+  presentation?: PointPresentation;
+  /** Receives the one CSS-pixel diameter applied to every active tile. */
+  onPointDiameterCssPx?: (diameterCssPx: number) => void;
   /** Non-abort fetch/hierarchy failures land here. Default: console.warn. */
   onError?: (error: unknown) => void;
 }
@@ -133,6 +152,12 @@ export interface LodControllerStats {
   readonly interacting: boolean;
   /** Explicit interaction nesting depth reported by the host. */
   readonly interactionDepth: number;
+  /** Current explicit presentation and emitted uniform diameter. */
+  readonly presentation: {
+    readonly config: PointPresentation;
+    readonly diameterCssPx: number;
+    readonly targetDiameterCssPx: number;
+  };
   // --- phase0-bench (removable; see app/telesculptor_web/app/bench/README.md) ---
   /**
    * Diagnostic counters below are cumulative for the controller's lifetime and
@@ -198,12 +223,21 @@ export interface LodSelectionStats {
   readonly budgetSkippedPoints: number;
   /** Root projected screen-space error, used for cross-cloud allocation. */
   readonly projectedImportance: number;
-  /** SSE distribution for selected nodes stopped by the cutoff. */
-  readonly frontierSse: {
+  /** Projected-spacing distribution for the ready terminal coverage frontier. */
+  readonly readyTerminalFrontier: {
     readonly count: number;
-    readonly p50: number | null;
-    readonly p95: number | null;
-    readonly max: number | null;
+    readonly leafNodes: number;
+    readonly cutoffNodes: number;
+    readonly hierarchyBlockedNodes: number;
+    readonly tileBlockedNodes: number;
+    readonly budgetBlockedNodes: number;
+    readonly projectedSpacingCssPx: {
+      readonly p25: number | null;
+      readonly p50: number | null;
+      readonly p75: number | null;
+      readonly p95: number | null;
+      readonly max: number | null;
+    };
   };
 }
 
@@ -236,6 +270,8 @@ export interface LodController {
   refresh(): void;
   /** Change the screen-space refinement cutoff and reselect immediately. */
   setRefinementCutoffPx(pixels: number): void;
+  /** Replace the explicit Fixed/Auto point-presentation contract. */
+  setPresentation(presentation: PointPresentation): void;
   /**
    * Enable or disable renderer submission. Disabling immediately removes all
    * submitted tiles, cancels tile requests, and moves decoded payloads into
@@ -249,6 +285,8 @@ export interface LodController {
 
 interface HierarchyEntry {
   pointCount: number;
+  bounds: Bounds;
+  spacing: number;
   children: readonly VoxelKey[] | null;
   pageRef: boolean;
 }
@@ -267,6 +305,79 @@ const percentile = (values: readonly number[], p: number): number | null => {
   const rank = Math.ceil(p * sorted.length);
   return sorted[Math.min(sorted.length, Math.max(1, rank)) - 1] ?? null;
 };
+
+const DEFAULT_PRESENTATION: FixedPointPresentation = {
+  mode: "fixed",
+  diameterCssPx: 2,
+};
+const DEFAULT_AUTO_MIN_DIAMETER_CSS_PX = 1.5;
+const DEFAULT_AUTO_MAX_DIAMETER_CSS_PX = 4;
+const INITIAL_AUTO_DIAMETER_CSS_PX = 2;
+
+const normalizePresentation = (
+  value: PointPresentation | undefined,
+): PointPresentation => {
+  const presentation = value ?? DEFAULT_PRESENTATION;
+  if (presentation.mode === "fixed") {
+    if (
+      !Number.isFinite(presentation.diameterCssPx) ||
+      presentation.diameterCssPx <= 0
+    ) {
+      throw new Error("Fixed diameterCssPx must be finite and > 0");
+    }
+    return { mode: "fixed", diameterCssPx: presentation.diameterCssPx };
+  }
+  const min = presentation.minDiameterCssPx ?? DEFAULT_AUTO_MIN_DIAMETER_CSS_PX;
+  const max = presentation.maxDiameterCssPx ?? DEFAULT_AUTO_MAX_DIAMETER_CSS_PX;
+  if (
+    !Number.isFinite(presentation.userScale) ||
+    presentation.userScale <= 0 ||
+    !Number.isFinite(min) ||
+    min <= 0 ||
+    !Number.isFinite(max) ||
+    max < min
+  ) {
+    throw new Error(
+      "Auto userScale/minDiameterCssPx/maxDiameterCssPx must be finite, positive, and ordered",
+    );
+  }
+  return {
+    mode: "auto",
+    userScale: presentation.userScale,
+    minDiameterCssPx: min,
+    maxDiameterCssPx: max,
+  };
+};
+
+const samePresentation = (
+  left: PointPresentation,
+  right: PointPresentation,
+): boolean =>
+  left.mode === right.mode &&
+  (left.mode === "fixed"
+    ? left.diameterCssPx === (right as FixedPointPresentation).diameterCssPx
+    : left.userScale === (right as AutoPointPresentation).userScale &&
+      left.minDiameterCssPx ===
+        (right as AutoPointPresentation).minDiameterCssPx &&
+      left.maxDiameterCssPx ===
+        (right as AutoPointPresentation).maxDiameterCssPx);
+
+const emptyReadyTerminalFrontier =
+  (): LodSelectionStats["readyTerminalFrontier"] => ({
+    count: 0,
+    leafNodes: 0,
+    cutoffNodes: 0,
+    hierarchyBlockedNodes: 0,
+    tileBlockedNodes: 0,
+    budgetBlockedNodes: 0,
+    projectedSpacingCssPx: {
+      p25: null,
+      p50: null,
+      p75: null,
+      p95: null,
+      max: null,
+    },
+  });
 
 // --- phase0-bench (removable; see app/telesculptor_web/app/bench/README.md) ---
 /** Resident tiles/points grouped by octree level, ascending. Diagnostics only. */
@@ -300,18 +411,37 @@ export const createLodController = (
     fetchConcurrency = 6,
     cacheBytes = 256 * 1024 * 1024,
     selectionDelayMs = 150,
-    interactionSettleMs = 300,
+    interactionSettleMs = 750,
     refinementCutoffPx: initialRefinementCutoffPx = 1,
+    onPointDiameterCssPx = () => {},
     onError = (error) => console.warn("pointcloud-lod:", error),
   } = options;
 
   let source = options.source;
   let pointBudget = options.pointBudget ?? 2_000_000;
   let refinementCutoffPx = initialRefinementCutoffPx;
+  let presentation = normalizePresentation(options.presentation);
+  let diameterCssPx =
+    presentation.mode === "fixed"
+      ? presentation.diameterCssPx
+      : INITIAL_AUTO_DIAMETER_CSS_PX;
+  let targetDiameterCssPx = diameterCssPx;
   let active = options.active ?? true;
   let view: CameraView | null = null;
   let disposed = false;
   const controllerInstanceId = nextControllerInstanceId++;
+  onPointDiameterCssPx(diameterCssPx);
+
+  const emitDiameter = (next: number): void => {
+    if (next === diameterCssPx) return;
+    diameterCssPx = next;
+    onPointDiameterCssPx(next);
+  };
+
+  const setDiameterImmediately = (target: number): void => {
+    targetDiameterCssPx = target;
+    emitDiameter(target);
+  };
 
   // Adaptive budget (Phase 5): when enabled, the loop moves the effective
   // budget between a floor and the memory-derived ceiling, tracking a target
@@ -433,8 +563,9 @@ export const createLodController = (
     budgetSkippedNodes: 0,
     budgetSkippedPoints: 0,
     projectedImportance: 0,
-    frontierSse: { count: 0, p50: null, p95: null, max: null },
+    readyTerminalFrontier: emptyReadyTerminalFrontier(),
   };
+  let budgetSkipped = new Set<string>();
   const inFlight = new Map<string, AbortController>();
   let queue: string[] = [];
 
@@ -484,6 +615,8 @@ export const createLodController = (
         for (const info of infos) {
           hierarchy.set(keyToString(info.key), {
             pointCount: info.pointCount,
+            bounds: info.bounds,
+            spacing: info.spacing,
             children: info.children ?? null,
             pageRef: info.pageRef === true,
           });
@@ -503,6 +636,141 @@ export const createLodController = (
   ): readonly VoxelKey[] =>
     entry.children ??
     childKeys(key).filter((child) => hierarchy.has(keyToString(child)));
+
+  const isEntryReady = (keyString: string, entry: HierarchyEntry): boolean =>
+    entry.pointCount === 0 || resident.has(keyString);
+
+  const updateReadyTerminalFrontier = (): void => {
+    const currentView = view;
+    if (currentView === null || !active || !target.has(keyToString(ROOT_KEY))) {
+      selectionStats = {
+        ...selectionStats,
+        readyTerminalFrontier: emptyReadyTerminalFrontier(),
+      };
+      return;
+    }
+
+    const planes = frustumPlanes(currentView.viewProj);
+    const projectedSpacing = (entry: HierarchyEntry): number =>
+      nodeScreenSpaceError(entry.bounds, entry.spacing, currentView);
+    const values: number[] = [];
+    const terminalKeys = new Set<string>();
+    let leafNodes = 0;
+    let cutoffNodes = 0;
+    let hierarchyBlockedNodes = 0;
+    let tileBlockedNodes = 0;
+    let budgetBlockedNodes = 0;
+
+    const addTerminal = (
+      keyString: string,
+      entry: HierarchyEntry,
+      reasons: {
+        leaf?: boolean;
+        cutoff?: boolean;
+        hierarchy?: boolean;
+        tile?: boolean;
+        budget?: boolean;
+      },
+    ): void => {
+      // A structural node has no samples with which to cover a blocked region.
+      if (entry.pointCount === 0 || !resident.has(keyString)) return;
+      if (!terminalKeys.has(keyString)) {
+        terminalKeys.add(keyString);
+        values.push(projectedSpacing(entry));
+      }
+      if (reasons.leaf) leafNodes += 1;
+      if (reasons.cutoff) cutoffNodes += 1;
+      if (reasons.hierarchy) hierarchyBlockedNodes += 1;
+      if (reasons.tile) tileBlockedNodes += 1;
+      if (reasons.budget) budgetBlockedNodes += 1;
+    };
+
+    const walk = (key: VoxelKey): void => {
+      const keyString = keyToString(key);
+      if (!target.has(keyString)) return;
+      const entry = hierarchy.get(keyString);
+      if (entry === undefined || !isEntryReady(keyString, entry)) return;
+
+      const children = childrenOf(key, entry);
+      if (children.length === 0) {
+        addTerminal(keyString, entry, { leaf: true });
+        return;
+      }
+      if (projectedSpacing(entry) < refinementCutoffPx) {
+        addTerminal(keyString, entry, { cutoff: true });
+        return;
+      }
+
+      let hierarchyBlocked = false;
+      let tileBlocked = false;
+      let budgetBlocked = false;
+      const readyChildren: VoxelKey[] = [];
+      for (const child of children) {
+        const childString = keyToString(child);
+        const childEntry = hierarchy.get(childString);
+        if (
+          childEntry === undefined ||
+          (childEntry.pageRef && !pagesLoaded.has(childString))
+        ) {
+          hierarchyBlocked = true;
+          continue;
+        }
+        if (!boundsIntersectsFrustum(planes, childEntry.bounds)) continue;
+        if (!target.has(childString)) {
+          // A visible, available child of a selected parent can only be absent
+          // because the breadth-first point budget rejected it.
+          budgetBlocked = budgetSkipped.has(childString) || budgetBlocked;
+          continue;
+        }
+        if (!isEntryReady(childString, childEntry)) {
+          tileBlocked = true;
+          continue;
+        }
+        readyChildren.push(child);
+      }
+
+      if (hierarchyBlocked || tileBlocked || budgetBlocked) {
+        addTerminal(keyString, entry, {
+          hierarchy: hierarchyBlocked,
+          tile: tileBlocked,
+          budget: budgetBlocked,
+        });
+      }
+      for (const child of readyChildren) walk(child);
+    };
+
+    walk(ROOT_KEY);
+    const frontier: LodSelectionStats["readyTerminalFrontier"] = {
+      count: terminalKeys.size,
+      leafNodes,
+      cutoffNodes,
+      hierarchyBlockedNodes,
+      tileBlockedNodes,
+      budgetBlockedNodes,
+      projectedSpacingCssPx: {
+        p25: percentile(values, 0.25),
+        p50: percentile(values, 0.5),
+        p75: percentile(values, 0.75),
+        p95: percentile(values, 0.95),
+        max: values.length > 0 ? Math.max(...values) : null,
+      },
+    };
+    selectionStats = { ...selectionStats, readyTerminalFrontier: frontier };
+
+    if (presentation.mode === "auto") {
+      const p75 = frontier.projectedSpacingCssPx.p75;
+      if (p75 !== null) {
+        const min =
+          presentation.minDiameterCssPx ?? DEFAULT_AUTO_MIN_DIAMETER_CSS_PX;
+        const max =
+          presentation.maxDiameterCssPx ?? DEFAULT_AUTO_MAX_DIAMETER_CSS_PX;
+        const target =
+          presentation.userScale * Math.min(max, Math.max(min, p75));
+        targetDiameterCssPx = target;
+        emitDiameter(target);
+      }
+    }
+  };
 
   const pump = (): void => {
     while (inFlight.size < fetchConcurrency && queue.length > 0) {
@@ -549,6 +817,7 @@ export const createLodController = (
             residentPoints += tile.pointCount;
             residentBytes += tileBytes(tile);
             pendingAdded.push({ key, tile });
+            updateReadyTerminalFrontier();
             scheduleFlush();
           } else {
             cache.set(keyString, tile, tileBytes(tile));
@@ -559,6 +828,7 @@ export const createLodController = (
           if (disposed || requestEpoch !== epoch) return;
           if (inFlight.get(keyString) === abort) inFlight.delete(keyString);
           if (!isAbortError(error)) onError(error);
+          updateReadyTerminalFrontier();
           pump();
         });
     }
@@ -573,18 +843,17 @@ export const createLodController = (
     const budget = currentBudget(now);
     lastSelectionBudget = budget;
     const currentView = view;
-    const meta = source.metadata();
     const planes = frustumPlanes(currentView.viewProj);
     const sseByKey = new Map<string, number>();
     const sse = (key: VoxelKey): number => {
       const keyString = keyToString(key);
       let value = sseByKey.get(keyString);
       if (value === undefined) {
-        value = nodeScreenSpaceError(
-          nodeCube(meta.cube, key),
-          pointSpacing(meta.spacing, key.level),
-          currentView,
-        );
+        const entry = hierarchy.get(keyString);
+        value =
+          entry === undefined
+            ? 0
+            : nodeScreenSpaceError(entry.bounds, entry.spacing, currentView);
         sseByKey.set(keyString, value);
       }
       return value;
@@ -613,7 +882,7 @@ export const createLodController = (
           hierarchyPageBlockedNodes += 1;
           return undefined;
         }
-        if (!cubeIntersectsFrustum(planes, nodeCube(meta.cube, key))) {
+        if (!boundsIntersectsFrustum(planes, entry.bounds)) {
           frustumCulledNodes += 1;
           frustumCulledPoints += entry.pointCount;
           return undefined;
@@ -632,6 +901,7 @@ export const createLodController = (
 
     const previousTarget = target;
     target = selection.selected;
+    budgetSkipped = new Set(selection.budgetSkipped);
     if (
       previousTarget.size !== target.size ||
       [...target].some((keyString) => !previousTarget.has(keyString))
@@ -639,17 +909,6 @@ export const createLodController = (
       targetRevision += 1;
     }
     selectionGeneration += 1;
-    const frontierSse = [...target]
-      .map(keyFromString)
-      .filter((key) => {
-        const entry = hierarchy.get(keyToString(key));
-        return (
-          !!entry &&
-          childrenOf(key, entry).length > 0 &&
-          sse(key) < refinementCutoffPx
-        );
-      })
-      .map(sse);
     selectionStats = {
       generation: selectionGeneration,
       targetRevision,
@@ -667,12 +926,7 @@ export const createLodController = (
       budgetSkippedNodes: selection.budgetSkippedNodes,
       budgetSkippedPoints: selection.budgetSkippedPoints,
       projectedImportance: target.size > 0 ? sse(ROOT_KEY) : 0,
-      frontierSse: {
-        count: frontierSse.length,
-        p50: percentile(frontierSse, 0.5),
-        p95: percentile(frontierSse, 0.95),
-        max: frontierSse.length > 0 ? Math.max(...frontierSse) : null,
-      },
+      readyTerminalFrontier: emptyReadyTerminalFrontier(),
     };
     for (const key of neededPages) loadPage(key);
 
@@ -702,6 +956,9 @@ export const createLodController = (
     const toFetch: string[] = [];
     for (const keyString of target) {
       if (resident.has(keyString) || inFlight.has(keyString)) continue;
+      const entry = hierarchy.get(keyString);
+      // Structural hierarchy nodes participate in selection but carry no tile.
+      if (entry?.pointCount === 0) continue;
       const cached = cache.get(keyString);
       if (cached !== undefined) {
         // --- phase0-bench (removable; see app/telesculptor_web/app/bench/README.md) ---
@@ -726,6 +983,7 @@ export const createLodController = (
       return sse(kb) - sse(ka);
     });
 
+    updateReadyTerminalFrontier();
     scheduleFlush();
     pump();
   };
@@ -754,6 +1012,7 @@ export const createLodController = (
       // inference mode a budget change is the only missing work.
       if (
         explicitInteractionSeen ||
+        presentation.mode === "auto" ||
         currentBudget(Date.now()) !== lastSelectionBudget
       ) {
         runSelection();
@@ -797,6 +1056,7 @@ export const createLodController = (
     cache.clear();
     if (target.size > 0) targetRevision += 1;
     target = new Set();
+    budgetSkipped = new Set();
     selectionStats = {
       ...selectionStats,
       targetRevision,
@@ -814,7 +1074,7 @@ export const createLodController = (
       budgetSkippedNodes: 0,
       budgetSkippedPoints: 0,
       projectedImportance: 0,
-      frontierSse: { count: 0, p50: null, p95: null, max: null },
+      readyTerminalFrontier: emptyReadyTerminalFrontier(),
     };
     for (const keyString of resident.keys()) {
       pendingRemoved.push(keyFromString(keyString));
@@ -833,7 +1093,7 @@ export const createLodController = (
   const sameView = (a: CameraView, b: CameraView): boolean => {
     if (
       a.fovY !== b.fovY ||
-      a.viewportHeight !== b.viewportHeight ||
+      a.viewportHeightCssPx !== b.viewportHeightCssPx ||
       a.position[0] !== b.position[0] ||
       a.position[1] !== b.position[1] ||
       a.position[2] !== b.position[2] ||
@@ -859,7 +1119,9 @@ export const createLodController = (
       if (!explicitInteractionSeen) {
         lastCameraChange = Date.now();
         // Camera timestamps are a fallback for hosts without lifecycle events.
-        if (adaptiveBudget !== null) armSettleTimer();
+        if (adaptiveBudget !== null || presentation.mode === "auto") {
+          armSettleTimer();
+        }
       }
       requestSelection();
     },
@@ -907,6 +1169,10 @@ export const createLodController = (
     setSource(nextSource) {
       if (disposed) return;
       clearSettleTimer();
+      if (presentation.mode === "auto") {
+        targetDiameterCssPx = INITIAL_AUTO_DIAMETER_CSS_PX;
+        emitDiameter(INITIAL_AUTO_DIAMETER_CSS_PX);
+      }
       interactionSettling = false;
       dropEverything();
       adaptiveBudget?.reset();
@@ -925,6 +1191,18 @@ export const createLodController = (
       if (pixels === refinementCutoffPx) return;
       refinementCutoffPx = pixels;
       runSelection();
+    },
+
+    setPresentation(nextPresentation) {
+      if (disposed) return;
+      const normalized = normalizePresentation(nextPresentation);
+      if (samePresentation(normalized, presentation)) return;
+      presentation = normalized;
+      if (presentation.mode === "fixed") {
+        setDiameterImmediately(presentation.diameterCssPx);
+      } else {
+        updateReadyTerminalFrontier();
+      }
     },
 
     setActive(nextActive) {
@@ -973,7 +1251,7 @@ export const createLodController = (
         budgetSkippedNodes: 0,
         budgetSkippedPoints: 0,
         projectedImportance: 0,
-        frontierSse: { count: 0, p50: null, p95: null, max: null },
+        readyTerminalFrontier: emptyReadyTerminalFrontier(),
       };
 
       // Suppress any not-yet-delivered additions, then remove every actor the
@@ -1008,6 +1286,11 @@ export const createLodController = (
         memoryCeilingPoints: memoryCeilingPoints(),
         interacting: isInteracting(now),
         interactionDepth,
+        presentation: {
+          config: presentation,
+          diameterCssPx,
+          targetDiameterCssPx,
+        },
         // --- phase0-bench (removable; see app/telesculptor_web/app/bench/README.md) ---
         cachedTiles: cache.count(),
         fetchedTiles,

@@ -9,7 +9,7 @@
  * every ancestor available to cover the gaps around it).
  */
 
-import { childKeys, keyToString, type VoxelKey } from './octree';
+import { childKeys, keyToString, type VoxelKey } from "./octree";
 
 export interface HierarchyNode {
   /** Points stored in this node (not cumulative over the subtree). */
@@ -50,12 +50,15 @@ export interface NodeSelection {
   readonly budgetSkippedNodes: number;
   /** Points stored in the nodes rejected only by the point budget. */
   readonly budgetSkippedPoints: number;
+  /** Keys rejected only because their points did not fit. */
+  readonly budgetSkipped: ReadonlySet<string>;
 }
 
 export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
   const { root, getNode, priority, pointBudget } = options;
 
   const selected = new Set<string>();
+  const budgetSkipped = new Set<string>();
   let totalPoints = 0;
   let consideredNodes = 0;
   let availableNodes = 0;
@@ -81,6 +84,7 @@ export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
         // siblings later in the ranking may still fit.
         budgetSkippedNodes += 1;
         budgetSkippedPoints += node.pointCount;
+        budgetSkipped.add(keyToString(key));
         continue;
       }
       selected.add(keyToString(key));
@@ -98,6 +102,7 @@ export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
     selectedNodes: selected.size,
     budgetSkippedNodes,
     budgetSkippedPoints,
+    budgetSkipped,
   };
 };
 

@@ -10,20 +10,20 @@
  * so callers can drop state and wait for a fresh anchor.
  */
 
-import { keyFromString, keyToString, type VoxelKey } from './octree';
+import { keyFromString, keyToString, type VoxelKey } from "./octree";
 import type {
   LoadTileOptions,
   NodeInfo,
   TileData,
   TileSource,
   TileSourceMetadata,
-} from './tileSource';
+} from "./tileSource";
 
 /** The asset revision behind this source no longer exists on the server. */
 export class RevisionGoneError extends Error {
   constructor(url: string) {
     super(`Revision gone: ${url}`);
-    this.name = 'RevisionGoneError';
+    this.name = "RevisionGoneError";
   }
 }
 
@@ -43,7 +43,7 @@ export const parsePct1 = (buffer: ArrayBuffer): TileData => {
   }
   const header = new DataView(buffer);
   if (header.getUint32(0, true) !== PCT1_MAGIC) {
-    throw new Error('PCT1 payload has wrong magic');
+    throw new Error("PCT1 payload has wrong magic");
   }
   const pointCount = header.getUint32(4, true);
   const flags = header.getUint32(8, true);
@@ -70,6 +70,11 @@ export const parsePct1 = (buffer: ArrayBuffer): TileData => {
 
 interface HierarchyEntryJson {
   readonly pointCount: number;
+  readonly bounds: {
+    readonly min: readonly [number, number, number];
+    readonly max: readonly [number, number, number];
+  };
+  readonly spacing: number;
   readonly children: readonly string[];
   readonly page: string | null;
 }
@@ -117,15 +122,14 @@ export const createHttpTileSource = (
       return Object.entries(body.nodes).map(([keyString, entry]) => ({
         key: keyFromString(keyString),
         pointCount: entry.pointCount,
+        bounds: entry.bounds,
+        spacing: entry.spacing,
         children: entry.children.map(keyFromString),
         pageRef: entry.page !== null && entry.page === keyString,
       }));
     },
 
-    async loadTile(
-      key: VoxelKey,
-      opts?: LoadTileOptions,
-    ): Promise<TileData> {
+    async loadTile(key: VoxelKey, opts?: LoadTileOptions): Promise<TileData> {
       const response = await request(
         `${endpoint}/tile/${keyToString(key)}.bin`,
         opts?.signal,

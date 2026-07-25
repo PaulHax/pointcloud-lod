@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createRendererAdapter } from "./rendererAdapter";
 import type { TileData } from "./tileSource";
@@ -24,9 +24,9 @@ const KEY_A = { level: 1, x: 0, y: 0, z: 0 };
 const KEY_B = { level: 1, x: 1, y: 0, z: 0 };
 
 const makeAdapter = (options?: {
-  pointSize?: number;
+  diameterCssPx?: number;
+  devicePixelRatio?: number;
   visible?: boolean;
-  worldSizing?: { rootSpacing: number; factor?: number };
 }) => {
   const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
   const scheduleRender = vi.fn();
@@ -39,11 +39,13 @@ const makeAdapter = (options?: {
 };
 
 beforeEach(resetStubs);
+afterEach(() => vi.useRealTimers());
 
 describe("createRendererAdapter", () => {
   it("creates one polydata/mapper/actor per added tile", () => {
     const { adapter, renderer, scheduleRender } = makeAdapter({
-      pointSize: 3,
+      diameterCssPx: 3,
+      devicePixelRatio: 2,
     });
     const data = tile([10, 20, 30]);
     adapter.applyBatch({ added: [{ key: KEY_A, tile: data }], removed: [] });
@@ -55,6 +57,9 @@ describe("createRendererAdapter", () => {
       gpuResidentBytes: 94,
       activeDrawTiles: 1,
       activeDrawPoints: 2,
+      diameterCssPx: 3,
+      devicePixelRatio: 2,
+      submittedSplatAreaDevicePx2: 18 * Math.PI,
     });
     expect(renderer.addActor).toHaveBeenCalledTimes(1);
     expect(scheduleRender).toHaveBeenCalledTimes(1);
@@ -65,6 +70,7 @@ describe("createRendererAdapter", () => {
     );
     expect(mapperInstances[0]!.inputData).toBe(polyDataInstances[0]);
     expect(mapperInstances[0]!.static).toBe(true);
+    expect(mapperInstances[0]!.scaleFactor).toBe(2);
     expect(actorInstances[0]!.pointSize).toBe(3);
     // Identity base: the tile matrix is a plain translation to the origin.
     expect(actorInstances[0]!.userMatrix!.slice(12, 15)).toEqual([10, 20, 30]);
@@ -79,7 +85,7 @@ describe("createRendererAdapter", () => {
     expect(polyDataInstances[0]!.scalars).toBeNull();
   });
 
-  it("removes and releases tile resources", () => {
+  it("pools removed resources until memory pressure or teardown", () => {
     const { adapter, renderer } = makeAdapter();
     adapter.applyBatch({
       added: [{ key: KEY_A, tile: tile([0, 0, 0]) }],
@@ -88,10 +94,72 @@ describe("createRendererAdapter", () => {
     adapter.applyBatch({ added: [], removed: [KEY_A] });
 
     expect(adapter.tileCount()).toBe(0);
+    expect(actorInstances[0]!.visibility).toBe(false);
+    expect(adapter.stats()).toMatchObject({
+      gpuResidentTiles: 1,
+      activeDrawTiles: 0,
+      activeDrawPoints: 0,
+    });
+    expect(renderer.removeActor).not.toHaveBeenCalled();
+
+    adapter.dispose();
     expect(renderer.removeActor).toHaveBeenCalledTimes(1);
     expect(actorInstances[0]!.deleted).toBe(true);
     expect(mapperInstances[0]!.deleted).toBe(true);
     expect(polyDataInstances[0]!.deleted).toBe(true);
+    expect(adapter.stats().gpuResidentTiles).toBe(0);
+  });
+
+  it("evicts retired resources at the shared-memory ceiling", () => {
+    const { adapter, renderer } = makeAdapter();
+    const dataA = tile([0, 0, 0]);
+    const dataB = tile([1, 0, 0]);
+    adapter.setResourceCeilingBytes(94);
+    adapter.applyBatch({
+      added: [{ key: KEY_A, tile: dataA }],
+      removed: [],
+    });
+    adapter.applyBatch({ added: [], removed: [KEY_A] });
+    adapter.applyBatch({
+      added: [{ key: KEY_B, tile: dataB }],
+      removed: [],
+    });
+
+    expect(renderer.removeActor).toHaveBeenCalledTimes(1);
+    expect(actorInstances[0]!.deleted).toBe(true);
+    expect(adapter.stats()).toMatchObject({
+      gpuResidentTiles: 1,
+      gpuResidentBytes: 94,
+      activeDrawTiles: 1,
+    });
+  });
+
+  it("reuses hidden tiles when stationary detail returns", () => {
+    const { adapter, renderer } = makeAdapter();
+    const data = tile([0, 0, 0]);
+    adapter.applyBatch({
+      added: [{ key: KEY_A, tile: data }],
+      removed: [],
+    });
+
+    adapter.applyBatch({ added: [], removed: [KEY_A] });
+    expect(renderer.removeActor).not.toHaveBeenCalled();
+    expect(adapter.stats()).toMatchObject({
+      gpuResidentTiles: 1,
+      activeDrawTiles: 0,
+    });
+
+    adapter.applyBatch({
+      added: [{ key: KEY_A, tile: data }],
+      removed: [],
+    });
+    expect(renderer.addActor).toHaveBeenCalledTimes(1);
+    expect(renderer.removeActor).not.toHaveBeenCalled();
+    expect(actorInstances).toHaveLength(1);
+    expect(adapter.stats()).toMatchObject({
+      gpuResidentTiles: 1,
+      activeDrawTiles: 1,
+    });
   });
 
   it("composes the base matrix with each tile origin", () => {
@@ -130,7 +198,7 @@ describe("createRendererAdapter", () => {
     expect(actorInstances[0]!.userMatrix!.slice(12, 15)).toEqual([21, 22, 33]);
   });
 
-  it("fans out point size and visibility to every tile actor", () => {
+  it("fans out CSS diameter, DPR, and visibility to every tile actor", () => {
     const { adapter, scheduleRender } = makeAdapter();
     adapter.applyBatch({
       added: [
@@ -141,91 +209,59 @@ describe("createRendererAdapter", () => {
     });
 
     scheduleRender.mockClear();
-    adapter.setPointSize(7);
+    adapter.setPointDiameterCssPx(7);
+    adapter.setDevicePixelRatio(2);
     adapter.setVisible(false);
     expect(actorInstances.map((a) => a.pointSize)).toEqual([7, 7]);
+    expect(mapperInstances.map((m) => m.scaleFactor)).toEqual([2, 2]);
     expect(actorInstances.map((a) => a.visibility)).toEqual([false, false]);
     expect(adapter.stats()).toMatchObject({
-      gpuResidentTiles: 2,
-      gpuResidentPoints: 4,
+      gpuResidentTiles: 0,
+      gpuResidentPoints: 0,
       activeDrawTiles: 0,
       activeDrawPoints: 0,
     });
-    expect(scheduleRender).toHaveBeenCalledTimes(2);
+    expect(scheduleRender).toHaveBeenCalledTimes(3);
 
     // No-op updates do not schedule renders.
     scheduleRender.mockClear();
-    adapter.setPointSize(7);
+    adapter.setPointDiameterCssPx(7);
+    adapter.setDevicePixelRatio(2);
     adapter.setVisible(false);
     expect(scheduleRender).not.toHaveBeenCalled();
   });
 
-  it("new tiles inherit the current base matrix, size, and visibility", () => {
+  it("hidden adapters reject new renderer resources", () => {
     const { adapter } = makeAdapter();
     adapter.setBaseMatrix([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 100, 0, 0, 1]);
-    adapter.setPointSize(5);
+    adapter.setPointDiameterCssPx(5);
+    adapter.setDevicePixelRatio(2);
     adapter.setVisible(false);
     adapter.applyBatch({
       added: [{ key: KEY_A, tile: tile([1, 0, 0]) }],
       removed: [],
     });
 
-    expect(actorInstances[0]!.userMatrix!.slice(12, 15)).toEqual([101, 0, 0]);
-    expect(actorInstances[0]!.pointSize).toBe(5);
-    expect(actorInstances[0]!.visibility).toBe(false);
+    expect(adapter.stats().gpuResidentTiles).toBe(0);
+    expect(actorInstances).toHaveLength(0);
   });
 
-  it("sizes splats in world units from the node spacing at each level", () => {
-    const { adapter } = makeAdapter({
-      worldSizing: { rootSpacing: 4, factor: 2 },
+  it("keeps apparent CSS diameter invariant across DPR", () => {
+    const { adapter, scheduleRender } = makeAdapter({
+      diameterCssPx: 2.5,
+      devicePixelRatio: 1,
     });
-    adapter.applyBatch({
-      added: [
-        { key: KEY_A, tile: tile([0, 0, 0]) }, // level 1: spacing 2
-        { key: { level: 2, x: 0, y: 0, z: 0 }, tile: tile([1, 0, 0]) },
-      ],
-      removed: [],
-    });
-    expect(mapperInstances.map((m) => m.worldSize)).toEqual([4, 2]);
-  });
-
-  it("defaults to screen-pixel sizing (worldSize 0)", () => {
-    const { adapter } = makeAdapter();
     adapter.applyBatch({
       added: [{ key: KEY_A, tile: tile([0, 0, 0]) }],
       removed: [],
     });
-    expect(mapperInstances[0]!.worldSize).toBe(0);
-  });
-
-  it("setWorldSizing re-sizes resident tiles and can disable world mode", () => {
-    const { adapter, scheduleRender } = makeAdapter();
-    adapter.applyBatch({
-      added: [{ key: KEY_A, tile: tile([0, 0, 0]) }],
-      removed: [],
-    });
+    expect(actorInstances[0]!.pointSize).toBe(2.5);
+    expect(mapperInstances[0]!.scaleFactor).toBe(1);
 
     scheduleRender.mockClear();
-    adapter.setWorldSizing({ rootSpacing: 8 }); // factor defaults to 1
-    expect(mapperInstances[0]!.worldSize).toBe(4);
-    expect(scheduleRender).toHaveBeenCalledTimes(1);
-
-    // New tiles inherit the current sizing.
-    adapter.applyBatch({
-      added: [{ key: KEY_B, tile: tile([1, 0, 0]) }],
-      removed: [],
-    });
-    expect(mapperInstances[1]!.worldSize).toBe(4);
-
-    adapter.setWorldSizing(null);
-    expect(mapperInstances.map((m) => m.worldSize)).toEqual([0, 0]);
-
-    // Value-equal re-applies are no-ops (hosts re-send config every paint).
-    adapter.setWorldSizing({ rootSpacing: 8, factor: 2 });
-    scheduleRender.mockClear();
-    adapter.setWorldSizing({ rootSpacing: 8, factor: 2 });
-    adapter.setWorldSizing(null);
-    adapter.setWorldSizing(null);
+    adapter.setDevicePixelRatio(2);
+    expect(actorInstances[0]!.pointSize).toBe(2.5);
+    expect(mapperInstances[0]!.scaleFactor).toBe(2);
     expect(scheduleRender).toHaveBeenCalledTimes(1);
   });
 

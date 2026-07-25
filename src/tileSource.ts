@@ -7,15 +7,11 @@
  * Anything exposing the same octree shape can implement it.
  */
 
-import type { Cube, Vec3, VoxelKey } from './octree';
+import type { Bounds, Vec3, VoxelKey } from "./octree";
 
 export interface TileSourceMetadata {
   /** Total points in the dataset. */
   readonly pointCount: number;
-  /** Root octree cube in world coordinates (COPC cube). */
-  readonly cube: Cube;
-  /** Point spacing at the root level; halves per level. */
-  readonly spacing: number;
 }
 
 /** One hierarchy entry, as delivered by a hierarchy page. */
@@ -23,6 +19,10 @@ export interface NodeInfo {
   readonly key: VoxelKey;
   /** Points stored in this node (0 is legal: structural node). */
   readonly pointCount: number;
+  /** Conservative render-space AABB, before any actor registration transform. */
+  readonly bounds: Bounds;
+  /** Effective metric point spacing for this node, in render-space units. */
+  readonly spacing: number;
   /**
    * Children known to exist. When absent, consumers derive children from the
    * presence of sibling entries in the same (or previously loaded) pages.

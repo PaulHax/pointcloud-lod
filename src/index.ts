@@ -11,13 +11,9 @@ export {
   type Vec3,
   type Cube,
   type Bounds,
-} from './octree';
+} from "./octree";
 
-export {
-  createLruCache,
-  type LruCache,
-  type LruCacheOptions,
-} from './lru';
+export { createLruCache, type LruCache, type LruCacheOptions } from "./lru";
 
 export {
   selectNodes,
@@ -25,7 +21,7 @@ export {
   type HierarchyNode,
   type SelectNodesOptions,
   type NodeSelection,
-} from './budget';
+} from "./budget";
 
 export type {
   TileSource,
@@ -33,26 +29,30 @@ export type {
   NodeInfo,
   TileData,
   LoadTileOptions,
-} from './tileSource';
+} from "./tileSource";
 
 export {
   frustumPlanes,
-  cubeIntersectsFrustum,
-  distanceToCube,
+  boundsIntersectsFrustum,
+  distanceToBounds,
   screenSpaceError,
   nodeScreenSpaceError,
   type CameraView,
   type Mat16,
   type Plane,
-} from './camera';
+} from "./camera";
 
 export {
   createLodController,
   type LodController,
   type LodControllerOptions,
   type LodControllerStats,
+  type LodSelectionStats,
+  type PointPresentation,
+  type FixedPointPresentation,
+  type AutoPointPresentation,
   type TileBatch,
-} from './controller';
+} from "./controller";
 
 export {
   createMemoryPool,
@@ -61,7 +61,7 @@ export {
   type MemoryPool,
   type MemoryPoolMember,
   type MemoryPoolOptions,
-} from './memoryPool';
+} from "./memoryPool";
 
 export {
   createAdaptiveBudget,
@@ -72,7 +72,7 @@ export {
   type AdaptiveBudgetTrackStats,
   type BudgetRegime,
   type RecordFrameOptions,
-} from './adaptiveBudget';
+} from "./adaptiveBudget";
 
 export {
   createViewGovernor,
@@ -82,7 +82,7 @@ export {
   type ViewGovernorMemberOptions,
   type ViewGovernorOptions,
   type ViewGovernorStats,
-} from './viewGovernor';
+} from "./viewGovernor";
 
 export {
   createHttpTileSource,
@@ -90,13 +90,13 @@ export {
   RevisionGoneError,
   PCT1_HEADER_BYTES,
   type HttpTileSourceOptions,
-} from './httpTileSource';
+} from "./httpTileSource";
 
 export {
   createCopcTileSource,
   type CopcTileSourceOptions,
   type RangeGetter,
-} from './copcTileSource';
+} from "./copcTileSource";
 
 // The vtk.js renderer adapter is deliberately NOT re-exported here. It imports
 // vtk.js at module scope, so re-exporting it would make this entry point throw
