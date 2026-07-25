@@ -513,6 +513,8 @@ describe("createLodController — adaptive budget", () => {
         : {
             adaptive: {
               initialBudget,
+              interactionInitialBudget: initialBudget,
+              maxStep: 0.25,
               ...(typeof adaptive === "object" ? adaptive : {}),
             },
           }),
@@ -528,6 +530,42 @@ describe("createLodController — adaptive budget", () => {
     await settle();
     expect(controller.stats().pointBudget).toBe(2_000_000);
     expect(controller.stats().interacting).toBe(false);
+    controller.dispose();
+  });
+
+  it("drops immediately and settles only after the outermost interaction ends", async () => {
+    const { controller } = makeAdaptive(
+      SMALL_TREE,
+      { interactionInitialBudget: 500_000 },
+      2_000_000,
+    );
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    vi.advanceTimersByTime(300);
+    await settle();
+    expect(controller.stats().pointBudget).toBe(2_000_000);
+
+    controller.beginInteraction();
+    controller.beginInteraction();
+    expect(controller.stats()).toMatchObject({
+      interacting: true,
+      interactionDepth: 2,
+      pointBudget: 500_000,
+    });
+    controller.endInteraction();
+    vi.advanceTimersByTime(400);
+    expect(controller.stats().interacting).toBe(true);
+    controller.endInteraction();
+    vi.advanceTimersByTime(299);
+    expect(controller.stats().interacting).toBe(true);
+    vi.advanceTimersByTime(1);
+    await settle();
+    expect(controller.stats()).toMatchObject({
+      interacting: false,
+      interactionDepth: 0,
+      pointBudget: 2_000_000,
+    });
     controller.dispose();
   });
 
@@ -998,12 +1036,12 @@ describe("createLodController — diagnostic stats", () => {
       samples: 0,
       estimateMs: null,
     });
-    expect(controller.stats().adaptive?.interaction.budget).toBe(2_000_000);
+    expect(controller.stats().adaptive?.interaction.budget).toBe(1_000_000);
 
     controller.setCamera(VIEW); // interacting: the frame lands on that track
     controller.recordFrame(20);
     expect(controller.stats().adaptive?.interaction).toEqual({
-      budget: 2_000_000,
+      budget: 1_000_000,
       samples: 1,
       estimateMs: 20,
     });

@@ -17,8 +17,8 @@
  * together:
  *   - hysteresis: a dead-band around the target where nothing changes, so
  *     frame-time noise never drives a change;
- *   - rate limiting: each adjustment moves the budget by at most `maxStep`, so
- *     one slow frame cannot collapse the budget;
+ *   - rate limiting: each adjustment has bounded directional steps, with
+ *     reductions allowed to react faster than increases;
  *   - cooldown + window reset: after any change a track waits `cooldownMs` and
  *     discards its now-stale samples, so it measures the new budget's cost
  *     before deciding again.
@@ -31,8 +31,10 @@
 export type BudgetRegime = 'stationary' | 'interaction';
 
 export interface AdaptiveBudgetOptions {
-  /** Starting budget for both tracks, points. Clamped to the range below. */
+  /** Starting stationary budget, points. Clamped to the range below. */
   initialBudget?: number;
+  /** Starting interaction budget, points. Default 1,000,000. */
+  interactionInitialBudget?: number;
   /** Hard floor; the loop never drops a budget below this. Default 200_000. */
   minBudget?: number;
   /**
@@ -56,8 +58,15 @@ export interface AdaptiveBudgetOptions {
    * target). Default 0.2.
    */
   hysteresis?: number;
-  /** Largest fractional budget change per adjustment. Default 0.25. */
+  /**
+   * Legacy symmetric step limit. When supplied it is used for both directions
+   * unless the corresponding directional option is also supplied.
+   */
   maxStep?: number;
+  /** Largest fractional increase per adjustment. Default 0.25. */
+  maxIncreaseStep?: number;
+  /** Largest fractional decrease per adjustment. Default 0.5. */
+  maxDecreaseStep?: number;
   /** Minimum time between adjustments on a track, ms. Default 400. */
   cooldownMs?: number;
   /** Samples a track needs before it will adjust at all. Default 8. */
@@ -99,6 +108,8 @@ export interface AdaptiveBudget {
    * Budgets already above the new ceiling drop to it immediately.
    */
   setMaxBudget(points: number): void;
+  /** Immediately reduce one track, bypassing sample and cooldown thresholds. */
+  reduceNow(interacting: boolean, factor?: number): number;
   /** Reset both tracks to the initial budget and clear their windows. */
   reset(): void;
   stats(): AdaptiveBudgetStats;
@@ -106,6 +117,7 @@ export interface AdaptiveBudget {
 
 const DEFAULTS = {
   initialBudget: 2_000_000,
+  interactionInitialBudget: 1_000_000,
   minBudget: 200_000,
   maxBudget: Number.POSITIVE_INFINITY,
   stationaryTargetMs: 16,
@@ -113,7 +125,8 @@ const DEFAULTS = {
   windowSize: 30,
   percentile: 0.9,
   hysteresis: 0.2,
-  maxStep: 0.25,
+  maxIncreaseStep: 0.25,
+  maxDecreaseStep: 0.5,
   cooldownMs: 400,
   minSamples: 8,
 } as const;
@@ -149,7 +162,14 @@ export const createAdaptiveBudget = (
   const windowSize = Math.max(1, Math.floor(options.windowSize ?? DEFAULTS.windowSize));
   const percentileP = options.percentile ?? DEFAULTS.percentile;
   const hysteresis = Math.max(0, options.hysteresis ?? DEFAULTS.hysteresis);
-  const maxStep = Math.max(0, options.maxStep ?? DEFAULTS.maxStep);
+  const maxIncreaseStep = Math.max(
+    0,
+    options.maxIncreaseStep ?? options.maxStep ?? DEFAULTS.maxIncreaseStep,
+  );
+  const maxDecreaseStep = Math.max(
+    0,
+    options.maxDecreaseStep ?? options.maxStep ?? DEFAULTS.maxDecreaseStep,
+  );
   const cooldownMs = Math.max(0, options.cooldownMs ?? DEFAULTS.cooldownMs);
   const minSamples = Math.max(1, Math.floor(options.minSamples ?? DEFAULTS.minSamples));
   // A window smaller than minSamples could never reach the threshold, which
@@ -164,9 +184,12 @@ export const createAdaptiveBudget = (
   };
 
   const initialBudget = clamp(options.initialBudget ?? DEFAULTS.initialBudget);
+  const interactionInitialBudget = clamp(
+    options.interactionInitialBudget ?? DEFAULTS.interactionInitialBudget,
+  );
 
   const stationary: Track = { budget: initialBudget, samples: [], lastAdjust: Number.NEGATIVE_INFINITY };
-  const interaction: Track = { budget: initialBudget, samples: [], lastAdjust: Number.NEGATIVE_INFINITY };
+  const interaction: Track = { budget: interactionInitialBudget, samples: [], lastAdjust: Number.NEGATIVE_INFINITY };
 
   const trackFor = (interacting: boolean): Track =>
     interacting ? interaction : stationary;
@@ -190,10 +213,10 @@ export const createAdaptiveBudget = (
     let factor: number;
     if (estimate > slowLimit) {
       // Too slow: shrink toward the target, but by at most one step.
-      factor = Math.max(targetMs / estimate, 1 - maxStep);
+      factor = Math.max(targetMs / estimate, 1 - maxDecreaseStep);
     } else if (estimate < fastLimit) {
       // Headroom: grow toward the target, but by at most one step.
-      factor = Math.min(targetMs / estimate, 1 + maxStep);
+      factor = Math.min(targetMs / estimate, 1 + maxIncreaseStep);
     } else {
       // Inside the dead-band: leave the budget alone (anti-oscillation).
       return;
@@ -243,11 +266,24 @@ export const createAdaptiveBudget = (
       }
     },
 
+    reduceNow(interacting, factor = 0.5) {
+      const track = trackFor(interacting);
+      const safeFactor = Number.isFinite(factor)
+        ? Math.min(Math.max(factor, 0), 1)
+        : 0.5;
+      const next = clamp(track.budget * safeFactor);
+      if (next !== track.budget) {
+        track.budget = next;
+        track.samples.length = 0;
+      }
+      return track.budget;
+    },
+
     reset() {
       // Re-clamp: the ceiling may have been lowered (setMaxBudget) since
       // construction, and the restored budget must never exceed it.
       stationary.budget = clamp(initialBudget);
-      interaction.budget = clamp(initialBudget);
+      interaction.budget = clamp(interactionInitialBudget);
       stationary.samples.length = 0;
       interaction.samples.length = 0;
       stationary.lastAdjust = Number.NEGATIVE_INFINITY;

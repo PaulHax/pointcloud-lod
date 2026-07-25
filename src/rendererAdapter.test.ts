@@ -111,6 +111,25 @@ describe("createRendererAdapter", () => {
     expect(actorInstances[0]!.userMatrix![0]).toBe(2);
   });
 
+  it("does not repaint for an unchanged base matrix", () => {
+    const { adapter, scheduleRender } = makeAdapter();
+    adapter.applyBatch({
+      added: [{ key: KEY_A, tile: tile([1, 2, 3]) }],
+      removed: [],
+    });
+    const matrix = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 10, 20, 30, 1];
+    adapter.setBaseMatrix(matrix);
+
+    scheduleRender.mockClear();
+    adapter.setBaseMatrix([...matrix]);
+    expect(scheduleRender).not.toHaveBeenCalled();
+
+    matrix[12] = 20;
+    adapter.setBaseMatrix(matrix);
+    expect(scheduleRender).toHaveBeenCalledTimes(1);
+    expect(actorInstances[0]!.userMatrix!.slice(12, 15)).toEqual([21, 22, 33]);
+  });
+
   it("fans out point size and visibility to every tile actor", () => {
     const { adapter, scheduleRender } = makeAdapter();
     adapter.applyBatch({

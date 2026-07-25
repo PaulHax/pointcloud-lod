@@ -39,6 +39,17 @@ const IDENTITY: readonly number[] = [
   1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
 ];
 
+const sameMatrix = (
+  left: ArrayLike<number>,
+  right: ArrayLike<number>,
+): boolean => {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+};
+
 const translation = (origin: Vec3): number[] => [
   1,
   0,
@@ -216,7 +227,11 @@ export const createRendererAdapter = (
 
     setBaseMatrix(matrix) {
       if (disposed) return;
-      baseMatrix = matrix ?? IDENTITY;
+      const next = matrix ?? IDENTITY;
+      if (sameMatrix(baseMatrix, next)) return;
+      // Keep a value snapshot: vtk.js may mutate and reuse the same UserMatrix
+      // object, and the next update still needs to detect that visual change.
+      baseMatrix = Array.from(next);
       for (const entry of tiles.values()) {
         entry.actor.setUserMatrix(tileMatrix(entry.origin));
       }

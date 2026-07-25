@@ -75,6 +75,16 @@ export {
 } from './adaptiveBudget';
 
 export {
+  createViewGovernor,
+  type HostFrameMetrics,
+  type ViewGovernor,
+  type ViewGovernorMember,
+  type ViewGovernorMemberOptions,
+  type ViewGovernorOptions,
+  type ViewGovernorStats,
+} from './viewGovernor';
+
+export {
   createHttpTileSource,
   parsePct1,
   RevisionGoneError,

@@ -44,6 +44,7 @@ describe('percentile', () => {
 
 const OPTS: AdaptiveBudgetOptions = {
   initialBudget: 2_000_000,
+  interactionInitialBudget: 2_000_000,
   minBudget: 200_000,
   maxBudget: 3_000_000,
   stationaryTargetMs: 16,
@@ -140,6 +141,33 @@ describe('createAdaptiveBudget', () => {
     expect(budget.budget(false)).toBe(2_000_000 * 1.25); // one step up, below ceiling
   });
 
+  it('starts interaction conservatively without lowering stationary detail', () => {
+    const budget = createAdaptiveBudget({
+      ...OPTS,
+      interactionInitialBudget: undefined,
+    });
+    expect(budget.budget(true)).toBe(1_000_000);
+    expect(budget.budget(false)).toBe(2_000_000);
+  });
+
+  it('decreases faster than it increases by default', () => {
+    const shrinking = createAdaptiveBudget({ ...OPTS, maxStep: undefined });
+    expect(feed(shrinking, 10_000, false, 8)).toBe(1_000_000);
+    const growing = createAdaptiveBudget({
+      ...OPTS,
+      initialBudget: 1_000_000,
+      maxStep: undefined,
+    });
+    expect(feed(growing, 1, false, 8)).toBe(1_250_000);
+  });
+
+  it('supports an immediate emergency reduction', () => {
+    const budget = createAdaptiveBudget(OPTS);
+    expect(budget.reduceNow(false)).toBe(1_000_000);
+    expect(budget.reduceNow(true, 0.25)).toBe(500_000);
+    expect(budget.stats().stationary.samples).toBe(0);
+  });
+
   it('interaction target tolerates a frame time the stationary target would cut', () => {
     const budget = createAdaptiveBudget(OPTS);
     // 33ms is fine for interaction (dead-band [26.4, 39.6]) but slow for
@@ -228,6 +256,7 @@ describe('createAdaptiveBudget', () => {
       budget.recordFrame(Number.POSITIVE_INFINITY, { interacting: false, now: i * 1000 });
     }
     expect(budget.budget(false)).toBe(2_000_000);
+    expect(budget.budget(true)).toBe(2_000_000);
     expect(budget.stats().stationary.samples).toBe(0);
   });
 

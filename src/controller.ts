@@ -131,6 +131,8 @@ export interface LodControllerStats {
   readonly memoryCeilingPoints: number;
   /** Whether the controller currently treats itself as interacting. */
   readonly interacting: boolean;
+  /** Explicit interaction nesting depth reported by the host. */
+  readonly interactionDepth: number;
   // --- phase0-bench (removable; see app/telesculptor_web/app/bench/README.md) ---
   /**
    * Diagnostic counters below are cumulative for the controller's lifetime and
@@ -194,6 +196,8 @@ export interface LodSelectionStats {
   readonly sseStoppedNodes: number;
   readonly budgetSkippedNodes: number;
   readonly budgetSkippedPoints: number;
+  /** Root projected screen-space error, used for cross-cloud allocation. */
+  readonly projectedImportance: number;
   /** SSE distribution for selected nodes stopped by the cutoff. */
   readonly frontierSse: {
     readonly count: number;
@@ -206,6 +210,10 @@ export interface LodSelectionStats {
 export interface LodController {
   /** Update the camera; selection reruns debounced (leading edge immediate). */
   setCamera(view: CameraView): void;
+  /** Enter a camera interaction. Nested calls are reference counted. */
+  beginInteraction(): void;
+  /** Leave a camera interaction; the outermost end starts the settle window. */
+  endInteraction(): void;
   /**
    * Set the fixed visible-point budget (non-adaptive mode only; with
    * `adaptive` enabled the budget is governed by frame time and memory and
@@ -315,11 +323,17 @@ export const createLodController = (
     : null;
 
   let lastCameraChange = Number.NEGATIVE_INFINITY;
+  let explicitInteractionSeen = false;
+  let interactionDepth = 0;
+  let interactionSettling = false;
   // Effective budget applied by the most recent selection; lets `recordFrame`
   // reselect only when the adaptive budget (or interaction regime) has moved.
   let lastSelectionBudget = pointBudget;
   const isInteracting = (now: number): boolean =>
-    active && now - lastCameraChange < interactionSettleMs;
+    active &&
+    (explicitInteractionSeen
+      ? interactionDepth > 0 || interactionSettling
+      : now - lastCameraChange < interactionSettleMs);
 
   const currentBudget = (now: number): number => {
     if (!active) return 0;
@@ -418,6 +432,7 @@ export const createLodController = (
     sseStoppedNodes: 0,
     budgetSkippedNodes: 0,
     budgetSkippedPoints: 0,
+    projectedImportance: 0,
     frontierSse: { count: 0, p50: null, p95: null, max: null },
   };
   const inFlight = new Map<string, AbortController>();
@@ -651,6 +666,7 @@ export const createLodController = (
       sseStoppedNodes,
       budgetSkippedNodes: selection.budgetSkippedNodes,
       budgetSkippedPoints: selection.budgetSkippedPoints,
+      projectedImportance: target.size > 0 ? sse(ROOT_KEY) : 0,
       frontierSse: {
         count: frontierSse.length,
         p50: percentile(frontierSse, 0.5),
@@ -733,9 +749,13 @@ export const createLodController = (
     settleTimer = setTimeout(() => {
       settleTimer = null;
       if (disposed) return;
-      // The regime has flipped to stationary; reselect if that changed the
-      // effective budget from the last selection.
-      if (currentBudget(Date.now()) !== lastSelectionBudget) {
+      if (explicitInteractionSeen) interactionSettling = false;
+      // Explicit completion is also the stationary refinement trigger. In
+      // inference mode a budget change is the only missing work.
+      if (
+        explicitInteractionSeen ||
+        currentBudget(Date.now()) !== lastSelectionBudget
+      ) {
         runSelection();
       }
     }, interactionSettleMs);
@@ -793,6 +813,7 @@ export const createLodController = (
       sseStoppedNodes: 0,
       budgetSkippedNodes: 0,
       budgetSkippedPoints: 0,
+      projectedImportance: 0,
       frontierSse: { count: 0, p50: null, p95: null, max: null },
     };
     for (const keyString of resident.keys()) {
@@ -835,11 +856,31 @@ export const createLodController = (
       if (view !== null && sameView(view, nextView)) return;
       view = nextView;
       if (!active) return;
-      lastCameraChange = Date.now();
-      // Re-arm on every camera change so the adaptive interaction budget flips
-      // only after the camera has been still for the full settle window.
-      if (adaptiveBudget !== null) armSettleTimer();
+      if (!explicitInteractionSeen) {
+        lastCameraChange = Date.now();
+        // Camera timestamps are a fallback for hosts without lifecycle events.
+        if (adaptiveBudget !== null) armSettleTimer();
+      }
       requestSelection();
+    },
+
+    beginInteraction() {
+      if (disposed) return;
+      explicitInteractionSeen = true;
+      interactionDepth += 1;
+      if (interactionDepth !== 1) return;
+      clearSettleTimer();
+      interactionSettling = false;
+      // Bypass camera debounce before the first expensive moving frame.
+      runSelection();
+    },
+
+    endInteraction() {
+      if (disposed || interactionDepth === 0) return;
+      interactionDepth -= 1;
+      if (interactionDepth !== 0) return;
+      interactionSettling = true;
+      armSettleTimer();
     },
 
     setPointBudget(points) {
@@ -866,6 +907,7 @@ export const createLodController = (
     setSource(nextSource) {
       if (disposed) return;
       clearSettleTimer();
+      interactionSettling = false;
       dropEverything();
       adaptiveBudget?.reset();
       source = nextSource;
@@ -930,6 +972,7 @@ export const createLodController = (
         sseStoppedNodes: 0,
         budgetSkippedNodes: 0,
         budgetSkippedPoints: 0,
+        projectedImportance: 0,
         frontierSse: { count: 0, p50: null, p95: null, max: null },
       };
 
@@ -964,6 +1007,7 @@ export const createLodController = (
         memoryBudgetBytes: poolMember?.budgetBytes() ?? 0,
         memoryCeilingPoints: memoryCeilingPoints(),
         interacting: isInteracting(now),
+        interactionDepth,
         // --- phase0-bench (removable; see app/telesculptor_web/app/bench/README.md) ---
         cachedTiles: cache.count(),
         fetchedTiles,
@@ -994,6 +1038,8 @@ export const createLodController = (
         selectionTimer = null;
       }
       clearSettleTimer();
+      interactionDepth = 0;
+      interactionSettling = false;
       const removed = [...resident.keys()].map(keyFromString);
       dropEverything();
       poolMember?.release();
