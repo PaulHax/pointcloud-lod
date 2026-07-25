@@ -378,23 +378,48 @@ export const createLodController = (
 
   // Selection re-requests whatever it still needs, so an endpoint that always
   // fails would be re-issued on every pass forever. Non-abort failures are
-  // counted per key and the key is dropped once it runs out of attempts; a
-  // new source (dropEverything) is a fresh start. Aborts never count —
+  // counted per key and the key rests once it runs out of attempts. The rest
+  // is a backoff, not an eviction: a transient outage must not blank a tile
+  // for the life of the controller, so the allowance is restored once the key
+  // has been quiet for RETRY_BACKOFF_MS and the key becomes fetchable again.
+  // A new source (dropEverything) is a fresh start. Aborts never count —
   // deselection, setSource, and dispose cancel normally and stay retryable.
   const MAX_ATTEMPTS = 3;
-  const pageFailures = new Map<string, number>();
-  const tileFailures = new Map<string, number>();
+  const RETRY_BACKOFF_MS = 30_000;
+  interface FailureRecord {
+    count: number;
+    lastMs: number;
+  }
+  const pageFailures = new Map<string, FailureRecord>();
+  const tileFailures = new Map<string, FailureRecord>();
 
   const recordFailure = (
-    failures: Map<string, number>,
+    failures: Map<string, FailureRecord>,
     keyString: string,
   ): void => {
-    failures.set(keyString, (failures.get(keyString) ?? 0) + 1);
+    failures.set(keyString, {
+      count: (failures.get(keyString)?.count ?? 0) + 1,
+      lastMs: Date.now(),
+    });
   };
-  const givenUp = (
-    failures: Map<string, number>,
+  /** Clears the record once the backoff elapses, restoring a full allowance. */
+  const resting = (
+    failures: Map<string, FailureRecord>,
     keyString: string,
-  ): boolean => (failures.get(keyString) ?? 0) >= MAX_ATTEMPTS;
+  ): boolean => {
+    const record = failures.get(keyString);
+    if (record === undefined || record.count < MAX_ATTEMPTS) return false;
+    if (Date.now() - record.lastMs < RETRY_BACKOFF_MS) return true;
+    failures.delete(keyString);
+    return false;
+  };
+  /** A key that loads is healthy again, whatever it did earlier. */
+  const clearFailures = (
+    failures: Map<string, FailureRecord>,
+    keyString: string,
+  ): void => {
+    failures.delete(keyString);
+  };
 
   /** Tiles currently delivered to the consumer. */
   const resident = new Map<string, TileData>();
@@ -491,7 +516,7 @@ export const createLodController = (
     if (
       pagesLoaded.has(keyString) ||
       pagesLoading.has(keyString) ||
-      givenUp(pageFailures, keyString)
+      resting(pageFailures, keyString)
     ) {
       return;
     }
@@ -503,6 +528,7 @@ export const createLodController = (
         if (disposed || requestEpoch !== epoch) return;
         pagesLoading.delete(keyString);
         pagesLoaded.add(keyString);
+        clearFailures(pageFailures, keyString);
         for (const info of infos) {
           hierarchy.set(keyToString(info.key), {
             pointCount: info.pointCount,
@@ -693,6 +719,7 @@ export const createLodController = (
             return;
           }
           inFlight.delete(keyString);
+          clearFailures(tileFailures, keyString);
           if (target.has(keyString) && !resident.has(keyString)) {
             resident.set(keyString, tile);
             residentPoints += tile.pointCount;
@@ -843,7 +870,7 @@ export const createLodController = (
         residentPoints += cached.pointCount;
         residentBytes += tileBytes(cached);
         pendingAdded.push({ key: keyFromString(keyString), tile: cached });
-      } else if (!givenUp(tileFailures, keyString)) {
+      } else if (!resting(tileFailures, keyString)) {
         toFetch.push(keyString);
       }
     }

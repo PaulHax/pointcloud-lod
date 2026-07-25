@@ -863,6 +863,48 @@ describe("createLodController — failing sources", () => {
     controller.dispose();
   });
 
+  it("refetches a rested tile once the outage ends", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const fake = makeFakeSource(SMALL_TREE);
+    const sink = collectBatches();
+    const controller = createLodController({
+      source: fake.source,
+      onTiles: sink.onTiles,
+      scheduleRender: sink.scheduleRender,
+      pointBudget: 1000,
+      selectionDelayMs: 0,
+      onError: () => {},
+    });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+
+    // A brief outage burns the whole allowance for every tile.
+    for (let round = 0; round < 4; round += 1) {
+      for (const d of fake.deferred.values()) d.reject(new Error("500"));
+      await settle();
+      controller.refresh();
+      await settle();
+    }
+    expect(fake.loadCalls).toHaveLength(9);
+
+    // The server recovers. Resting is a backoff, not an eviction: once the
+    // keys have been quiet long enough they are fetchable again, and this
+    // time they load.
+    vi.setSystemTime(31_000);
+    controller.refresh();
+    await settle();
+    expect(fake.loadCalls).toHaveLength(12);
+
+    for (const d of fake.deferred.values()) d.resolve();
+    await settle();
+    expect(controller.stats().residentTiles).toBe(3);
+
+    controller.dispose();
+    vi.useRealTimers();
+  });
+
   it("stops re-requesting a hierarchy page that keeps failing", async () => {
     const errors: unknown[] = [];
     const bounds = {
