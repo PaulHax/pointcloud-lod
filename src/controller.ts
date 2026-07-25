@@ -714,7 +714,13 @@ export const createLodController = (
           // otherwise a stale arrival frees a live slot (uncapping
           // fetchConcurrency) and double-counts resident points and bytes.
           if (inFlight.get(keyString) !== abort) {
-            cache.set(keyString, tile, tileBytes(tile));
+            // Caching a key that is already resident would hold a second
+            // decoded copy of the same tile: decodedBytes would count it
+            // twice and the redundant copy would evict genuinely reusable
+            // entries from the CPU cache.
+            if (!resident.has(keyString)) {
+              cache.set(keyString, tile, tileBytes(tile));
+            }
             pump();
             return;
           }
@@ -747,6 +753,13 @@ export const createLodController = (
 
   const runSelection = (): void => {
     if (disposed || !active || view === null) return;
+    // The root page bootstraps the hierarchy, so it can never come back
+    // through neededPages: that path needs a hierarchy entry, and only the
+    // root page can create one. Without this, a failed bootstrap leaves the
+    // controller with nothing to draw and no way to ask again. loadPage is
+    // idempotent and honours the failure backoff, so this costs nothing on
+    // the normal path.
+    if (!pagesLoaded.has(keyToString(ROOT_KEY))) loadPage(ROOT_KEY);
     const budget = currentBudget();
     lastSelectionBudget = budget;
     const currentView = view;

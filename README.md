@@ -147,8 +147,10 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
   coarse-first fetching with bounded concurrency and cancellation,
   byte-budgeted LRU caching of deselected tiles, and batched delivery.
   Fixed presentation keeps one CSS-pixel diameter; Auto presentation derives
-  one damped settled diameter from the p75 projected spacing of the ready
-  terminal coverage frontier and uses two CSS pixels during interaction.
+  the diameter from the p75 projected spacing of the ready terminal coverage
+  frontier, scaled by `userScale` and clamped to the presentation's min/max,
+  and emits it as soon as the frontier is remeasured. Two CSS pixels is the
+  seed it starts from before any frontier exists.
 - **Renderer adapter** (`createRendererAdapter`) — turns tile batches into
   vtk.js actors, one `vtkPolyData` + `vtkPointGaussianMapper` per tile
   (one gl.POINTS vertex per point, no cell topology), with an anchor base

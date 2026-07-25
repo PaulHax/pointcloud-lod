@@ -957,6 +957,56 @@ describe("createLodController — failing sources", () => {
     controller.dispose();
   });
 
+  it("recovers when the very first hierarchy request fails", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    let offline = true;
+    let pageCalls = 0;
+    const fake = makeFakeSource(SMALL_TREE);
+    const source: TileSource = {
+      metadata: fake.source.metadata,
+      async nodes(key: VoxelKey) {
+        pageCalls += 1;
+        if (offline) throw new Error("503");
+        return fake.source.nodes(key);
+      },
+      loadTile: fake.source.loadTile,
+    };
+    const sink = collectBatches();
+    const controller = createLodController({
+      source,
+      onTiles: sink.onTiles,
+      scheduleRender: sink.scheduleRender,
+      pointBudget: 1000,
+      selectionDelayMs: 0,
+      onError: () => {},
+    });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+
+    // The bootstrap request burns its allowance while the server is down.
+    for (let round = 0; round < 6; round += 1) {
+      controller.refresh();
+      await settle();
+    }
+    expect(pageCalls).toBe(3);
+    expect(controller.stats().residentTiles).toBe(0);
+
+    // Nothing else can ask for the root page, so selection has to. Once the
+    // backoff lapses and the server is back, the controller bootstraps.
+    offline = false;
+    vi.setSystemTime(31_000);
+    controller.refresh();
+    await settle();
+    for (const d of fake.deferred.values()) d.resolve();
+    await settle();
+    expect(controller.stats().residentTiles).toBe(3);
+
+    controller.dispose();
+    vi.useRealTimers();
+  });
+
   it("keeps aborted fetches retryable", async () => {
     // Deselection, setSource, and dispose abort normally — they must never
     // count against the failure allowance, however often they happen.
