@@ -1109,6 +1109,37 @@ describe("createLodController — budget and memory ceiling", () => {
     controller.dispose();
   });
 
+  it("does not strand the settling window when hidden mid-settle", async () => {
+    const fake = makeFakeSource(SMALL_TREE);
+    const sink = collectBatches();
+    const controller = createLodController({
+      source: fake.source,
+      onTiles: sink.onTiles,
+      scheduleRender: sink.scheduleRender,
+      pointBudget: 1000,
+      selectionDelayMs: 0,
+      interactionSettleMs: 750,
+    });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+
+    controller.beginInteraction();
+    controller.endInteraction();
+    expect(controller.stats().interacting).toBe(true);
+
+    // Hiding cancels the settle timer, so the window it opened has to close
+    // with it -- otherwise showing again renders at interaction quality
+    // forever.
+    controller.setActive(false);
+    vi.advanceTimersByTime(10_000);
+    controller.setActive(true);
+    await settle();
+    expect(controller.stats().interacting).toBe(false);
+
+    controller.dispose();
+  });
+
   // Below the 100k-resident-point measurement threshold the controller
   // converts bytes to points with the 16 bytes/point fallback, so a byte
   // budget of 16 * N caps selection at N points.

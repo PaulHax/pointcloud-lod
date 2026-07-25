@@ -1097,6 +1097,11 @@ export const createLodController = (
         selectionTimer = null;
       }
       clearSettleTimer();
+      // The settle timer is what ends a settling window, so cancelling it
+      // while one is open would leave the controller reporting "interacting"
+      // until the next explicit interaction. An inactive controller has no
+      // interaction to settle from, so the window closes with the timer.
+      interactionSettling = false;
       poolMember?.release();
       poolMember = null;
       queue = [];
