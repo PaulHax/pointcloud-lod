@@ -476,6 +476,27 @@ describe("createLodController", () => {
     expect(controller.stats().residentTiles).toBe(0);
   });
 
+  it("dispose reports removals queued before the flush that never ran", async () => {
+    const { controller, deferred, batches } = makeController(SMALL_TREE);
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    deferred.get("0-0-0-0")!.resolve();
+    await settle();
+    expect(controller.stats().residentTiles).toBe(1);
+
+    batches.length = 0;
+    // Deselect and tear down within one task: the removal is queued for a
+    // microtask flush that dispose cancels.
+    controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
+    expect(controller.stats().residentTiles).toBe(0);
+    controller.dispose();
+    await settle();
+
+    const removed = batches.flatMap((b) => b.removed.map(keyToString));
+    expect(removed).toContain("0-0-0-0");
+  });
+
   it("does not fetch culled subtrees", async () => {
     const tree: Record<string, FakeEntry> = {
       "0-0-0-0": {

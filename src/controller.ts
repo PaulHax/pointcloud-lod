@@ -1158,7 +1158,12 @@ export const createLodController = (
       }
       clearSettleTimer();
       interactionDepth = 0;
-      const removed = [...resident.keys()].map(keyFromString);
+      // Removals already queued for a flush this teardown cancels are gone
+      // from `resident`, so the final batch has to carry them too — otherwise
+      // the consumer keeps actors nothing will ever ask it to drop.
+      const removedKeys = new Set(pendingRemoved.map(keyToString));
+      for (const keyString of resident.keys()) removedKeys.add(keyString);
+      const removed = [...removedKeys].map(keyFromString);
       dropEverything();
       poolMember?.release();
       poolMember = null;
