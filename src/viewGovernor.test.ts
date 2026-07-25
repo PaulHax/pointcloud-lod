@@ -13,21 +13,51 @@ describe("createViewGovernor", () => {
     });
     const a = vi.fn();
     const b = vi.fn();
-    governor.register({ setPointBudget: a, projectedImportance: 1 });
-    governor.register({ setPointBudget: b, projectedImportance: 3 });
+    governor.register({ setPointBudget: a }).update({ projectedImportance: 1 });
+    governor.register({ setPointBudget: b }).update({ projectedImportance: 3 });
     expect(a).toHaveBeenLastCalledWith(250_000);
     expect(b).toHaveBeenLastCalledWith(750_000);
+  });
+
+  it("does not hand a culled view more than the one showing something", () => {
+    const governor = createViewGovernor({ initialBudget: 1_000_000 });
+    const showing = vi.fn();
+    const culled = vi.fn();
+    // Importance is screen-space error in CSS px, so a distant cloud reports
+    // well under 1 while a fully culled one reports exactly 0.
+    governor
+      .register({ setPointBudget: showing })
+      .update({ projectedImportance: 0.04 });
+    governor
+      .register({ setPointBudget: culled })
+      .update({ projectedImportance: 0 });
+
+    const showingBudget: number = showing.mock.calls.at(-1)![0];
+    const culledBudget: number = culled.mock.calls.at(-1)![0];
+    expect(showingBudget).toBeGreaterThan(culledBudget);
+    expect(showingBudget + culledBudget).toBeLessThanOrEqual(1_000_000);
+  });
+
+  it("splits evenly while no active member has reported anything", () => {
+    const governor = createViewGovernor({ initialBudget: 1_000_000 });
+    const a = vi.fn();
+    const b = vi.fn();
+    governor.register({ setPointBudget: a });
+    governor.register({ setPointBudget: b });
+    expect(a).toHaveBeenLastCalledWith(500_000);
+    expect(b).toHaveBeenLastCalledWith(500_000);
   });
 
   it("never starves an active view when another's importance dominates", () => {
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
     const quiet = vi.fn();
     const dominant = vi.fn();
-    governor.register({ setPointBudget: quiet, projectedImportance: 1 });
-    governor.register({
-      setPointBudget: dominant,
-      projectedImportance: 1_000_000,
-    });
+    governor
+      .register({ setPointBudget: quiet })
+      .update({ projectedImportance: 1 });
+    governor
+      .register({ setPointBudget: dominant })
+      .update({ projectedImportance: 1_000_000 });
 
     const quietBudget: number = quiet.mock.calls.at(-1)![0];
     const dominantBudget: number = dominant.mock.calls.at(-1)![0];

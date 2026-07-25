@@ -20,15 +20,10 @@ export interface HostFrameMetrics {
 export interface ViewGovernorMemberOptions {
   setPointBudget(points: number): void;
   active?: boolean;
-  projectedImportance?: number;
 }
 
 export interface ViewGovernorMember {
-  update(options: {
-    active?: boolean;
-    projectedImportance?: number;
-  }): void;
-  budget(): number;
+  update(options: { active?: boolean; projectedImportance?: number }): void;
   release(): void;
 }
 
@@ -61,7 +56,8 @@ export interface ViewGovernor {
 interface MemberState {
   setPointBudget(points: number): void;
   active: boolean;
-  importance: number;
+  /** Null until the member reports; 0 is a real measurement, not "unknown". */
+  importance: number | null;
   budget: number;
 }
 
@@ -100,16 +96,29 @@ export const createViewGovernor = (
     if (disposed) return;
     const active = [...members].filter((member) => member.active);
     const total = budget.budget(interacting());
+    // Importance is root screen-space error in CSS px, so it is legitimately
+    // below 1 for a distant cloud and exactly 0 for one that is fully culled
+    // or still loading. Neither may be treated as "unknown": a member that
+    // has never reported is the only one that needs a stand-in, and it gets
+    // the largest reported weight so registering does not starve it.
+    const reported = active.filter((member) => member.importance !== null);
+    const maxReported = Math.max(
+      0,
+      ...reported.map((member) => member.importance ?? 0),
+    );
     const rawWeight = (member: MemberState): number =>
-      member.importance > 0 ? member.importance : 1;
-    const floorWeight =
-      Math.max(0, ...active.map(rawWeight)) * MIN_SHARE_OF_EVEN_SPLIT;
+      member.importance ?? maxReported;
+    const floorWeight = maxReported * MIN_SHARE_OF_EVEN_SPLIT;
     const weightOf = (member: MemberState): number =>
       Math.max(rawWeight(member), floorWeight);
     const weightTotal = active.reduce((sum, m) => sum + weightOf(m), 0);
     for (const member of members) {
       const next = member.active
-        ? Math.max(1, Math.floor((total * weightOf(member)) / weightTotal))
+        ? weightTotal > 0
+          ? Math.max(1, Math.floor((total * weightOf(member)) / weightTotal))
+          : // Every active member reports zero: nothing is on screen, so
+            // there is no basis to prefer one over another.
+            Math.max(1, Math.floor(total / active.length))
         : 0;
       if (next === member.budget) continue;
       member.budget = next;
@@ -127,9 +136,7 @@ export const createViewGovernor = (
       const state: MemberState = {
         setPointBudget: memberOptions.setPointBudget,
         active: memberOptions.active ?? true,
-        importance: finiteNonNegative(memberOptions.projectedImportance)
-          ? memberOptions.projectedImportance
-          : 0,
+        importance: null,
         budget: -1,
       };
       members.add(state);
@@ -143,7 +150,6 @@ export const createViewGovernor = (
           }
           distribute();
         },
-        budget: () => Math.max(0, state.budget),
         release() {
           if (!members.delete(state)) return;
           distribute();
