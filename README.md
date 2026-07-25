@@ -83,6 +83,42 @@ For servers that reproject or transform points per tile, use
 `createHttpTileSource({ endpoint, metadata })` instead of the COPC source; it
 speaks a compact binary tile protocol (`PCT1`).
 
+### Adaptive quality
+
+A controller on its own draws to whatever fixed budget you set. To adapt
+quality to what the machine can actually paint, add a view governor: one per
+view, shared by every controller drawing into that view. It splits one budget
+across its members from measured host-frame timings, so several clouds in a
+view compete for a single frame-time target instead of each chasing its own.
+
+```js
+import { createViewGovernor } from "pointcloud-lod";
+
+const governor = createViewGovernor();
+
+// Register each controller in the view. The governor pushes budgets in.
+const member = governor.register({
+  setPointBudget: (points) => controller.setPointBudget(points),
+  active: true,
+});
+
+// Report every completed host frame, including non-VTK work:
+governor.recordHostFrame({ hostFrameMs, vtkFrameMs });
+
+// Bracket camera interaction so quality relaxes while moving and settles
+// after release. Controllers take the same pair:
+governor.beginInteraction();
+controller.beginInteraction();
+// ...camera moves...
+governor.endInteraction();
+controller.endInteraction();
+
+// Drop a controller out of the split without disposing it:
+member.update({ active: false });
+member.release();
+governor.dispose();
+```
+
 ## Architecture
 
 ```
@@ -122,6 +158,12 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
   not yet in a released vtk.js — see [Requirements](#requirements).
   CSS diameter stays separate from framebuffer density: the adapter applies
   device pixel ratio through the mapper at the final rendering boundary.
+- **View governor** (`createViewGovernor`) — optional, one per view. Owns the
+  point budget for every controller registered to that view and adapts it from
+  measured host-frame timings, holding VTK to a fraction of the frame and
+  guaranteeing each active member a floor so one busy cloud cannot starve the
+  rest. Controllers have no adaptive loop of their own; this is the only route
+  to adaptive quality.
 
 Camera math (`frustumPlanes`, `screenSpaceError`) is pure and
 renderer-agnostic: the controller takes a view-projection matrix and camera
