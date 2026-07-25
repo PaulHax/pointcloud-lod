@@ -338,8 +338,6 @@ describe("createLodController", () => {
 
     expect(controller.stats()).toMatchObject({
       active: true,
-      activeTiles: 3,
-      activePoints: 220,
       decodedTiles: 3,
       residentTiles: 3,
       cachedTiles: 0,
@@ -351,8 +349,6 @@ describe("createLodController", () => {
     await settle();
     expect(controller.stats()).toMatchObject({
       active: false,
-      activeTiles: 0,
-      activePoints: 0,
       decodedTiles: 3,
       residentTiles: 0,
       cachedTiles: 3,
@@ -369,7 +365,6 @@ describe("createLodController", () => {
     expect(loadCalls).toHaveLength(fetchesBefore);
     expect(controller.stats()).toMatchObject({
       active: true,
-      activeTiles: 3,
       decodedTiles: 3,
       residentTiles: 3,
       cachedTiles: 0,
@@ -740,7 +735,6 @@ describe("createLodController — ready frontier and presentation", () => {
 
     controller.beginInteraction();
     expect(controller.stats().presentation.diameterCssPx).toBeCloseTo(4);
-    expect(controller.stats().presentation.targetDiameterCssPx).toBeCloseTo(4);
     controller.endInteraction();
     expect(controller.stats().presentation.diameterCssPx).toBeCloseTo(4);
     vi.advanceTimersByTime(300);
@@ -781,7 +775,6 @@ describe("createLodController — ready frontier and presentation", () => {
       userScale: 0.75,
     });
     expect(controller.stats().presentation.diameterCssPx).toBeCloseTo(3);
-    expect(controller.stats().presentation.targetDiameterCssPx).toBeCloseTo(3);
 
     controller.endInteraction();
     expect(controller.stats().presentation.diameterCssPx).toBeCloseTo(3);
@@ -815,12 +808,10 @@ describe("createLodController — ready frontier and presentation", () => {
     controller.setPresentation({ mode: "auto", userScale: 1.2 });
     let stats = controller.stats().presentation;
     expect(stats.diameterCssPx).toBeCloseTo(4.8);
-    expect(stats.targetDiameterCssPx).toBeCloseTo(4.8);
 
     controller.setPresentation({ mode: "auto", userScale: 1.4 });
     stats = controller.stats().presentation;
     expect(stats.diameterCssPx).toBeCloseTo(5.6);
-    expect(stats.targetDiameterCssPx).toBeCloseTo(5.6);
     expect(diameters.at(-2)).toBeCloseTo(4.8);
     expect(diameters.at(-1)).toBeCloseTo(5.6);
     controller.dispose();
@@ -1107,86 +1098,21 @@ describe("createLodController — budget and memory ceiling", () => {
     controller.dispose();
   });
 
-  it("an unchanged camera view does not re-enter the interaction regime", async () => {
-    // Hosts call setCamera before every paint with a freshly built (but often
-    // identical) view — including paints triggered by the settle reselect
-    // itself. An identical view must not stamp a camera change, or the regime
-    // would flip back to interaction and oscillate.
-    const { controller } = makeBudgeted(SMALL_TREE, 2_000_000);
-    await settle();
-    controller.setCamera(VIEW); // t=0: a real camera change → interacting
-    await settle();
-    expect(controller.stats().interacting).toBe(true);
-
-    vi.setSystemTime(400); // past interactionSettleMs → settled
-    expect(controller.stats().interacting).toBe(false);
-
-    // A per-render feed of an equal (fresh object) view stays stationary.
-    controller.setCamera({ ...VIEW, position: [...VIEW.position] });
-    expect(controller.stats().interacting).toBe(false);
-
-    // A genuinely different view re-enters interaction.
-    controller.setCamera({ ...VIEW, viewportHeightCssPx: 200 });
-    expect(controller.stats().interacting).toBe(true);
-    controller.dispose();
-  });
-
-  it("reports the interaction regime across nested begin/end pairs", async () => {
+  it("counts nested begin/end pairs down to zero", async () => {
     const { controller } = makeBudgeted(SMALL_TREE, 2_000_000);
     await settle();
     controller.setCamera(VIEW);
     await settle();
-    vi.advanceTimersByTime(300);
 
     controller.beginInteraction();
     controller.beginInteraction();
-    expect(controller.stats()).toMatchObject({
-      interacting: true,
-      interactionDepth: 2,
-    });
+    expect(controller.stats().interactionDepth).toBe(2);
     controller.endInteraction();
-    vi.advanceTimersByTime(400);
-    expect(controller.stats().interacting).toBe(true);
+    expect(controller.stats().interactionDepth).toBe(1);
+    // An unbalanced extra end must not drive the count negative.
     controller.endInteraction();
-    vi.advanceTimersByTime(299);
-    expect(controller.stats().interacting).toBe(true);
-    vi.advanceTimersByTime(1);
-    await settle();
-    expect(controller.stats()).toMatchObject({
-      interacting: false,
-      interactionDepth: 0,
-    });
-    controller.dispose();
-  });
-
-  it("does not strand the settling window when hidden mid-settle", async () => {
-    const fake = makeFakeSource(SMALL_TREE);
-    const sink = collectBatches();
-    const controller = createLodController({
-      source: fake.source,
-      onTiles: sink.onTiles,
-      scheduleRender: sink.scheduleRender,
-      pointBudget: 1000,
-      selectionDelayMs: 0,
-      interactionSettleMs: 750,
-    });
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
-
-    controller.beginInteraction();
     controller.endInteraction();
-    expect(controller.stats().interacting).toBe(true);
-
-    // Hiding cancels the settle timer, so the window it opened has to close
-    // with it -- otherwise showing again renders at interaction quality
-    // forever.
-    controller.setActive(false);
-    vi.advanceTimersByTime(10_000);
-    controller.setActive(true);
-    await settle();
-    expect(controller.stats().interacting).toBe(false);
-
+    expect(controller.stats().interactionDepth).toBe(0);
     controller.dispose();
   });
 

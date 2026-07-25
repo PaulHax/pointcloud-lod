@@ -18,6 +18,7 @@ import {
   type CameraView,
 } from "./camera";
 import { selectNodes } from "./budget";
+import { percentile } from "./adaptiveBudget";
 import { createLruCache } from "./lru";
 import {
   createMemoryPool,
@@ -80,8 +81,8 @@ export interface LodControllerOptions {
    */
   memory?: MemoryPool | number;
   /**
-   * How long after the last camera change the controller still treats itself
-   * as "interacting", ms. Default 750.
+   * How long the camera must be still before the stationary refinement pass
+   * runs, ms. Default 750.
    */
   interactionSettleMs?: number;
   /** Parallel tile fetches. Default 6. */
@@ -116,10 +117,6 @@ export interface LodControllerStats {
   readonly residentPoints: number;
   /** Decoded bytes backing currently submitted tiles. */
   readonly residentBytes: number;
-  /** Submitted tiles; explicit alias for `residentTiles`. */
-  readonly activeTiles: number;
-  /** Submitted points; explicit alias for `residentPoints`. */
-  readonly activePoints: number;
   /** Decoded payloads across submitted tiles and the dormant CPU cache. */
   readonly decodedTiles: number;
   /** Decoded bytes across submitted tiles and the dormant CPU cache. */
@@ -132,15 +129,12 @@ export interface LodControllerStats {
   readonly memoryBudgetBytes: number;
   /** Memory-derived point ceiling the budget can never exceed. */
   readonly memoryCeilingPoints: number;
-  /** Whether the controller currently treats itself as interacting. */
-  readonly interacting: boolean;
   /** Explicit interaction nesting depth reported by the host. */
   readonly interactionDepth: number;
   /** Current explicit presentation and emitted uniform diameter. */
   readonly presentation: {
     readonly config: PointPresentation;
     readonly diameterCssPx: number;
-    readonly targetDiameterCssPx: number;
   };
   /** LRU entry count (deselected tiles kept for cheap reselection). */
   readonly cachedTiles: number;
@@ -233,12 +227,11 @@ const isAbortError = (error: unknown): boolean =>
 const tileBytes = (tile: TileData): number =>
   tile.positions.byteLength + (tile.rgb?.byteLength ?? 0) + 64;
 
-const percentile = (values: readonly number[], p: number): number | null => {
-  if (values.length === 0) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  const rank = Math.ceil(p * sorted.length);
-  return sorted[Math.min(sorted.length, Math.max(1, rank)) - 1] ?? null;
-};
+/** The frontier stats report null for "nothing measured" rather than NaN. */
+const percentileOrNull = (
+  values: readonly number[],
+  p: number,
+): number | null => (values.length === 0 ? null : percentile(values, p));
 
 const DEFAULT_PRESENTATION: FixedPointPresentation = {
   mode: "fixed",
@@ -336,7 +329,6 @@ export const createLodController = (
     presentation.mode === "fixed"
       ? presentation.diameterCssPx
       : INITIAL_AUTO_DIAMETER_CSS_PX;
-  let targetDiameterCssPx = diameterCssPx;
   let active = options.active ?? true;
   let view: CameraView | null = null;
   let disposed = false;
@@ -348,24 +340,13 @@ export const createLodController = (
     onPointDiameterCssPx(next);
   };
 
-  const setDiameterImmediately = (target: number): void => {
-    targetDiameterCssPx = target;
-    emitDiameter(target);
-  };
 
-  let lastCameraChange = Number.NEGATIVE_INFINITY;
+
   let explicitInteractionSeen = false;
   let interactionDepth = 0;
-  let interactionSettling = false;
   // Effective budget applied by the most recent selection; lets the settle
   // timer reselect only when the effective budget has actually moved.
   let lastSelectionBudget = pointBudget;
-  const isInteracting = (now: number): boolean =>
-    active &&
-    (explicitInteractionSeen
-      ? interactionDepth > 0 || interactionSettling
-      : now - lastCameraChange < interactionSettleMs);
-
   const currentBudget = (): number =>
     active ? Math.min(pointBudget, memoryCeilingPoints()) : 0;
 
@@ -412,13 +393,6 @@ export const createLodController = (
     if (Date.now() - record.lastMs < RETRY_BACKOFF_MS) return true;
     failures.delete(keyString);
     return false;
-  };
-  /** A key that loads is healthy again, whatever it did earlier. */
-  const clearFailures = (
-    failures: Map<string, FailureRecord>,
-    keyString: string,
-  ): void => {
-    failures.delete(keyString);
   };
 
   /** Tiles currently delivered to the consumer. */
@@ -528,7 +502,7 @@ export const createLodController = (
         if (disposed || requestEpoch !== epoch) return;
         pagesLoading.delete(keyString);
         pagesLoaded.add(keyString);
-        clearFailures(pageFailures, keyString);
+        pageFailures.delete(keyString);
         for (const info of infos) {
           hierarchy.set(keyToString(info.key), {
             pointCount: info.pointCount,
@@ -666,10 +640,10 @@ export const createLodController = (
       tileBlockedNodes,
       budgetBlockedNodes,
       projectedSpacingCssPx: {
-        p25: percentile(values, 0.25),
-        p50: percentile(values, 0.5),
-        p75: percentile(values, 0.75),
-        p95: percentile(values, 0.95),
+        p25: percentileOrNull(values, 0.25),
+        p50: percentileOrNull(values, 0.5),
+        p75: percentileOrNull(values, 0.75),
+        p95: percentileOrNull(values, 0.95),
         max: values.length > 0 ? Math.max(...values) : null,
       },
     };
@@ -684,7 +658,6 @@ export const createLodController = (
           presentation.maxDiameterCssPx ?? DEFAULT_AUTO_MAX_DIAMETER_CSS_PX;
         const target =
           presentation.userScale * Math.min(max, Math.max(min, p75));
-        targetDiameterCssPx = target;
         emitDiameter(target);
       }
     }
@@ -725,7 +698,7 @@ export const createLodController = (
             return;
           }
           inFlight.delete(keyString);
-          clearFailures(tileFailures, keyString);
+          tileFailures.delete(keyString);
           if (target.has(keyString) && !resident.has(keyString)) {
             resident.set(keyString, tile);
             residentPoints += tile.pointCount;
@@ -918,7 +891,6 @@ export const createLodController = (
     settleTimer = setTimeout(() => {
       settleTimer = null;
       if (disposed) return;
-      if (explicitInteractionSeen) interactionSettling = false;
       // Explicit completion is also the stationary refinement trigger. In
       // inference mode a budget change is the only missing work.
       if (
@@ -1024,10 +996,10 @@ export const createLodController = (
       if (view !== null && sameView(view, nextView)) return;
       view = nextView;
       if (!active) return;
-      if (!explicitInteractionSeen) {
-        lastCameraChange = Date.now();
-        // Camera timestamps are a fallback for hosts without lifecycle events.
-        if (presentation.mode === "auto") armSettleTimer();
+      // The settle timer is the fallback for hosts that drive the camera
+      // without begin/endInteraction.
+      if (!explicitInteractionSeen && presentation.mode === "auto") {
+        armSettleTimer();
       }
       requestSelection();
     },
@@ -1038,7 +1010,6 @@ export const createLodController = (
       interactionDepth += 1;
       if (interactionDepth !== 1) return;
       clearSettleTimer();
-      interactionSettling = false;
       // Bypass camera debounce before the first expensive moving frame.
       runSelection();
     },
@@ -1047,7 +1018,6 @@ export const createLodController = (
       if (disposed || interactionDepth === 0) return;
       interactionDepth -= 1;
       if (interactionDepth !== 0) return;
-      interactionSettling = true;
       armSettleTimer();
     },
 
@@ -1061,10 +1031,8 @@ export const createLodController = (
       if (disposed) return;
       clearSettleTimer();
       if (presentation.mode === "auto") {
-        targetDiameterCssPx = INITIAL_AUTO_DIAMETER_CSS_PX;
         emitDiameter(INITIAL_AUTO_DIAMETER_CSS_PX);
       }
-      interactionSettling = false;
       dropEverything();
       source = nextSource;
       scheduleFlush();
@@ -1089,7 +1057,7 @@ export const createLodController = (
       if (samePresentation(normalized, presentation)) return;
       presentation = normalized;
       if (presentation.mode === "fixed") {
-        setDiameterImmediately(presentation.diameterCssPx);
+        emitDiameter(presentation.diameterCssPx);
       } else {
         updateReadyTerminalFrontier();
       }
@@ -1110,11 +1078,6 @@ export const createLodController = (
         selectionTimer = null;
       }
       clearSettleTimer();
-      // The settle timer is what ends a settling window, so cancelling it
-      // while one is open would leave the controller reporting "interacting"
-      // until the next explicit interaction. An inactive controller has no
-      // interaction to settle from, so the window closes with the timer.
-      interactionSettling = false;
       poolMember?.release();
       poolMember = null;
       queue = [];
@@ -1166,8 +1129,6 @@ export const createLodController = (
         residentTiles: resident.size,
         residentPoints,
         residentBytes,
-        activeTiles: resident.size,
-        activePoints: residentPoints,
         decodedTiles: resident.size + cache.count(),
         decodedBytes: residentBytes + cachedBytes,
         cachedBytes,
@@ -1175,12 +1136,10 @@ export const createLodController = (
         pointBudget: currentBudget(),
         memoryBudgetBytes: poolMember?.budgetBytes() ?? 0,
         memoryCeilingPoints: memoryCeilingPoints(),
-        interacting: isInteracting(now),
         interactionDepth,
         presentation: {
           config: presentation,
           diameterCssPx,
-          targetDiameterCssPx,
         },
         cachedTiles: cache.count(),
         refinementCutoffPx,
@@ -1196,7 +1155,6 @@ export const createLodController = (
       }
       clearSettleTimer();
       interactionDepth = 0;
-      interactionSettling = false;
       const removed = [...resident.keys()].map(keyFromString);
       dropEverything();
       poolMember?.release();
