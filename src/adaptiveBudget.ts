@@ -1,5 +1,5 @@
 /**
- * Adaptive visible-point budget (Phase 5).
+ * Adaptive visible-point budget.
  *
  * Turns a stream of measured render durations into a visible-point budget that
  * tracks a target frame time. The device, the cloud, and the camera all vary,
@@ -13,8 +13,7 @@
  * load from a high percentile of that window, and nudges its budget toward the
  * track's target frame time.
  *
- * Anti-oscillation, as PLAN.md Phase 5 requires, is three guards working
- * together:
+ * Anti-oscillation is three guards working together:
  *   - hysteresis: a dead-band around the target where nothing changes, so
  *     frame-time noise never drives a change;
  *   - rate limiting: each adjustment has bounded directional steps, with
@@ -38,10 +37,10 @@ export interface AdaptiveBudgetOptions {
   /** Hard floor; the loop never drops a budget below this. Default 200_000. */
   minBudget?: number;
   /**
-   * Hard ceiling. Default unbounded: frame time is the governor, and the LOD
-   * controller supplies a memory-derived ceiling via `setMaxBudget` — the
-   * loop cannot sense GPU memory, and frame time stays healthy right up
-   * until an allocation fails, so the ceiling must come from outside.
+   * Hard ceiling. Default unbounded: frame time is the governor. The loop
+   * cannot sense GPU memory — frame time stays healthy right up until an
+   * allocation fails — so a memory-derived ceiling must come from outside,
+   * either here or through `setMaxBudget`.
    */
   maxBudget?: number;
   /** Target frame time while the camera is settled, ms. Default 16 (~60 fps). */
@@ -58,11 +57,6 @@ export interface AdaptiveBudgetOptions {
    * target). Default 0.2.
    */
   hysteresis?: number;
-  /**
-   * Legacy symmetric step limit. When supplied it is used for both directions
-   * unless the corresponding directional option is also supplied.
-   */
-  maxStep?: number;
   /** Largest fractional increase per adjustment. Default 0.25. */
   maxIncreaseStep?: number;
   /** Largest fractional decrease per adjustment. Default 0.5. */
@@ -169,11 +163,11 @@ export const createAdaptiveBudget = (
   const hysteresis = Math.max(0, options.hysteresis ?? DEFAULTS.hysteresis);
   const maxIncreaseStep = Math.max(
     0,
-    options.maxIncreaseStep ?? options.maxStep ?? DEFAULTS.maxIncreaseStep,
+    options.maxIncreaseStep ?? DEFAULTS.maxIncreaseStep,
   );
   const maxDecreaseStep = Math.max(
     0,
-    options.maxDecreaseStep ?? options.maxStep ?? DEFAULTS.maxDecreaseStep,
+    options.maxDecreaseStep ?? DEFAULTS.maxDecreaseStep,
   );
   const cooldownMs = Math.max(0, options.cooldownMs ?? DEFAULTS.cooldownMs);
   const minSamples = Math.max(1, Math.floor(options.minSamples ?? DEFAULTS.minSamples));
@@ -209,7 +203,7 @@ export const createAdaptiveBudget = (
     // recordFrame already rejected non-finite/negative durations, so estimate
     // is finite and >= 0. A 0 ms estimate is legitimate (very fast frames) and
     // must be allowed to grow the budget — only the grow branch sees it, where
-    // target/0 clamps to the +maxStep cap — so bail only on non-finite here.
+    // target/0 clamps to the +maxIncreaseStep cap — so bail only on non-finite here.
     if (!Number.isFinite(estimate)) return;
 
     const slowLimit = targetMs * (1 + hysteresis);

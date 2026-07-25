@@ -52,7 +52,8 @@ const OPTS: AdaptiveBudgetOptions = {
   windowSize: 30,
   percentile: 0.9,
   hysteresis: 0.2,
-  maxStep: 0.25,
+  maxIncreaseStep: 0.25,
+  maxDecreaseStep: 0.25,
   cooldownMs: 400,
   minSamples: 8,
 };
@@ -170,12 +171,13 @@ describe('createAdaptiveBudget', () => {
   });
 
   it('decreases faster than it increases by default', () => {
-    const shrinking = createAdaptiveBudget({ ...OPTS, maxStep: undefined });
+    const shrinking = createAdaptiveBudget({ ...OPTS, maxIncreaseStep: undefined, maxDecreaseStep: undefined });
     expect(feed(shrinking, 10_000, false, 8)).toBe(1_000_000);
     const growing = createAdaptiveBudget({
       ...OPTS,
       initialBudget: 1_000_000,
-      maxStep: undefined,
+      maxIncreaseStep: undefined,
+      maxDecreaseStep: undefined,
     });
     expect(feed(growing, 1, false, 8)).toBe(1_250_000);
   });

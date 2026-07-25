@@ -19,6 +19,25 @@ describe("createViewGovernor", () => {
     expect(b).toHaveBeenLastCalledWith(750_000);
   });
 
+  it("never starves an active view when another's importance dominates", () => {
+    const governor = createViewGovernor({ initialBudget: 1_000_000 });
+    const quiet = vi.fn();
+    const dominant = vi.fn();
+    governor.register({ setPointBudget: quiet, projectedImportance: 1 });
+    governor.register({
+      setPointBudget: dominant,
+      projectedImportance: 1_000_000,
+    });
+
+    const quietBudget: number = quiet.mock.calls.at(-1)![0];
+    const dominantBudget: number = dominant.mock.calls.at(-1)![0];
+    // A strict proportional split would hand the quiet view ~1 point. It keeps
+    // at least a quarter of the 500k even split, so it stays visible.
+    expect(quietBudget).toBeGreaterThanOrEqual(125_000);
+    expect(dominantBudget).toBeGreaterThan(quietBudget);
+    expect(quietBudget + dominantBudget).toBeLessThanOrEqual(1_000_000);
+  });
+
   it("uses the interaction budget through nested interaction and release", () => {
     const governor = createViewGovernor({
       initialBudget: 1_000_000,

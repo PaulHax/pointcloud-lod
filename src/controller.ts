@@ -17,14 +17,6 @@ import {
   boundsIntersectsFrustum,
   type CameraView,
 } from "./camera";
-import {
-  createAdaptiveBudget,
-  type AdaptiveBudget,
-  type AdaptiveBudgetOptions,
-  // --- phase0-bench (removable; see app/telesculptor_web/app/bench/README.md) ---
-  type AdaptiveBudgetStats,
-  // --- end phase0-bench ---
-} from "./adaptiveBudget";
 import { selectNodes } from "./budget";
 import { createLruCache } from "./lru";
 import {
@@ -73,18 +65,10 @@ export interface LodControllerOptions {
    */
   scheduleRender: () => void;
   /**
-   * Fixed visible-point budget when `adaptive` is off. Default 2,000,000.
-   * Ignored with `adaptive` enabled — there is no configured point ceiling;
-   * frame time and the memory budget are the governors. The memory-derived
-   * point cap applies in both modes.
+   * Visible-point budget driving selection. Default 2,000,000. The
+   * memory-derived point cap applies on top.
    */
   pointBudget?: number;
-  /**
-   * Adapt the visible-point budget to measured render duration (Phase 5). Pass
-   * `true` for defaults, an options object to tune, or omit/false for a fixed
-   * `pointBudget`. When enabled, feed each render's wall-time to `recordFrame`.
-   */
-  adaptive?: AdaptiveBudgetOptions | boolean;
   /**
    * GPU-memory budget for resident tile bytes. Pass a `MemoryPool` to share
    * one byte budget across controllers on the same GPU (each gets an even
@@ -97,7 +81,7 @@ export interface LodControllerOptions {
   memory?: MemoryPool | number;
   /**
    * How long after the last camera change the controller still treats itself
-   * as "interacting" for adaptive budgeting, ms. Default 750.
+   * as "interacting", ms. Default 750.
    */
   interactionSettleMs?: number;
   /** Parallel tile fetches. Default 6. */
@@ -158,50 +142,12 @@ export interface LodControllerStats {
     readonly diameterCssPx: number;
     readonly targetDiameterCssPx: number;
   };
-  // --- phase0-bench (removable; see app/telesculptor_web/app/bench/README.md) ---
-  /**
-   * Diagnostic counters below are cumulative for the controller's lifetime and
-   * are deliberately NOT reset by `setSource()` — consumers take deltas.
-   */
   /** LRU entry count (deselected tiles kept for cheap reselection). */
   readonly cachedTiles: number;
-  /** Completed tile fetches, including ones whose result was discarded. */
-  readonly fetchedTiles: number;
-  /** Bytes of completed tile fetches (same population as `fetchedTiles`). */
-  readonly fetchedBytes: number;
-  /** Fetches this controller aborted (deselection, setSource, dispose). */
-  readonly cancelledFetches: number;
-  /** Selection entries served from the LRU without a fetch. */
-  readonly cacheHits: number;
-  /** Selection entries that had to be queued for a fetch. */
-  readonly cacheMisses: number;
-  /** Resident tile/point histogram by octree level, ascending. */
-  readonly residentLevels: readonly {
-    level: number;
-    tiles: number;
-    points: number;
-  }[];
-  /** Both adaptive tracks' budgets and estimates; null when adaptive is off. */
-  readonly adaptive: AdaptiveBudgetStats | null;
-  /** Stable identity for this controller closure. */
-  readonly controllerInstanceId: number;
-  /** Increments whenever `setSource()` invalidates the controller's source. */
-  readonly sourceEpoch: number;
-  /** Tile fetches selected but not yet started because concurrency is full. */
-  readonly queuedTiles: number;
-  /** Hierarchy pages currently being requested. */
-  readonly hierarchyPagesLoading: number;
-  /** Hierarchy pages available to traversal. */
-  readonly hierarchyPagesLoaded: number;
-  /** Whether a camera-driven selection pass is waiting on its debounce timer. */
-  readonly selectionPending: boolean;
-  /** Whether the interaction-to-stationary consolidation timer is armed. */
-  readonly settlePending: boolean;
   /** Current screen-space refinement cutoff. */
   readonly refinementCutoffPx: number;
   /** Latest selection pass and the reasons traversal stopped. */
   readonly selection: LodSelectionStats;
-  // --- end phase0-bench ---
 }
 
 export interface LodSelectionStats {
@@ -248,18 +194,8 @@ export interface LodController {
   beginInteraction(): void;
   /** Leave a camera interaction; the outermost end starts the settle window. */
   endInteraction(): void;
-  /**
-   * Set the fixed visible-point budget (non-adaptive mode only; with
-   * `adaptive` enabled the budget is governed by frame time and memory and
-   * this is a no-op).
-   */
+  /** Set the visible-point budget; the memory ceiling still caps it. */
   setPointBudget(points: number): void;
-  /**
-   * Report one rendered frame's duration (ms) to the adaptive budget loop.
-   * No-op unless `adaptive` is enabled. The host measures the render wall-time
-   * and calls this once per painted frame.
-   */
-  recordFrame(durationMs: number): void;
   /**
    * Swap the tile source (e.g. a new asset revision behind a new endpoint).
    * All resident tiles, caches, hierarchy state, and in-flight requests are
@@ -296,8 +232,6 @@ const isAbortError = (error: unknown): boolean =>
 
 const tileBytes = (tile: TileData): number =>
   tile.positions.byteLength + (tile.rgb?.byteLength ?? 0) + 64;
-
-let nextControllerInstanceId = 1;
 
 const percentile = (values: readonly number[], p: number): number | null => {
   if (values.length === 0) return null;
@@ -379,29 +313,6 @@ const emptyReadyTerminalFrontier =
     },
   });
 
-// --- phase0-bench (removable; see app/telesculptor_web/app/bench/README.md) ---
-/** Resident tiles/points grouped by octree level, ascending. Diagnostics only. */
-const levelHistogram = (
-  tiles: ReadonlyMap<string, TileData>,
-): { level: number; tiles: number; points: number }[] => {
-  const byLevel = new Map<
-    number,
-    { level: number; tiles: number; points: number }
-  >();
-  for (const [keyString, tile] of tiles) {
-    const { level } = keyFromString(keyString);
-    const entry = byLevel.get(level);
-    if (entry === undefined) {
-      byLevel.set(level, { level, tiles: 1, points: tile.pointCount });
-    } else {
-      entry.tiles += 1;
-      entry.points += tile.pointCount;
-    }
-  }
-  return [...byLevel.values()].sort((a, b) => a.level - b.level);
-};
-// --- end phase0-bench ---
-
 export const createLodController = (
   options: LodControllerOptions,
 ): LodController => {
@@ -429,7 +340,6 @@ export const createLodController = (
   let active = options.active ?? true;
   let view: CameraView | null = null;
   let disposed = false;
-  const controllerInstanceId = nextControllerInstanceId++;
   onPointDiameterCssPx(diameterCssPx);
 
   const emitDiameter = (next: number): void => {
@@ -443,21 +353,12 @@ export const createLodController = (
     emitDiameter(target);
   };
 
-  // Adaptive budget (Phase 5): when enabled, the loop moves the effective
-  // budget between a floor and the memory-derived ceiling, tracking a target
-  // frame time. When disabled, `pointBudget` is fixed (memory still caps it).
-  const adaptiveBudget: AdaptiveBudget | null = options.adaptive
-    ? createAdaptiveBudget(
-        typeof options.adaptive === "object" ? options.adaptive : {},
-      )
-    : null;
-
   let lastCameraChange = Number.NEGATIVE_INFINITY;
   let explicitInteractionSeen = false;
   let interactionDepth = 0;
   let interactionSettling = false;
-  // Effective budget applied by the most recent selection; lets `recordFrame`
-  // reselect only when the adaptive budget (or interaction regime) has moved.
+  // Effective budget applied by the most recent selection; lets the settle
+  // timer reselect only when the effective budget has actually moved.
   let lastSelectionBudget = pointBudget;
   const isInteracting = (now: number): boolean =>
     active &&
@@ -465,12 +366,8 @@ export const createLodController = (
       ? interactionDepth > 0 || interactionSettling
       : now - lastCameraChange < interactionSettleMs);
 
-  const currentBudget = (now: number): number => {
-    if (!active) return 0;
-    return adaptiveBudget === null
-      ? Math.min(pointBudget, memoryCeilingPoints())
-      : adaptiveBudget.budget(isInteracting(now));
-  };
+  const currentBudget = (): number =>
+    active ? Math.min(pointBudget, memoryCeilingPoints()) : 0;
 
   // Bumped on setSource/dispose; every async continuation checks it.
   let epoch = 0;
@@ -478,6 +375,26 @@ export const createLodController = (
   const hierarchy = new Map<string, HierarchyEntry>();
   const pagesLoaded = new Set<string>();
   const pagesLoading = new Set<string>();
+
+  // Selection re-requests whatever it still needs, so an endpoint that always
+  // fails would be re-issued on every pass forever. Non-abort failures are
+  // counted per key and the key is dropped once it runs out of attempts; a
+  // new source (dropEverything) is a fresh start. Aborts never count —
+  // deselection, setSource, and dispose cancel normally and stay retryable.
+  const MAX_ATTEMPTS = 3;
+  const pageFailures = new Map<string, number>();
+  const tileFailures = new Map<string, number>();
+
+  const recordFailure = (
+    failures: Map<string, number>,
+    keyString: string,
+  ): void => {
+    failures.set(keyString, (failures.get(keyString) ?? 0) + 1);
+  };
+  const givenUp = (
+    failures: Map<string, number>,
+    keyString: string,
+  ): boolean => (failures.get(keyString) ?? 0) >= MAX_ATTEMPTS;
 
   /** Tiles currently delivered to the consumer. */
   const resident = new Map<string, TileData>();
@@ -488,10 +405,8 @@ export const createLodController = (
 
   // Memory governor: the byte share converts to a point ceiling via the
   // measured bytes-per-point of resident tiles (falling back to an estimate
-  // until enough points are resident to measure). The frame-time loop cannot
-  // sense GPU memory — frames stay fast right up until an allocation fails —
-  // so this ceiling is what keeps "adaptive" from meaning "climb until the
-  // context is lost".
+  // until enough points are resident to measure). Whatever budget the host
+  // asks for, this ceiling is what keeps selection inside GPU memory.
   const memoryPool: MemoryPool =
     typeof options.memory === "object"
       ? options.memory
@@ -505,7 +420,6 @@ export const createLodController = (
     if (poolMember !== null) return;
     poolMember = memoryPool.register(() => {
       if (disposed || !active) return;
-      applyMemoryCeiling();
       requestSelection();
     });
   };
@@ -523,25 +437,6 @@ export const createLodController = (
     poolMember === null
       ? 0
       : Math.max(1, Math.floor(poolMember.budgetBytes() / bytesPerPoint()));
-
-  // Last ceiling handed to the adaptive loop. The bytes-per-point estimate
-  // drifts as tiles arrive, and setMaxBudget discards a track's samples when
-  // it clamps a budget — a small dead-band keeps estimate jitter from
-  // re-clamping every selection.
-  let appliedCeiling = 0;
-  const applyMemoryCeiling = (): void => {
-    if (adaptiveBudget === null || poolMember === null) return;
-    const ceiling = memoryCeilingPoints();
-    if (
-      appliedCeiling > 0 &&
-      Math.abs(ceiling - appliedCeiling) / appliedCeiling <= 0.02
-    ) {
-      return;
-    }
-    appliedCeiling = ceiling;
-    adaptiveBudget.setMaxBudget(ceiling);
-  };
-  applyMemoryCeiling();
 
   let target: ReadonlySet<string> = new Set<string>();
   let targetRevision = 0;
@@ -569,16 +464,6 @@ export const createLodController = (
   const inFlight = new Map<string, AbortController>();
   let queue: string[] = [];
 
-  // --- phase0-bench (removable; see app/telesculptor_web/app/bench/README.md) ---
-  // Lifetime-cumulative diagnostic counters. Never reset (not even by
-  // setSource/dropEverything) so consumers can take deltas across a run.
-  let fetchedTiles = 0;
-  let fetchedBytes = 0;
-  let cancelledFetches = 0;
-  let cacheHits = 0;
-  let cacheMisses = 0;
-  // --- end phase0-bench ---
-
   let pendingAdded: { key: VoxelKey; tile: TileData }[] = [];
   let pendingRemoved: VoxelKey[] = [];
   let flushScheduled = false;
@@ -603,7 +488,13 @@ export const createLodController = (
 
   const loadPage = (key: VoxelKey): void => {
     const keyString = keyToString(key);
-    if (pagesLoaded.has(keyString) || pagesLoading.has(keyString)) return;
+    if (
+      pagesLoaded.has(keyString) ||
+      pagesLoading.has(keyString) ||
+      givenUp(pageFailures, keyString)
+    ) {
+      return;
+    }
     pagesLoading.add(keyString);
     const requestEpoch = epoch;
     source
@@ -626,6 +517,7 @@ export const createLodController = (
       .catch((error) => {
         if (disposed || requestEpoch !== epoch) return;
         pagesLoading.delete(keyString);
+        if (!isAbortError(error)) recordFailure(pageFailures, keyString);
         onError(error);
       });
   };
@@ -789,17 +681,6 @@ export const createLodController = (
       source
         .loadTile(key, { signal: abort.signal })
         .then((tile) => {
-          // --- phase0-bench (removable; see app/telesculptor_web/app/bench/README.md) ---
-          // A fetch that resolves counts as fetched even when its payload is
-          // discarded (superseded slot, stale epoch, no longer targeted) — the
-          // network cost was paid. It is not also counted as a cancellation;
-          // cancellations are counted where `abort()` is called. Arrivals after
-          // dispose are ignored: disposed stats are frozen.
-          if (!disposed) {
-            fetchedTiles += 1;
-            fetchedBytes += tileBytes(tile);
-          }
-          // --- end phase0-bench ---
           if (disposed || requestEpoch !== epoch) return;
           // Aborting is advisory: the COPC getter takes no signal, so a
           // superseded request still resolves. Only the continuation that owns
@@ -827,7 +708,10 @@ export const createLodController = (
         .catch((error) => {
           if (disposed || requestEpoch !== epoch) return;
           if (inFlight.get(keyString) === abort) inFlight.delete(keyString);
-          if (!isAbortError(error)) onError(error);
+          if (!isAbortError(error)) {
+            recordFailure(tileFailures, keyString);
+            onError(error);
+          }
           updateReadyTerminalFrontier();
           pump();
         });
@@ -836,11 +720,7 @@ export const createLodController = (
 
   const runSelection = (): void => {
     if (disposed || !active || view === null) return;
-    const now = Date.now();
-    // Re-derive the memory ceiling first: resident bytes (and with them the
-    // bytes-per-point estimate) changed since the last selection.
-    applyMemoryCeiling();
-    const budget = currentBudget(now);
+    const budget = currentBudget();
     lastSelectionBudget = budget;
     const currentView = view;
     const planes = frustumPlanes(currentView.viewProj);
@@ -946,9 +826,6 @@ export const createLodController = (
     for (const [keyString, abort] of [...inFlight]) {
       if (target.has(keyString)) continue;
       inFlight.delete(keyString);
-      // --- phase0-bench (removable; see app/telesculptor_web/app/bench/README.md) ---
-      cancelledFetches += 1;
-      // --- end phase0-bench ---
       abort.abort();
     }
 
@@ -961,18 +838,12 @@ export const createLodController = (
       if (entry?.pointCount === 0) continue;
       const cached = cache.get(keyString);
       if (cached !== undefined) {
-        // --- phase0-bench (removable; see app/telesculptor_web/app/bench/README.md) ---
-        cacheHits += 1;
-        // --- end phase0-bench ---
         cache.delete(keyString);
         resident.set(keyString, cached);
         residentPoints += cached.pointCount;
         residentBytes += tileBytes(cached);
         pendingAdded.push({ key: keyFromString(keyString), tile: cached });
-      } else {
-        // --- phase0-bench (removable; see app/telesculptor_web/app/bench/README.md) ---
-        cacheMisses += 1;
-        // --- end phase0-bench ---
+      } else if (!givenUp(tileFailures, keyString)) {
         toFetch.push(keyString);
       }
     }
@@ -990,9 +861,9 @@ export const createLodController = (
 
   let lastSelection = Number.NEGATIVE_INFINITY;
   let selectionTimer: ReturnType<typeof setTimeout> | null = null;
-  // Fires once the camera has been still for interactionSettleMs so the
-  // interaction→stationary budget flip is applied even when the host renders
-  // on demand and stops calling recordFrame after the last interaction frame.
+  // Fires once the camera has been still for interactionSettleMs, so the
+  // stationary refinement pass runs even when the host renders on demand and
+  // goes quiet after the last interaction frame.
   let settleTimer: ReturnType<typeof setTimeout> | null = null;
 
   const clearSettleTimer = (): void => {
@@ -1013,7 +884,7 @@ export const createLodController = (
       if (
         explicitInteractionSeen ||
         presentation.mode === "auto" ||
-        currentBudget(Date.now()) !== lastSelectionBudget
+        currentBudget() !== lastSelectionBudget
       ) {
         runSelection();
       }
@@ -1042,17 +913,14 @@ export const createLodController = (
 
   const dropEverything = (): void => {
     epoch += 1;
-    // --- phase0-bench (removable; see app/telesculptor_web/app/bench/README.md) ---
-    // setSource and dispose abort every live fetch; both count. A cancellation
-    // is "a fetch this controller gave up on", regardless of the reason.
-    cancelledFetches += inFlight.size;
-    // --- end phase0-bench ---
     for (const abort of inFlight.values()) abort.abort();
     inFlight.clear();
     queue = [];
     hierarchy.clear();
     pagesLoaded.clear();
     pagesLoading.clear();
+    pageFailures.clear();
+    tileFailures.clear();
     cache.clear();
     if (target.size > 0) targetRevision += 1;
     target = new Set();
@@ -1119,9 +987,7 @@ export const createLodController = (
       if (!explicitInteractionSeen) {
         lastCameraChange = Date.now();
         // Camera timestamps are a fallback for hosts without lifecycle events.
-        if (adaptiveBudget !== null || presentation.mode === "auto") {
-          armSettleTimer();
-        }
+        if (presentation.mode === "auto") armSettleTimer();
       }
       requestSelection();
     },
@@ -1147,23 +1013,8 @@ export const createLodController = (
 
     setPointBudget(points) {
       if (disposed) return;
-      // Adaptive mode has no configured point ceiling — frame time and the
-      // memory budget govern; a fixed point count has nothing to say.
-      if (adaptiveBudget !== null) return;
       pointBudget = points;
       runSelection();
-    },
-
-    recordFrame(durationMs) {
-      if (disposed || !active || adaptiveBudget === null) return;
-      const now = Date.now();
-      adaptiveBudget.recordFrame(durationMs, {
-        interacting: isInteracting(now),
-        now,
-      });
-      // Reselect only when the effective budget (value or regime) actually
-      // moved — recordFrame fires every frame; adjustments are rare.
-      if (currentBudget(now) !== lastSelectionBudget) requestSelection();
     },
 
     setSource(nextSource) {
@@ -1175,7 +1026,6 @@ export const createLodController = (
       }
       interactionSettling = false;
       dropEverything();
-      adaptiveBudget?.reset();
       source = nextSource;
       scheduleFlush();
       if (active) loadPage(ROOT_KEY);
@@ -1210,8 +1060,6 @@ export const createLodController = (
       active = nextActive;
       if (active) {
         joinMemoryPool();
-        appliedCeiling = 0;
-        applyMemoryCeiling();
         if (!pagesLoaded.has(keyToString(ROOT_KEY))) loadPage(ROOT_KEY);
         runSelection();
         return;
@@ -1224,9 +1072,7 @@ export const createLodController = (
       clearSettleTimer();
       poolMember?.release();
       poolMember = null;
-      appliedCeiling = 0;
       queue = [];
-      cancelledFetches += inFlight.size;
       for (const abort of inFlight.values()) abort.abort();
       inFlight.clear();
 
@@ -1281,7 +1127,7 @@ export const createLodController = (
         decodedBytes: residentBytes + cachedBytes,
         cachedBytes,
         inFlight: inFlight.size,
-        pointBudget: currentBudget(now),
+        pointBudget: currentBudget(),
         memoryBudgetBytes: poolMember?.budgetBytes() ?? 0,
         memoryCeilingPoints: memoryCeilingPoints(),
         interacting: isInteracting(now),
@@ -1291,26 +1137,9 @@ export const createLodController = (
           diameterCssPx,
           targetDiameterCssPx,
         },
-        // --- phase0-bench (removable; see app/telesculptor_web/app/bench/README.md) ---
         cachedTiles: cache.count(),
-        fetchedTiles,
-        fetchedBytes,
-        cancelledFetches,
-        cacheHits,
-        cacheMisses,
-        // Computed on demand; resident tiles number in the tens.
-        residentLevels: levelHistogram(resident),
-        adaptive: adaptiveBudget?.stats() ?? null,
-        controllerInstanceId,
-        sourceEpoch: epoch,
-        queuedTiles: queue.length,
-        hierarchyPagesLoading: pagesLoading.size,
-        hierarchyPagesLoaded: pagesLoaded.size,
-        selectionPending: selectionTimer !== null,
-        settlePending: settleTimer !== null,
         refinementCutoffPx,
         selection: selectionStats,
-        // --- end phase0-bench ---
       };
     },
 

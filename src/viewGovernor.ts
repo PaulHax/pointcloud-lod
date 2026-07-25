@@ -35,7 +35,7 @@ export interface ViewGovernorMember {
 export interface ViewGovernorOptions extends AdaptiveBudgetOptions {
   /** Maximum fraction of a host frame assigned to VTK. Default 0.7. */
   vtkFrameFraction?: number;
-  /** Delay before switching back to stationary allocation. Default 300 ms. */
+  /** Delay before switching back to stationary allocation. Default 750 ms. */
   interactionSettleMs?: number;
 }
 
@@ -68,6 +68,13 @@ interface MemberState {
 const finiteNonNegative = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value) && value >= 0;
 
+/**
+ * Projected importance is unbounded, so a strictly proportional split lets one
+ * dominant view drive another to a handful of points. Clamping the weight
+ * spread guarantees every active view at least this fraction of an even split.
+ */
+const MIN_SHARE_OF_EVEN_SPLIT = 0.25;
+
 export const createViewGovernor = (
   options: ViewGovernorOptions = {},
 ): ViewGovernor => {
@@ -93,14 +100,16 @@ export const createViewGovernor = (
     if (disposed) return;
     const active = [...members].filter((member) => member.active);
     const total = budget.budget(interacting());
-    const weightTotal = active.reduce(
-      (sum, member) => sum + (member.importance > 0 ? member.importance : 1),
-      0,
-    );
+    const rawWeight = (member: MemberState): number =>
+      member.importance > 0 ? member.importance : 1;
+    const floorWeight =
+      Math.max(0, ...active.map(rawWeight)) * MIN_SHARE_OF_EVEN_SPLIT;
+    const weightOf = (member: MemberState): number =>
+      Math.max(rawWeight(member), floorWeight);
+    const weightTotal = active.reduce((sum, m) => sum + weightOf(m), 0);
     for (const member of members) {
-      const weight = member.importance > 0 ? member.importance : 1;
       const next = member.active
-        ? Math.max(1, Math.floor((total * weight) / weightTotal))
+        ? Math.max(1, Math.floor((total * weightOf(member)) / weightTotal))
         : 0;
       if (next === member.budget) continue;
       member.budget = next;

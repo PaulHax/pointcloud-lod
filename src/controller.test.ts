@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createLodController, type TileBatch } from "./controller";
-import type { AdaptiveBudgetOptions } from "./adaptiveBudget";
 import { createMemoryPool } from "./memoryPool";
 import { keyToString, type VoxelKey } from "./octree";
 import type {
@@ -828,7 +827,144 @@ describe("createLodController — ready frontier and presentation", () => {
   });
 });
 
-describe("createLodController — adaptive budget", () => {
+describe("createLodController — failing sources", () => {
+  it("stops re-requesting a tile whose fetch keeps failing", async () => {
+    const errors: unknown[] = [];
+    const fake = makeFakeSource(SMALL_TREE);
+    const sink = collectBatches();
+    const controller = createLodController({
+      source: fake.source,
+      onTiles: sink.onTiles,
+      scheduleRender: sink.scheduleRender,
+      pointBudget: 1000,
+      selectionDelayMs: 0,
+      onError: (error) => errors.push(error),
+    });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    expect(fake.loadCalls).toHaveLength(3);
+
+    const failEveryFetch = async (): Promise<void> => {
+      for (const d of fake.deferred.values()) d.reject(new Error("500"));
+      await settle();
+    };
+    await failEveryFetch();
+
+    // Retries are bounded: after the allowance runs out the keys are dropped,
+    // so any number of further selections issues nothing.
+    for (let round = 0; round < 10; round += 1) {
+      controller.refresh();
+      await settle();
+      await failEveryFetch();
+    }
+    expect(fake.loadCalls).toHaveLength(9); // 3 tiles x 3 attempts
+    expect(errors).toHaveLength(9);
+    controller.dispose();
+  });
+
+  it("stops re-requesting a hierarchy page that keeps failing", async () => {
+    const errors: unknown[] = [];
+    const bounds = {
+      min: [-0.5, -0.5, -0.5] as [number, number, number],
+      max: [0.5, 0.5, 0.5] as [number, number, number],
+    };
+    let pageCalls = 0;
+    const source: TileSource = {
+      metadata: () => METADATA,
+      async nodes(key: VoxelKey) {
+        pageCalls += 1;
+        if (keyToString(key) !== "0-0-0-0") throw new Error("500");
+        return [
+          {
+            key: { level: 0, x: 0, y: 0, z: 0 },
+            pointCount: 0, // structural: no tile of its own
+            bounds,
+            spacing: 0.1,
+            children: [{ level: 1, x: 0, y: 0, z: 0 }],
+          },
+          {
+            key: { level: 1, x: 0, y: 0, z: 0 },
+            pointCount: 60,
+            bounds,
+            spacing: 0.05,
+            pageRef: true, // its page is the one that always fails
+          },
+        ];
+      },
+      loadTile: () => new Promise<TileData>(() => {}),
+    };
+    const sink = collectBatches();
+    const controller = createLodController({
+      source,
+      onTiles: sink.onTiles,
+      scheduleRender: sink.scheduleRender,
+      selectionDelayMs: 0,
+      onError: (error) => errors.push(error),
+    });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+
+    for (let round = 0; round < 10; round += 1) {
+      controller.refresh();
+      await settle();
+    }
+    expect(pageCalls).toBe(4); // the root page, then 3 attempts at the child
+    expect(errors).toHaveLength(3);
+    controller.dispose();
+  });
+
+  it("keeps aborted fetches retryable", async () => {
+    // Deselection, setSource, and dispose abort normally — they must never
+    // count against the failure allowance, however often they happen.
+    const { controller, loadCalls } = makeController(SMALL_TREE);
+    await settle();
+
+    for (let round = 1; round <= 4; round += 1) {
+      controller.setCamera(VIEW);
+      await settle();
+      expect(loadCalls).toHaveLength(3 * round);
+      controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
+      await settle();
+    }
+    controller.dispose();
+  });
+
+  it("a new source clears the failure memory", async () => {
+    const errors: unknown[] = [];
+    const fake = makeFakeSource(SMALL_TREE);
+    const sink = collectBatches();
+    const controller = createLodController({
+      source: fake.source,
+      onTiles: sink.onTiles,
+      scheduleRender: sink.scheduleRender,
+      pointBudget: 1000,
+      selectionDelayMs: 0,
+      onError: (error) => errors.push(error),
+    });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    for (let round = 0; round < 4; round += 1) {
+      for (const d of fake.deferred.values()) d.reject(new Error("500"));
+      await settle();
+      controller.refresh();
+      await settle();
+    }
+    expect(fake.loadCalls).toHaveLength(9);
+
+    const replacement = makeFakeSource(SMALL_TREE);
+    controller.setSource(replacement.source);
+    await settle();
+    controller.refresh();
+    await settle();
+    expect(replacement.loadCalls).toHaveLength(3);
+    controller.dispose();
+  });
+});
+
+describe("createLodController — budget and memory ceiling", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
@@ -837,10 +973,9 @@ describe("createLodController — adaptive budget", () => {
     vi.useRealTimers();
   });
 
-  const makeAdaptive = (
+  const makeBudgeted = (
     tree: Record<string, FakeEntry>,
-    adaptive: boolean | AdaptiveBudgetOptions,
-    initialBudget: number,
+    pointBudget: number,
     memory?: number,
   ) => {
     const fake = makeFakeSource(tree);
@@ -849,18 +984,7 @@ describe("createLodController — adaptive budget", () => {
       source: fake.source,
       onTiles: sink.onTiles,
       scheduleRender: sink.scheduleRender,
-      // Adaptive mode has no configured point ceiling: the initial budget
-      // rides the adaptive options; pointBudget is the fixed-mode budget.
-      ...(adaptive === false
-        ? { pointBudget: initialBudget }
-        : {
-            adaptive: {
-              initialBudget,
-              interactionInitialBudget: initialBudget,
-              maxStep: 0.25,
-              ...(typeof adaptive === "object" ? adaptive : {}),
-            },
-          }),
+      pointBudget,
       selectionDelayMs: 0,
       interactionSettleMs: 300,
       ...(memory !== undefined ? { memory } : {}),
@@ -868,112 +992,8 @@ describe("createLodController — adaptive budget", () => {
     return { controller, ...fake, ...sink };
   };
 
-  it("starts at the initial budget and reports the interaction regime", async () => {
-    const { controller } = makeAdaptive(SMALL_TREE, true, 2_000_000);
-    await settle();
-    expect(controller.stats().pointBudget).toBe(2_000_000);
-    expect(controller.stats().interacting).toBe(false);
-    controller.dispose();
-  });
-
-  it("drops immediately and settles only after the outermost interaction ends", async () => {
-    const { controller } = makeAdaptive(
-      SMALL_TREE,
-      { interactionInitialBudget: 500_000 },
-      2_000_000,
-    );
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
-    vi.advanceTimersByTime(300);
-    await settle();
-    expect(controller.stats().pointBudget).toBe(2_000_000);
-
-    controller.beginInteraction();
-    controller.beginInteraction();
-    expect(controller.stats()).toMatchObject({
-      interacting: true,
-      interactionDepth: 2,
-      pointBudget: 500_000,
-    });
-    controller.endInteraction();
-    vi.advanceTimersByTime(400);
-    expect(controller.stats().interacting).toBe(true);
-    controller.endInteraction();
-    vi.advanceTimersByTime(299);
-    expect(controller.stats().interacting).toBe(true);
-    vi.advanceTimersByTime(1);
-    await settle();
-    expect(controller.stats()).toMatchObject({
-      interacting: false,
-      interactionDepth: 0,
-      pointBudget: 2_000_000,
-    });
-    controller.dispose();
-  });
-
-  it("keeps interaction and stationary budgets independent", async () => {
-    const { controller } = makeAdaptive(
-      SMALL_TREE,
-      { minSamples: 4 },
-      2_000_000,
-    );
-    await settle();
-    controller.setCamera(VIEW); // t=0: interacting
-    await settle();
-    // Four slow frames (80ms) against the 33ms interaction target → one shrink.
-    for (let i = 0; i < 4; i += 1) {
-      vi.setSystemTime(i);
-      controller.recordFrame(80);
-    }
-    vi.setSystemTime(10);
-    expect(controller.stats().interacting).toBe(true);
-    expect(controller.stats().pointBudget).toBe(1_500_000); // interaction shrank
-    vi.setSystemTime(400); // past interactionSettleMs → settled
-    expect(controller.stats().interacting).toBe(false);
-    expect(controller.stats().pointBudget).toBe(2_000_000); // stationary untouched
-    controller.dispose();
-  });
-
-  it("a shrink during interaction deactivates deselected tiles immediately", async () => {
-    // Point counts scaled to millions so a budget change crosses a selection
-    // boundary: at 3M all three tiles fit; at 2.25M only the root and one child.
-    const bigTree: Record<string, FakeEntry> = {
-      "0-0-0-0": { pointCount: 1_000_000, children: ["1-0-0-0", "1-1-0-0"] },
-      "1-0-0-0": { pointCount: 1_000_000 },
-      "1-1-0-0": { pointCount: 1_000_000 },
-    };
-    const { controller, deferred, batches } = makeAdaptive(
-      bigTree,
-      { minSamples: 4 },
-      3_000_000,
-    );
-    await settle();
-    controller.setCamera(VIEW); // t=0: interacting, budget 3M → all fit
-    await settle();
-    for (const d of deferred.values()) d.resolve();
-    await settle();
-    expect(controller.stats().residentTiles).toBe(3);
-    batches.length = 0;
-
-    // Slow interaction frames shrink the budget to 2.25M. The deselected
-    // child immediately leaves submitted/GPU-resident work; its payload stays
-    // eligible for the decoded CPU cache.
-    for (let i = 0; i < 4; i += 1) {
-      vi.setSystemTime(i);
-      controller.recordFrame(80);
-    }
-    await settle();
-    vi.setSystemTime(10);
-    expect(controller.stats().pointBudget).toBe(2_250_000);
-    expect(controller.stats().residentTiles).toBe(2);
-    expect(controller.stats().cachedTiles).toBe(1);
-    expect(batches.flatMap((b) => b.removed)).toHaveLength(1);
-    controller.dispose();
-  });
-
-  it("applies a fixed-budget drop immediately during interaction", async () => {
-    const { controller, deferred } = makeAdaptive(SMALL_TREE, false, 1000);
+  it("applies a budget drop immediately during interaction", async () => {
+    const { controller, deferred } = makeBudgeted(SMALL_TREE, 1000);
     await settle();
     controller.setCamera(VIEW); // t=0: interacting
     await settle();
@@ -981,89 +1001,17 @@ describe("createLodController — adaptive budget", () => {
     await settle();
     expect(controller.stats().residentTiles).toBe(3);
 
-    // Lower the fixed budget mid-gesture: both children (60 points each) fall
-    // out of the 150-point selection and leave submitted work immediately.
+    // Lower the budget mid-gesture: both children (60 points each) fall out of
+    // the 150-point selection and leave submitted work immediately.
     controller.setPointBudget(150);
     await settle();
     expect(controller.stats().residentTiles).toBe(1);
     expect(controller.stats().cachedTiles).toBe(2);
 
-    // Settling does not change a fixed budget or resurrect dormant actors.
+    // Settling does not change the budget or resurrect dormant actors.
     vi.advanceTimersByTime(300);
     await settle();
     expect(controller.stats().residentTiles).toBe(1);
-    controller.dispose();
-  });
-
-  it("applies the stationary budget after the camera settles, with no further frames", async () => {
-    // Same millions-scaled tree: 3M fits all three tiles, 2.25M only two.
-    const bigTree: Record<string, FakeEntry> = {
-      "0-0-0-0": { pointCount: 1_000_000, children: ["1-0-0-0", "1-1-0-0"] },
-      "1-0-0-0": { pointCount: 1_000_000 },
-      "1-1-0-0": { pointCount: 1_000_000 },
-    };
-    const { controller, deferred } = makeAdaptive(
-      bigTree,
-      { minSamples: 4 },
-      3_000_000,
-    );
-    await settle();
-    controller.setCamera(VIEW); // t=0: arms the settle timer (fires at 300ms)
-    await settle();
-    for (const d of deferred.values()) d.resolve();
-    await settle();
-    expect(controller.stats().residentTiles).toBe(3);
-
-    // Slow interaction frames shrink the interaction budget; the deselected
-    // tile leaves submitted work immediately.
-    for (let i = 0; i < 4; i += 1) {
-      vi.setSystemTime(i);
-      controller.recordFrame(80);
-    }
-    await settle();
-    expect(controller.stats().pointBudget).toBe(2_250_000);
-    expect(controller.stats().residentTiles).toBe(2);
-    expect(controller.stats().cachedTiles).toBe(1);
-
-    // No further frames — the host renders on demand and goes quiet. Advancing
-    // past the settle window fires the settle timer, which re-applies the
-    // (untouched) stationary 3M budget; the decoded cached tile is selected
-    // and submitted again without a network request.
-    vi.advanceTimersByTime(400);
-    await settle();
-    expect(controller.stats().interacting).toBe(false);
-    expect(controller.stats().pointBudget).toBe(3_000_000);
-    expect(controller.stats().residentTiles).toBe(3);
-    controller.dispose();
-  });
-
-  it("setPointBudget is a no-op with adaptive enabled — there is no point ceiling", async () => {
-    const { controller } = makeAdaptive(SMALL_TREE, true, 2_000_000);
-    await settle();
-    expect(controller.stats().pointBudget).toBe(2_000_000);
-    controller.setPointBudget(1_000_000);
-    expect(controller.stats().pointBudget).toBe(2_000_000);
-    controller.dispose();
-  });
-
-  it("grows past any former fixed ceiling while frames are fast", async () => {
-    // The old design pinned the budget at a configured point count; now only
-    // frame time and memory govern. With fast frames and ample memory the
-    // budget keeps climbing 25% per adjustment, sailing past 3M.
-    const { controller } = makeAdaptive(
-      SMALL_TREE,
-      { minSamples: 4, cooldownMs: 0 },
-      3_000_000,
-    );
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
-    vi.setSystemTime(400); // settled regime
-    for (let i = 0; i < 20; i += 1) {
-      vi.setSystemTime(400 + i);
-      controller.recordFrame(1); // far under the 16ms stationary target
-    }
-    expect(controller.stats().pointBudget).toBeGreaterThan(3_000_000);
     controller.dispose();
   });
 
@@ -1071,19 +1019,14 @@ describe("createLodController — adaptive budget", () => {
     // Hosts call setCamera before every paint with a freshly built (but often
     // identical) view — including paints triggered by the settle reselect
     // itself. An identical view must not stamp a camera change, or the regime
-    // would flip back to interaction and oscillate between the two budgets.
-    const { controller } = makeAdaptive(
-      SMALL_TREE,
-      { minSamples: 4 },
-      2_000_000,
-    );
+    // would flip back to interaction and oscillate.
+    const { controller } = makeBudgeted(SMALL_TREE, 2_000_000);
     await settle();
     controller.setCamera(VIEW); // t=0: a real camera change → interacting
     await settle();
     expect(controller.stats().interacting).toBe(true);
 
     vi.setSystemTime(400); // past interactionSettleMs → settled
-    vi.advanceTimersByTime(400); // settle timer fires
     expect(controller.stats().interacting).toBe(false);
 
     // A per-render feed of an equal (fresh object) view stays stationary.
@@ -1096,13 +1039,31 @@ describe("createLodController — adaptive budget", () => {
     controller.dispose();
   });
 
-  it("recordFrame is a no-op when adaptive is disabled", async () => {
-    const { controller } = makeController(SMALL_TREE, { pointBudget: 500 });
+  it("reports the interaction regime across nested begin/end pairs", async () => {
+    const { controller } = makeBudgeted(SMALL_TREE, 2_000_000);
     await settle();
     controller.setCamera(VIEW);
     await settle();
-    for (let i = 0; i < 20; i += 1) controller.recordFrame(5000);
-    expect(controller.stats().pointBudget).toBe(500);
+    vi.advanceTimersByTime(300);
+
+    controller.beginInteraction();
+    controller.beginInteraction();
+    expect(controller.stats()).toMatchObject({
+      interacting: true,
+      interactionDepth: 2,
+    });
+    controller.endInteraction();
+    vi.advanceTimersByTime(400);
+    expect(controller.stats().interacting).toBe(true);
+    controller.endInteraction();
+    vi.advanceTimersByTime(299);
+    expect(controller.stats().interacting).toBe(true);
+    vi.advanceTimersByTime(1);
+    await settle();
+    expect(controller.stats()).toMatchObject({
+      interacting: false,
+      interactionDepth: 0,
+    });
     controller.dispose();
   });
 
@@ -1111,44 +1072,22 @@ describe("createLodController — adaptive budget", () => {
   // budget of 16 * N caps selection at N points.
   const BYTES_PER_POINT = 16;
 
-  it("the memory budget caps the adaptive budget", async () => {
-    const { controller, deferred } = makeAdaptive(
+  it("the memory budget caps the point budget", async () => {
+    const { controller, deferred } = makeBudgeted(
       SMALL_TREE,
-      true,
-      2_000_000,
+      1000,
       150 * BYTES_PER_POINT,
     );
     await settle();
-    expect(controller.stats().pointBudget).toBe(150);
     controller.setCamera(VIEW);
     await settle();
     for (const d of deferred.values()) d.resolve();
     await settle();
     // Root (100 points) fits the 150-point ceiling; the 60-point children
     // would overshoot and stay out.
-    expect(controller.stats().residentTiles).toBe(1);
-    expect(controller.stats().residentPoints).toBe(100);
-    controller.dispose();
-  });
-
-  it("the memory budget caps a fixed budget too", async () => {
-    const fake = makeFakeSource(SMALL_TREE);
-    const sink = collectBatches();
-    const controller = createLodController({
-      source: fake.source,
-      onTiles: sink.onTiles,
-      scheduleRender: sink.scheduleRender,
-      pointBudget: 1000,
-      selectionDelayMs: 0,
-      memory: 150 * BYTES_PER_POINT,
-    });
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
-    for (const d of fake.deferred.values()) d.resolve();
-    await settle();
     expect(controller.stats().pointBudget).toBe(150);
     expect(controller.stats().residentTiles).toBe(1);
+    expect(controller.stats().residentPoints).toBe(100);
     controller.dispose();
   });
 
@@ -1160,7 +1099,6 @@ describe("createLodController — adaptive budget", () => {
       source: first.source,
       onTiles: sink.onTiles,
       scheduleRender: sink.scheduleRender,
-      adaptive: true,
       selectionDelayMs: 0,
       memory: pool,
     });
@@ -1175,14 +1113,11 @@ describe("createLodController — adaptive budget", () => {
 
     // A second cloud joins: shares drop to 150 points each and the first
     // controller reselects down — N clouds must not multiply GPU memory by N.
-    // Advance past the settle window before changing the shared ceiling.
-    vi.setSystemTime(1000);
     const second = makeFakeSource(SMALL_TREE);
     const other = createLodController({
       source: second.source,
       onTiles: () => {},
       scheduleRender: () => {},
-      adaptive: true,
       selectionDelayMs: 0,
       memory: pool,
     });
@@ -1205,195 +1140,7 @@ describe("createLodController — adaptive budget", () => {
   });
 });
 
-// --- phase0-bench (removable; see app/telesculptor_web/app/bench/README.md) ---
-describe("createLodController — diagnostic stats", () => {
-  // makeTile allocates Float32Array(pointCount * 3); tileBytes adds 64.
-  const bytesOf = (pointCount: number) => pointCount * 12 + 64;
-
-  const makeAdaptiveController = (adaptive: AdaptiveBudgetOptions) => {
-    const fake = makeFakeSource(SMALL_TREE);
-    const sink = collectBatches();
-    const controller = createLodController({
-      source: fake.source,
-      onTiles: sink.onTiles,
-      scheduleRender: sink.scheduleRender,
-      adaptive,
-      selectionDelayMs: 0,
-    });
-    return { controller, ...fake, ...sink };
-  };
-
-  it("counts fetches and bytes, and cache misses before hits", async () => {
-    const { controller, deferred, loadCalls } = makeController(SMALL_TREE);
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
-    expect(controller.stats().cacheMisses).toBe(3);
-    expect(controller.stats().cacheHits).toBe(0);
-    expect(controller.stats().fetchedTiles).toBe(0);
-
-    for (const d of deferred.values()) d.resolve();
-    await settle();
-    expect(controller.stats().fetchedTiles).toBe(3);
-    expect(controller.stats().fetchedBytes).toBe(
-      bytesOf(100) + 2 * bytesOf(60),
-    );
-    expect(controller.stats().cachedTiles).toBe(0);
-
-    // Deselect everything: the three tiles move to the LRU.
-    controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
-    await settle();
-    expect(controller.stats().cachedTiles).toBe(3);
-
-    // Looking back is served entirely from the LRU — hits, no new fetches.
-    const fetchesBefore = loadCalls.length;
-    controller.setCamera(VIEW);
-    await settle();
-    expect(loadCalls.length).toBe(fetchesBefore);
-    expect(controller.stats().cacheHits).toBe(3);
-    expect(controller.stats().cacheMisses).toBe(3);
-    expect(controller.stats().cachedTiles).toBe(0);
-    expect(controller.stats().fetchedTiles).toBe(3);
-    controller.dispose();
-  });
-
-  it("counts fetches cancelled by deselection, not completed ones", async () => {
-    const { controller, deferred } = makeController(SMALL_TREE);
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
-    deferred.get("0-0-0-0")!.resolve();
-    await settle();
-    expect(controller.stats().cancelledFetches).toBe(0);
-
-    controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
-    await settle();
-    expect(controller.stats().cancelledFetches).toBe(2); // both children
-    expect(controller.stats().fetchedTiles).toBe(1); // the root completed
-    controller.dispose();
-  });
-
-  it("counts fetches cancelled by dispose", async () => {
-    const { controller } = makeController(SMALL_TREE);
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
-    expect(controller.stats().inFlight).toBe(3);
-
-    controller.dispose();
-    expect(controller.stats().cancelledFetches).toBe(3);
-    expect(controller.stats().fetchedTiles).toBe(0);
-  });
-
-  it("counts a superseded fetch as fetched, never as a second cancellation", async () => {
-    // Aborting is advisory, so a superseded request still resolves: its bytes
-    // crossed the network and count once, and the abort that superseded it was
-    // already counted where it happened.
-    const resolvers: Array<(tile: TileData) => void> = [];
-    const source: TileSource = {
-      metadata: () => METADATA,
-      async nodes() {
-        return [
-          {
-            key: { level: 0, x: 0, y: 0, z: 0 },
-            pointCount: 100,
-            bounds: { min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5] },
-            spacing: 0.1,
-            children: [],
-          },
-        ];
-      },
-      loadTile: () => new Promise<TileData>((r) => resolvers.push(r)),
-    };
-    const sink = collectBatches();
-    const controller = createLodController({
-      source,
-      onTiles: sink.onTiles,
-      scheduleRender: sink.scheduleRender,
-      pointBudget: 1000,
-      selectionDelayMs: 0,
-    });
-
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
-    controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY }); // aborts (advisory)
-    await settle();
-    controller.setCamera(VIEW); // refetch into a fresh slot
-    await settle();
-    expect(controller.stats().cancelledFetches).toBe(1);
-
-    resolvers[0]!(makeTile(100)); // the superseded fetch lands
-    await settle();
-    expect(controller.stats().fetchedTiles).toBe(1);
-    expect(controller.stats().fetchedBytes).toBe(bytesOf(100));
-    expect(controller.stats().cancelledFetches).toBe(1);
-    expect(controller.stats().residentTiles).toBe(0);
-    controller.dispose();
-  });
-
-  it("reports a resident tile/point histogram by octree level", async () => {
-    const { controller, deferred } = makeController(SMALL_TREE);
-    await settle();
-    expect(controller.stats().residentLevels).toEqual([]);
-    controller.setCamera(VIEW);
-    await settle();
-    for (const d of deferred.values()) d.resolve();
-    await settle();
-
-    expect(controller.stats().residentLevels).toEqual([
-      { level: 0, tiles: 1, points: 100 },
-      { level: 1, tiles: 2, points: 120 },
-    ]);
-    controller.dispose();
-    expect(controller.stats().residentLevels).toEqual([]);
-  });
-
-  it("keeps counters across setSource so consumers can take deltas", async () => {
-    const { controller, deferred, source } = makeController(SMALL_TREE);
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
-    deferred.get("0-0-0-0")!.resolve();
-    await settle();
-
-    controller.setSource(source); // drops residents, caches, in-flight fetches
-    const after = controller.stats();
-    expect(after.fetchedTiles).toBe(1);
-    expect(after.fetchedBytes).toBe(bytesOf(100));
-    expect(after.cacheMisses).toBe(3);
-    expect(after.cancelledFetches).toBe(2); // the two in-flight children
-    expect(after.cachedTiles).toBe(0); // the LRU itself is cleared
-    expect(after.residentTiles).toBe(0);
-    controller.dispose();
-  });
-
-  it("reports adaptive track stats only when adaptive is enabled", async () => {
-    const fixed = makeController(SMALL_TREE);
-    await settle();
-    expect(fixed.controller.stats().adaptive).toBeNull();
-    fixed.controller.dispose();
-
-    const { controller } = makeAdaptiveController({ initialBudget: 2_000_000 });
-    await settle();
-    expect(controller.stats().adaptive?.stationary).toEqual({
-      budget: 2_000_000,
-      samples: 0,
-      estimateMs: null,
-    });
-    expect(controller.stats().adaptive?.interaction.budget).toBe(1_000_000);
-
-    controller.setCamera(VIEW); // interacting: the frame lands on that track
-    controller.recordFrame(20);
-    expect(controller.stats().adaptive?.interaction).toEqual({
-      budget: 1_000_000,
-      samples: 1,
-      estimateMs: 20,
-    });
-    expect(controller.stats().adaptive?.stationary.samples).toBe(0);
-    controller.dispose();
-  });
-
+describe("createLodController — selection stats", () => {
   it("reports why the latest selection stopped refining", async () => {
     const { controller, deferred } = makeController(SMALL_TREE, {
       pointBudget: 150,
@@ -1404,23 +1151,17 @@ describe("createLodController — diagnostic stats", () => {
     deferred.get("0-0-0-0")!.resolve();
     await settle();
 
-    const stats = controller.stats();
-    expect(stats.controllerInstanceId).toBeGreaterThan(0);
-    expect(stats.sourceEpoch).toBe(0);
-    expect(stats.selection).toMatchObject({
+    expect(controller.stats().selection).toMatchObject({
       targetTiles: 1,
       targetPoints: 100,
       selectedNodes: 1,
       budgetSkippedNodes: 2,
       budgetSkippedPoints: 120,
     });
-    expect(stats.queuedTiles).toBe(0);
-    expect(stats.hierarchyPagesLoading).toBe(0);
-    expect(stats.hierarchyPagesLoaded).toBe(1);
     controller.dispose();
   });
 
-  it("tracks source/frontier identity and refinement-cutoff changes", async () => {
+  it("tracks frontier identity and refinement-cutoff changes", async () => {
     const { controller, deferred, source } = makeController(SMALL_TREE);
     await settle();
     controller.setCamera({ ...VIEW, position: [0, 0, 5] });
@@ -1447,9 +1188,7 @@ describe("createLodController — diagnostic stats", () => {
     expect(controller.stats().selection.targetRevision).toBe(targetRevision);
 
     controller.setSource(source);
-    expect(controller.stats().sourceEpoch).toBe(1);
     expect(controller.stats().selection.targetTiles).toBe(0);
     controller.dispose();
   });
 });
-// --- end phase0-bench ---
