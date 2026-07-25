@@ -98,7 +98,6 @@ export interface RendererAdapter {
   setVisible(visible: boolean): void;
   /** Set this adapter's allocation from the shared GPU-memory pool. */
   setResourceCeilingBytes(bytes: number): void;
-  tileCount(): number;
   /** Renderer-owned resource and active-draw accounting. */
   stats(): RendererAdapterStats;
   /** Remove and release every tile actor. Idempotent. */
@@ -119,9 +118,11 @@ export interface RendererAdapterStats {
   readonly activeDrawPoints: number;
   readonly diameterCssPx: number;
   readonly devicePixelRatio: number;
-  /** Upper bound before clipping/depth: circular submitted splat area. */
-  readonly submittedSplatAreaDevicePx2: number;
 }
+
+/** Decoded bytes a tile occupies once handed to the renderer. */
+const tileResourceBytes = (tile: TileData): number =>
+  tile.positions.byteLength + (tile.rgb?.byteLength ?? 0) + 64;
 
 interface TileActors {
   actor: any;
@@ -185,8 +186,7 @@ export const createRendererAdapter = (
       polyData,
       origin: tile.origin,
       pointCount: tile.pointCount,
-      resourceBytes:
-        tile.positions.byteLength + (tile.rgb?.byteLength ?? 0) + 64,
+      resourceBytes: tileResourceBytes(tile),
       positions: tile.positions,
       rgb: tile.rgb,
     };
@@ -254,9 +254,7 @@ export const createRendererAdapter = (
           }
           releaseTile(stale);
         }
-        const tileResourceBytes =
-          tile.positions.byteLength + (tile.rgb?.byteLength ?? 0) + 64;
-        trimPool(tileResourceBytes);
+        trimPool(tileResourceBytes(tile));
         const entry = createTile(tile);
         tiles.set(keyString, entry);
         renderer.addActor(entry.actor);
@@ -335,10 +333,6 @@ export const createRendererAdapter = (
       trimPool();
     },
 
-    tileCount() {
-      return tiles.size;
-    },
-
     stats() {
       let gpuResidentPoints = 0;
       let gpuResidentBytes = 0;
@@ -356,11 +350,6 @@ export const createRendererAdapter = (
         activeDrawPoints: visible ? activeDrawPoints : 0,
         diameterCssPx,
         devicePixelRatio,
-        submittedSplatAreaDevicePx2: visible
-          ? activeDrawPoints *
-            (Math.PI / 4) *
-            (diameterCssPx * devicePixelRatio) ** 2
-          : 0,
       };
     },
 

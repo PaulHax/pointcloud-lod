@@ -50,7 +50,6 @@ describe("createRendererAdapter", () => {
     const data = tile([10, 20, 30]);
     adapter.applyBatch({ added: [{ key: KEY_A, tile: data }], removed: [] });
 
-    expect(adapter.tileCount()).toBe(1);
     expect(adapter.stats()).toEqual({
       gpuResidentTiles: 1,
       gpuResidentPoints: 2,
@@ -59,7 +58,6 @@ describe("createRendererAdapter", () => {
       activeDrawPoints: 2,
       diameterCssPx: 3,
       devicePixelRatio: 2,
-      submittedSplatAreaDevicePx2: 18 * Math.PI,
     });
     expect(renderer.addActor).toHaveBeenCalledTimes(1);
     expect(scheduleRender).toHaveBeenCalledTimes(1);
@@ -93,7 +91,6 @@ describe("createRendererAdapter", () => {
     });
     adapter.applyBatch({ added: [], removed: [KEY_A] });
 
-    expect(adapter.tileCount()).toBe(0);
     expect(actorInstances[0]!.visibility).toBe(false);
     expect(adapter.stats()).toMatchObject({
       gpuResidentTiles: 1,
@@ -277,7 +274,7 @@ describe("createRendererAdapter", () => {
     adapter.dispose();
     adapter.dispose();
 
-    expect(adapter.tileCount()).toBe(0);
+    expect(adapter.stats().gpuResidentTiles).toBe(0);
     expect(renderer.removeActor).toHaveBeenCalledTimes(2);
     expect(actorInstances.every((a) => a.deleted)).toBe(true);
 
@@ -286,6 +283,6 @@ describe("createRendererAdapter", () => {
       added: [{ key: KEY_A, tile: tile([0, 0, 0]) }],
       removed: [],
     });
-    expect(adapter.tileCount()).toBe(0);
+    expect(adapter.stats().gpuResidentTiles).toBe(0);
   });
 });

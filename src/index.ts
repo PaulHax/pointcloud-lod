@@ -2,7 +2,6 @@ export {
   ROOT_KEY,
   keyToString,
   keyFromString,
-  parentKey,
   childKeys,
   nodeBounds,
   nodeCube,
@@ -17,7 +16,6 @@ export { createLruCache, type LruCache, type LruCacheOptions } from "./lru";
 
 export {
   selectNodes,
-  allChildren,
   type HierarchyNode,
   type SelectNodesOptions,
   type NodeSelection,
@@ -63,15 +61,11 @@ export {
   type MemoryPoolOptions,
 } from "./memoryPool";
 
-export {
-  createAdaptiveBudget,
-  percentile,
-  type AdaptiveBudget,
-  type AdaptiveBudgetOptions,
-  type AdaptiveBudgetStats,
-  type AdaptiveBudgetTrackStats,
-  type BudgetRegime,
-  type RecordFrameOptions,
+// The adaptive budget loop is the view governor's internal. Only the two
+// types that appear in the governor's own surface are re-exported.
+export type {
+  AdaptiveBudgetOptions,
+  AdaptiveBudgetStats,
 } from "./adaptiveBudget";
 
 export {

@@ -106,6 +106,3 @@ export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
   };
 };
 
-/** Convenience: a `HierarchyNode.children` list of all 8 octree children. */
-export const allChildren = (key: VoxelKey): readonly VoxelKey[] =>
-  childKeys(key);
