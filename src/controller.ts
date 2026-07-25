@@ -354,6 +354,22 @@ export const createLodController = (
   let epoch = 0;
 
   const hierarchy = new Map<string, HierarchyEntry>();
+
+  // Screen-space error depends only on a node and the current view, so values
+  // stay valid until the view moves. Selection and the ready-frontier walk
+  // both need them, and the frontier walk reruns on every tile arrival.
+  // A node whose hierarchy entry has not landed yet is deliberately NOT
+  // cached: it scores 0 now, and its page may arrive before the view moves.
+  const sseByKey = new Map<string, number>();
+  const sseFor = (keyString: string): number => {
+    const cached = sseByKey.get(keyString);
+    if (cached !== undefined) return cached;
+    const entry = hierarchy.get(keyString);
+    if (entry === undefined || view === null) return 0;
+    const value = nodeScreenSpaceError(entry.bounds, entry.spacing, view);
+    sseByKey.set(keyString, value);
+    return value;
+  };
   const pagesLoaded = new Set<string>();
   const pagesLoading = new Set<string>();
 
@@ -543,8 +559,6 @@ export const createLodController = (
     }
 
     const planes = frustumPlanes(currentView.viewProj);
-    const projectedSpacing = (entry: HierarchyEntry): number =>
-      nodeScreenSpaceError(entry.bounds, entry.spacing, currentView);
     const values: number[] = [];
     const terminalKeys = new Set<string>();
     let leafNodes = 0;
@@ -568,7 +582,7 @@ export const createLodController = (
       if (entry.pointCount === 0 || !resident.has(keyString)) return;
       if (!terminalKeys.has(keyString)) {
         terminalKeys.add(keyString);
-        values.push(projectedSpacing(entry));
+        values.push(sseFor(keyString));
       }
       if (reasons.leaf) leafNodes += 1;
       if (reasons.cutoff) cutoffNodes += 1;
@@ -588,7 +602,7 @@ export const createLodController = (
         addTerminal(keyString, entry, { leaf: true });
         return;
       }
-      if (projectedSpacing(entry) < refinementCutoffPx) {
+      if (sseFor(keyString) < refinementCutoffPx) {
         addTerminal(keyString, entry, { cutoff: true });
         return;
       }
@@ -737,20 +751,7 @@ export const createLodController = (
     lastSelectionBudget = budget;
     const currentView = view;
     const planes = frustumPlanes(currentView.viewProj);
-    const sseByKey = new Map<string, number>();
-    const sse = (key: VoxelKey): number => {
-      const keyString = keyToString(key);
-      let value = sseByKey.get(keyString);
-      if (value === undefined) {
-        const entry = hierarchy.get(keyString);
-        value =
-          entry === undefined
-            ? 0
-            : nodeScreenSpaceError(entry.bounds, entry.spacing, currentView);
-        sseByKey.set(keyString, value);
-      }
-      return value;
-    };
+    const sse = (key: VoxelKey): number => sseFor(keyToString(key));
 
     const neededPages: VoxelKey[] = [];
     let hierarchyUnavailableNodes = 0;
@@ -929,6 +930,7 @@ export const createLodController = (
     inFlight.clear();
     queue = [];
     hierarchy.clear();
+    sseByKey.clear();
     pagesLoaded.clear();
     pagesLoading.clear();
     pageFailures.clear();
@@ -995,6 +997,7 @@ export const createLodController = (
       if (disposed) return;
       if (view !== null && sameView(view, nextView)) return;
       view = nextView;
+      sseByKey.clear();
       if (!active) return;
       // The settle timer is the fallback for hosts that drive the camera
       // without begin/endInteraction.
