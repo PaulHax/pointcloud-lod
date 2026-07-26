@@ -65,19 +65,29 @@ export {
   type MemoryPoolOptions,
 } from "./memoryPool";
 
-// The adaptive budget loop is the view governor's internal. Only the two
-// types that appear in the governor's own surface are re-exported.
+// The adaptive budget loop is the view governor's internal. Only the types
+// that appear in the governor's own surface are re-exported.
 export type {
   AdaptiveBudgetOptions,
   AdaptiveBudgetStats,
+  AdaptiveBudgetTrackStats,
+  BudgetAdjustment,
+  BudgetAdjustmentDirection,
+  BudgetAdjustmentReason,
+  BudgetRegime,
 } from "./adaptiveBudget";
 
 export {
   createViewGovernor,
+  type BudgetConstraint,
   type HostFrameMetrics,
+  type MotionReference,
+  type MotionSourceKind,
   type ViewGovernor,
   type ViewGovernorMember,
   type ViewGovernorMemberOptions,
+  type ViewGovernorMemberStats,
+  type ViewGovernorMemberUpdate,
   type ViewGovernorOptions,
   type ViewGovernorStats,
 } from "./viewGovernor";
