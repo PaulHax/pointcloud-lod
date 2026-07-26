@@ -374,6 +374,33 @@ describe("adapter resource pool", () => {
     expect(adapter.stats().gpuResidentTiles).toBe(0);
   });
 
+  it("brings the pool back under its ceiling on a batch of pure removals", () => {
+    const { adapter, renderer } = makeAdapter();
+    adapter.applyBatch({
+      added: [
+        { key: KEY_A, tile: tile([0, 0, 0]) },
+        { key: KEY_B, tile: tile([1, 0, 0]) },
+      ],
+      removed: [],
+    });
+    // Below one tile, so nothing may stay pooled once it is off screen.
+    adapter.setResourceCeilingBytes(50);
+    expect(adapter.stats()).toMatchObject({ submittedTiles: 2, pooledTiles: 0 });
+
+    // Deactivating a cloud sends exactly this: removals and nothing else. The
+    // pool used to be trimmed only while adding, so these actors stayed on the
+    // GPU until some other cloud happened to add a tile.
+    adapter.applyBatch({ added: [], removed: [KEY_A, KEY_B] });
+
+    expect(adapter.stats()).toMatchObject({
+      submittedTiles: 0,
+      pooledTiles: 0,
+      gpuResidentTiles: 0,
+      gpuResidentBytes: 0,
+    });
+    expect(renderer.removeActor).toHaveBeenCalledTimes(2);
+  });
+
   it("reuses a pooled actor when the same payload returns", () => {
     const { adapter, renderer } = makeAdapter();
     const data = tile([0, 0, 0]);

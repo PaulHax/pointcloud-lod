@@ -176,6 +176,13 @@ export interface LodControllerStats {
   };
   /** LRU entry count (deselected tiles kept for cheap reselection). */
   readonly cachedTiles: number;
+  /**
+   * The LRU's byte ceiling — the bound `cachedBytes` is actually held under.
+   * Distinct from `memoryBudgetBytes`, which is this controller's share of the
+   * GPU pool and falls to zero when it is deactivated, while the CPU cache
+   * deliberately keeps its payloads.
+   */
+  readonly cacheBytes: number;
   /** Current screen-space refinement cutoff. */
   readonly refinementCutoffPx: number;
   /** Latest selection pass and the reasons traversal stopped. */
@@ -1481,6 +1488,7 @@ export const createLodController = (
           diameterCssPx,
         },
         cachedTiles: cache.count(),
+        cacheBytes,
         refinementCutoffPx,
         selection: selectionStats,
       };

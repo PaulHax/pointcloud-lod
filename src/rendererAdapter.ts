@@ -337,6 +337,12 @@ export const createRendererAdapter = (
         renderer.addActor(entry.actor);
         changed = true;
       }
+      // Removals alone must still bring the pool back under its ceiling. A
+      // deactivated cloud sends nothing but removals, and trimming only on the
+      // addition path left its actors on the GPU until something else happened
+      // to add a tile — which, for a cloud the host just switched off, is
+      // never.
+      trimPool();
       if (changed) scheduleRender();
     },
 
