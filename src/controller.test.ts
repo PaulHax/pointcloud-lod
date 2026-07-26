@@ -351,11 +351,10 @@ describe("createLodController", () => {
     controller.dispose();
   });
 
-  it("ignores a superseded fetch that resolves after its replacement", async () => {
-    // Aborting is advisory: the COPC getter takes no signal, so a superseded
-    // request still resolves. The stale continuation must not retire the live
-    // in-flight slot (which would uncap fetchConcurrency) or double-count
-    // resident points.
+  it("adopts a canceled fetch when the same key is reselected", async () => {
+    // Aborting is advisory: the COPC getter takes no signal, so a canceled
+    // request still resolves. Looking back must adopt that live read rather
+    // than start a rival one, and its payload must claim residency.
     const resolvers: Array<(tile: TileData) => void> = [];
     const source: TileSource = {
       metadata: () => METADATA,
@@ -387,27 +386,31 @@ describe("createLodController", () => {
     await settle();
     expect(resolvers).toHaveLength(1);
 
-    // Look away (aborts, but the fetch stays live), then look back: the same
-    // key is refetched into a fresh in-flight slot.
+    // Look away (aborts, but the read stays physically alive), then look back.
     controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
     await settle();
+    expect(controller.stats().inFlight).toBe(0);
     controller.setCamera(VIEW);
     await settle();
-    expect(resolvers).toHaveLength(2);
-    expect(controller.stats().inFlight).toBe(1);
+    // No second read of a key already being read: the running one is adopted.
+    expect(resolvers).toHaveLength(1);
+    expect(controller.stats()).toMatchObject({
+      inFlight: 1,
+      physicalTileOperations: 1,
+    });
 
-    // The stale first fetch lands. It must not free the live slot.
+    // Its payload is what the selection is waiting for, so it goes resident
+    // instead of being thrown away for a redundant round trip.
     resolvers[0]!(makeTile(100));
     await settle();
-    expect(controller.stats().inFlight).toBe(1);
-    expect(controller.stats().residentTiles).toBe(0);
-
-    // The live fetch still completes normally, exactly once.
-    resolvers[1]!(makeTile(100));
-    await settle();
-    expect(controller.stats().inFlight).toBe(0);
-    expect(controller.stats().residentTiles).toBe(1);
-    expect(controller.stats().residentPoints).toBe(100);
+    expect(resolvers).toHaveLength(1);
+    expect(controller.stats()).toMatchObject({
+      inFlight: 0,
+      physicalTileOperations: 0,
+      residentTiles: 1,
+      residentPoints: 100,
+      cachedTiles: 0,
+    });
     controller.dispose();
   });
 
@@ -1647,7 +1650,7 @@ describe("createLodController — decoded single ownership", () => {
     loadTile: () => new Promise<TileData>((r) => resolvers.push(r)),
   });
 
-  it("drops a canceled request's payload while its replacement is live", async () => {
+  it("reuses a canceled request's payload instead of reading the key again", async () => {
     const resolvers: Array<(tile: TileData) => void> = [];
     const sink = mirrorRenderer();
     const controller = createLodController({
@@ -1662,28 +1665,24 @@ describe("createLodController — decoded single ownership", () => {
     await settle();
     expect(resolvers).toHaveLength(1);
 
-    // Cancel (advisory: the getter keeps running) and re-request the key.
+    // Cancel (advisory: the getter keeps running) and let it land unwanted:
+    // the single decoded copy rests in the cache.
     controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
     await settle();
-    controller.setCamera(VIEW);
-    await settle();
-    expect(resolvers).toHaveLength(2);
-    expect(controller.stats().inFlight).toBe(1);
-
-    // The canceled request lands first. The live request owns the key, so
-    // this payload is a duplicate and nothing may hold it.
     resolvers[0]!(makeTile(100));
     await settle();
     expect(controller.stats()).toMatchObject({
-      decodedTiles: 0,
-      decodedBytes: 0,
-      cachedTiles: 0,
+      decodedTiles: 1,
+      cachedTiles: 1,
       residentTiles: 0,
-      inFlight: 1,
+      inFlight: 0,
+      physicalTileOperations: 0,
     });
 
-    resolvers[1]!(makeTile(100));
+    // Looking back must spend that copy, not read the same bytes again.
+    controller.setCamera(VIEW);
     await settle();
+    expect(resolvers).toHaveLength(1);
     const stats = controller.stats();
     expect(stats).toMatchObject({
       residentTiles: 1,
@@ -1700,9 +1699,12 @@ describe("createLodController — decoded single ownership", () => {
     controller.dispose();
   });
 
-  it("keeps one owner when a canceled request lands after residency", async () => {
+  it("keeps one owner when a hide/show adopts the running read", async () => {
+    // The trame bridge hides and shows a cloud on ordinary visibility
+    // changes. That must not start a second read of a key already being read,
+    // and the payload the first read delivers has to reach the renderer.
     const resolvers: Array<(tile: TileData) => void> = [];
-    const sink = collectBatches();
+    const sink = mirrorRenderer();
     const controller = createLodController({
       source: uncancellableSource(resolvers),
       onTiles: sink.onTiles,
@@ -1713,21 +1715,27 @@ describe("createLodController — decoded single ownership", () => {
     await settle();
     controller.setCamera(VIEW);
     await settle();
-    controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
+    expect(resolvers).toHaveLength(1);
 
-    resolvers[1]!(makeTile(100));
+    controller.setActive(false);
     await settle();
-    expect(controller.stats().residentTiles).toBe(1);
+    controller.setActive(true);
+    await settle();
+    expect(resolvers).toHaveLength(1);
+    expect(controller.stats()).toMatchObject({
+      inFlight: 1,
+      physicalTileOperations: 1,
+    });
 
     resolvers[0]!(makeTile(100));
     await settle();
     const stats = controller.stats();
+    expect(stats.residentTiles).toBe(1);
     expect(stats.decodedTiles).toBe(1);
     expect(stats.decodedBytes).toBe(decodedBytes(100));
     expect(stats.cachedTiles).toBe(0);
+    expect(sink.violations).toEqual([]);
+    expect(sink.visible.size).toBe(1);
     controller.dispose();
   });
 
@@ -1873,6 +1881,98 @@ describe("createLodController — bounded physical work", () => {
       residentTiles: 0,
       cachedTiles: 0,
     });
+    controller.dispose();
+  });
+
+  it("spends a landed payload instead of re-reading a queued key", async () => {
+    const graph = createPageGraphSource({
+      depth: 1,
+      branching: 1,
+      pointsPerNode: 10,
+    });
+    const { controller, visible } = makeScheduled(graph, {
+      fetchConcurrency: 1,
+    });
+    await settle();
+    controller.setCamera(VIEW);
+    await drainPages(graph);
+    expect(graph.tileCalls).toEqual(["0-0-0-0"]);
+
+    // Deselect and reselect while the read still holds the only slot: the key
+    // goes back on the queue with its payload still physically in flight.
+    controller.setPointBudget(1);
+    await settle();
+    controller.setPointBudget(1000);
+    await settle();
+    expect(controller.stats()).toMatchObject({
+      physicalTileOperations: 1,
+      residentTiles: 0,
+    });
+
+    // The read lands. Serving the queued key from what just arrived is the
+    // difference between one read and two — and, when the second read fails,
+    // between a drawn tile and a hole over a payload the controller holds.
+    graph.landTiles();
+    await settle();
+    graph.landTiles();
+    await settle();
+    expect(graph.tileCalls).toEqual(["0-0-0-0", "1-0-0-0"]);
+    const stats = controller.stats();
+    expect(stats.residentTiles).toBe(stats.selection.targetTiles);
+    expect(stats).toMatchObject({ queuedTiles: 0, cachedTiles: 0 });
+    expect(visible.size).toBe(stats.residentTiles);
+    controller.dispose();
+  });
+
+  it("reads each tile key once however often the camera churns", async () => {
+    // Cancellation never destroys a decoded payload: the read either stays
+    // physically alive or lands in the cache. A reselect must therefore adopt
+    // one or spend the other — re-reading the same bytes was ~40% of all tile
+    // I/O under a panning camera.
+    const graph = createPageGraphSource({
+      depth: 2,
+      branching: 4,
+      pointsPerNode: 5,
+    });
+    const { controller, violations, visible } = makeScheduled(graph, {
+      fetchConcurrency: 1,
+    });
+    await settle();
+
+    // The camera moves faster than the I/O: every round cancels the
+    // outstanding reads and reselects the same keys before any of them lands.
+    for (let round = 0; round < 40; round += 1) {
+      controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
+      await settle();
+      controller.setCamera(VIEW);
+      await settle();
+      graph.landPages();
+      await settle();
+      graph.landTiles();
+      await settle();
+      expect(new Set(graph.tileCalls).size).toBe(graph.tileCalls.length);
+    }
+
+    // Settle looking at the cloud and drain everything outstanding.
+    controller.setCamera(VIEW);
+    await drainPages(graph);
+    let round = 0;
+    while (
+      round < 200 &&
+      (controller.stats().queuedTiles > 0 || graph.activeTiles().length > 0)
+    ) {
+      round += 1;
+      graph.landTiles();
+      await settle();
+    }
+
+    // Fully settled means no hole: every selected tile is on screen, and no
+    // key was ever read twice.
+    const stats = controller.stats();
+    expect(stats.residentTiles).toBe(stats.selection.targetTiles);
+    expect(visible.size).toBe(stats.residentTiles);
+    expect(new Set(graph.tileCalls).size).toBe(graph.tileCalls.length);
+    expect(violations).toEqual([]);
     controller.dispose();
   });
 

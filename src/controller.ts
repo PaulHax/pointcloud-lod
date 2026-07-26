@@ -663,13 +663,23 @@ export const createLodController = (
     readyTerminalFrontier: emptyReadyTerminalFrontier(),
   };
   let budgetSkipped = new Set<string>();
-  const inFlight = new Map<string, AbortController>();
+  /**
+   * The one physical read a key may have running. It is created when the read
+   * starts and removed only when the promise settles, cancelled or not: while
+   * the entry is here nobody may start a rival read of the same key, and a
+   * reselect adopts this operation by flipping `wanted` back on instead of
+   * paying for the same bytes twice.
+   */
+  const tileReads = new Map<
+    string,
+    { readonly abort: AbortController; wanted: boolean }
+  >();
   let queue: string[] = [];
 
-  // Cancellation is advisory wherever it matters: `abort()` frees the logical
-  // slot at once, but the COPC getter takes no signal, so the range read and
-  // the decode keep burning I/O and CPU until the promise settles. Concurrency
-  // is therefore counted on the physical operation — otherwise a
+  // Cancellation is advisory wherever it matters: `abort()` marks a result
+  // unwanted, but the COPC getter takes no signal, so the range read and the
+  // decode keep burning I/O and CPU until the promise settles. Concurrency is
+  // therefore counted on the physical operation — otherwise a
   // look-away/look-back storm starts a fresh read per gesture while every
   // abandoned one is still running, and the ceilings bound nothing at all.
   // These drop only when a promise settles, epoch changes included: ignoring a
@@ -703,8 +713,23 @@ export const createLodController = (
 
   /** Park a decoded payload only when nothing else owns the key. */
   const cacheDecoded = (keyString: string, tile: TileData): void => {
-    if (resident.has(keyString) || inFlight.has(keyString)) return;
+    if (resident.has(keyString) || tileReads.has(keyString)) return;
     cache.set(keyString, tile, tileBytes(tile));
+  };
+
+  /** Reads whose result the controller still wants. */
+  const wantedTileReads = (): number => {
+    let count = 0;
+    for (const read of tileReads.values()) if (read.wanted) count += 1;
+    return count;
+  };
+
+  /** Promote a cached payload into residency. */
+  const promoteCached = (keyString: string): boolean => {
+    const cached = cache.get(keyString);
+    if (cached === undefined) return false;
+    takeResident(keyString, cached);
+    return true;
   };
 
   // The renderer's state as of the last batch it was handed. Every batch is
@@ -971,38 +996,39 @@ export const createLodController = (
       if (
         !target.has(keyString) ||
         resident.has(keyString) ||
-        inFlight.has(keyString)
+        tileReads.has(keyString)
       ) {
         continue;
       }
+      // The payload can have landed in the cache while this key waited for a
+      // slot — a cancelled read that resolved anyway, or a deselect/reselect.
+      // Reading it again would be pure duplicate I/O, and a failure of that
+      // read would settle the cloud with a hole over a payload it already has.
+      if (promoteCached(keyString)) {
+        updateReadyTerminalFrontier();
+        scheduleFlush();
+        continue;
+      }
       const abort = new AbortController();
-      inFlight.set(keyString, abort);
+      tileReads.set(keyString, { abort, wanted: true });
       const requestEpoch = epoch;
       const key = keyFromString(keyString);
       physicalTileOperations += 1;
       source.loadTile(key, { signal: abort.signal }).then(
         (tile) => {
           physicalTileOperations -= 1;
+          // An epoch change is the only thing that takes a key's read entry
+          // away while the read runs, and it also makes the payload worthless:
+          // it came from a source nobody is displaying any more.
           if (disposed || requestEpoch !== epoch) {
             pump();
             return;
           }
-          // Aborting is advisory: the COPC getter takes no signal, so a
-          // superseded request still resolves. Only the continuation that owns
-          // the current in-flight slot may retire it or claim residency —
-          // otherwise a stale arrival frees a live slot and double-counts
-          // resident points and bytes.
-          if (inFlight.get(keyString) !== abort) {
-            // This payload is a duplicate of whatever owns the key now: the
-            // live request about to deliver it, or the residency/cache entry
-            // that already has it. Keeping it would count the same tile
-            // twice and evict genuinely reusable entries from the CPU cache.
-            cacheDecoded(keyString, tile);
-            pump();
-            return;
-          }
-          inFlight.delete(keyString);
+          tileReads.delete(keyString);
           tileFailures.delete(keyString);
+          // Cancellation is advisory: the COPC getter takes no signal, so a
+          // cancelled read still delivers. If the key was reselected while it
+          // ran, this payload is exactly what the selection is waiting for.
           if (target.has(keyString) && !resident.has(keyString)) {
             takeResident(keyString, tile);
             updateReadyTerminalFrontier();
@@ -1018,10 +1044,14 @@ export const createLodController = (
             pump();
             return;
           }
-          if (inFlight.get(keyString) === abort) inFlight.delete(keyString);
+          tileReads.delete(keyString);
           if (!isAbortError(error)) {
             recordFailure(tileFailures, keyString);
             onError(error);
+          } else if (target.has(keyString) && !resident.has(keyString)) {
+            // A source that honours the signal really stopped, and the key was
+            // reselected while the read was cancelled: it needs a fresh one.
+            queue.unshift(keyString);
           }
           updateReadyTerminalFrontier();
           pump();
@@ -1131,24 +1161,30 @@ export const createLodController = (
       releaseResident(keyString);
     }
 
-    // Cancel fetches that no longer matter.
-    for (const [keyString, abort] of [...inFlight]) {
+    // Cancel fetches that no longer matter. The read keeps its physical slot
+    // until it settles: dropping it here would let a reselect race a second
+    // read of the same key against work that is still running.
+    for (const [keyString, read] of tileReads) {
       if (target.has(keyString)) continue;
-      inFlight.delete(keyString);
-      abort.abort();
+      read.wanted = false;
+      read.abort.abort();
     }
 
     // Reuse cached tiles immediately; queue the rest, coarse levels first.
     const toFetch: string[] = [];
     for (const keyString of target) {
-      if (resident.has(keyString) || inFlight.has(keyString)) continue;
+      if (resident.has(keyString)) continue;
+      const read = tileReads.get(keyString);
+      if (read !== undefined) {
+        // Adopt the live read instead of starting a rival one; its payload
+        // claims residency when it lands.
+        read.wanted = true;
+        continue;
+      }
       const entry = hierarchy.get(keyString);
       // Structural hierarchy nodes participate in selection but carry no tile.
       if (entry?.pointCount === 0) continue;
-      const cached = cache.get(keyString);
-      if (cached !== undefined) {
-        takeResident(keyString, cached);
-      } else if (!resting(tileFailures, keyString)) {
+      if (!promoteCached(keyString) && !resting(tileFailures, keyString)) {
         toFetch.push(keyString);
       }
     }
@@ -1216,8 +1252,11 @@ export const createLodController = (
     // decodes behind those results are still running, and pretending
     // otherwise is how a source swap under a moving camera doubles real I/O.
     epoch += 1;
-    for (const abort of inFlight.values()) abort.abort();
-    inFlight.clear();
+    for (const read of tileReads.values()) {
+      read.wanted = false;
+      read.abort.abort();
+    }
+    tileReads.clear();
     for (const abort of pagesInFlight.values()) abort.abort();
     pagesInFlight.clear();
     queue = [];
@@ -1382,8 +1421,12 @@ export const createLodController = (
       // cancelling one only buys a refetch of the same bytes on reactivation.
       queue = [];
       pageQueue = [];
-      for (const abort of inFlight.values()) abort.abort();
-      inFlight.clear();
+      // Hiding cancels tile reads but keeps their physical slots: a hide/show
+      // pair must adopt the read that is still running, not race it.
+      for (const read of tileReads.values()) {
+        read.wanted = false;
+        read.abort.abort();
+      }
 
       if (target.size > 0) targetRevision += 1;
       target = new Set();
@@ -1425,7 +1468,7 @@ export const createLodController = (
         decodedTiles: resident.size + cache.count(),
         decodedBytes: residentBytes + cachedBytes,
         cachedBytes,
-        inFlight: inFlight.size,
+        inFlight: wantedTileReads(),
         queuedTiles: queue.length,
         physicalTileOperations,
         hierarchyInFlight: pagesInFlight.size,
