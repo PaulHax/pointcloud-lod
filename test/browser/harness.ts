@@ -40,6 +40,54 @@ export const extraClouds = (): string[] =>
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
 
+/**
+ * A cloud to run a scenario against, named by position rather than by file.
+ *
+ * Every scenario runs over this list, so the committed fixture proves the
+ * mechanism everywhere and a real cloud supplied through the environment
+ * proves it against a deep octree — same assertions, no second suite. The
+ * label and the URL are positional on purpose: a run's output should not
+ * disclose which datasets a deployment pointed it at.
+ */
+export interface CloudUnderTest {
+  readonly name: string;
+  readonly urlPath: string;
+  readonly files: Record<string, string>;
+  /** The committed fixture is small enough to select whole; a real one is not. */
+  readonly deep: boolean;
+}
+
+export const FIXTURE_CLOUD: CloudUnderTest = {
+  name: "the fixture",
+  urlPath: FIXTURE_URL_PATH,
+  files: {},
+  deep: false,
+};
+
+export const cloudsUnderTest = (): CloudUnderTest[] => [
+  FIXTURE_CLOUD,
+  ...extraClouds().map((path, index) => ({
+    name: `supplied cloud ${index + 1}`,
+    urlPath: `/supplied/${index + 1}/cloud.copc.laz`,
+    files: { [`/supplied/${index + 1}/cloud.copc.laz`]: path },
+    deep: true,
+  })),
+];
+
+/** Two clouds to switch between: a second supplied one, else the fixture twice. */
+export const cloudPair = (): [CloudUnderTest, CloudUnderTest] => {
+  const clouds = cloudsUnderTest();
+  if (clouds.length >= 3) return [clouds[1]!, clouds[2]!];
+  if (clouds.length === 2) return [clouds[0]!, clouds[1]!];
+  // One cloud served at two URLs is still two sources to the library — a
+  // different endpoint, a full teardown, a fresh hierarchy — and is what CI
+  // has. It cannot prove the two differ in content; a supplied pair can.
+  return [
+    FIXTURE_CLOUD,
+    { ...FIXTURE_CLOUD, name: "the fixture at a second URL", urlPath: `${FIXTURE_URL_PATH}?alias=2` },
+  ];
+};
+
 export interface ExampleStats {
   controller: {
     residentTiles: number;
@@ -197,16 +245,26 @@ export const openExample = async (
   options: {
     cloud?: string;
     roots?: Record<string, string>;
+    files?: Record<string, string>;
     query?: Record<string, string>;
   } = {},
 ): Promise<ExampleSession> => {
   const cloud = options.cloud ?? FIXTURE_URL_PATH;
-  const server: StaticServer = await startStaticServer({
-    "/fixtures": FIXTURES,
-    ...options.roots,
-    // The example is the fallback root, so it must be matched last.
-    "/": EXAMPLE_DIST,
-  });
+  const server: StaticServer = await startStaticServer(
+    {
+      "/fixtures": FIXTURES,
+      ...options.roots,
+      // The example is the fallback root, so it must be matched last.
+      "/": EXAMPLE_DIST,
+    },
+    // Every cloud is reachable from every session, so a scenario can switch
+    // sources without standing up a second server.
+    Object.assign(
+      {},
+      ...cloudsUnderTest().map((entry) => entry.files),
+      options.files ?? {},
+    ),
+  );
   const page = await (await browser()).newPage();
   const failures: string[] = [];
   page.on("pageerror", (error) => failures.push(`pageerror: ${error.message}`));

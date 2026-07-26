@@ -56,9 +56,17 @@ export interface StaticServer {
  */
 export const startStaticServer = async (
   roots: Readonly<Record<string, string>>,
+  /**
+   * Exact URL path to a single file, for serving something whose directory
+   * should not be exposed — or whose name should not appear in a URL.
+   */
+  files: Readonly<Record<string, string>> = {},
 ): Promise<StaticServer> => {
   const resolved = Object.entries(roots).map(
     ([prefix, dir]) => [prefix, resolve(dir)] as const,
+  );
+  const exact = new Map(
+    Object.entries(files).map(([urlPath, file]) => [urlPath, resolve(file)]),
   );
 
   /** A prefix owns a path only at a segment boundary, so `/fixtures` does not
@@ -69,6 +77,8 @@ export const startStaticServer = async (
     urlPath.startsWith(prefix.endsWith("/") ? prefix : `${prefix}/`);
 
   const locate = (urlPath: string): string | null => {
+    const named = exact.get(urlPath);
+    if (named !== undefined) return named;
     for (const [prefix, dir] of resolved) {
       if (!under(urlPath, prefix)) continue;
       const rest = (prefix === "/" ? urlPath : urlPath.slice(prefix.length))
