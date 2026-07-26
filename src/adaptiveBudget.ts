@@ -161,6 +161,14 @@ export interface AdaptiveBudget {
   restartAt(interacting: boolean, points: number, now: number): number;
   /** Immediately reduce one track, bypassing sample and cooldown thresholds. */
   reduceNow(interacting: boolean, now: number, factor?: number): number;
+  /**
+   * Bound both tracks by a ceiling the loop must not integrate past — the
+   * memory-derived one, which moves as clouds come and go. `null` clears it.
+   * This is the same anti-windup role `maxBudget` plays: without it the loop
+   * climbs toward frame-time headroom it can never spend, so it never reports
+   * itself pinned and a host watching for convergence never idles.
+   */
+  setCeiling(points: number | null): void;
   stats(): AdaptiveBudgetStats;
 }
 
@@ -264,8 +272,13 @@ export const createAdaptiveBudget = (
   // would silently freeze the loop; cap the requirement at the window size.
   const effectiveMinSamples = Math.min(minSamples, windowSize);
 
+  // A moving upper bound the loop must not integrate past: the memory-derived
+  // ceiling, which changes as clouds come and go. `minBudget` still wins, so a
+  // ceiling below the floor pins the budget at the floor rather than under it.
+  let ceiling = Number.POSITIVE_INFINITY;
+
   const clamp = (points: number): number =>
-    Math.round(Math.min(Math.max(points, minBudget), maxBudget));
+    Math.round(Math.max(minBudget, Math.min(points, maxBudget, ceiling)));
 
   const initialBudget = clamp(
     wholeAtLeast("initialBudget", options.initialBudget ?? DEFAULTS.initialBudget, 1),
@@ -409,6 +422,18 @@ export const createAdaptiveBudget = (
         null,
       );
       return track.budget;
+    },
+
+    setCeiling(points) {
+      // Only future growth is bounded; an already-learned budget is left
+      // alone. A ceiling that drops and lifts again — a second cloud
+      // appearing, then leaving — would otherwise erase what the loop had
+      // learned and make it climb back from scratch each time. The next
+      // adjustment walks the budget onto the ceiling and reports it pinned.
+      ceiling =
+        points === null || !Number.isFinite(points)
+          ? Number.POSITIVE_INFINITY
+          : Math.max(1, Math.floor(points));
     },
 
     stats() {

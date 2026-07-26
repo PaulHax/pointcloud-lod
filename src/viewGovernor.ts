@@ -277,6 +277,12 @@ export const createViewGovernor = (
   const distribute = (): void => {
     if (disposed) return;
     const active = activeMembers();
+    // Hand the loop the memory ceiling before reading it. Clamping only the
+    // aggregate would let the track integrate toward frame-time headroom the
+    // memory ceiling never allows it to spend: the effective budget would sit
+    // still while the track climbed for ever, so it would never report itself
+    // pinned and a host watching `needsFrame()` would repaint for ever.
+    budget.setCeiling(memoryCeilingPoints());
     const total = aggregateBudget();
     // Importance is root screen-space error in CSS px, so it is legitimately
     // below 1 for a distant cloud and exactly 0 for one that is fully culled

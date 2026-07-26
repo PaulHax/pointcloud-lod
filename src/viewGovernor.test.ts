@@ -516,6 +516,79 @@ describe("createViewGovernor ceilings", () => {
     expect(setBudget).toHaveBeenLastCalledWith(400_000);
   });
 
+  it("stops growing the track once the memory ceiling binds", () => {
+    const governor = createViewGovernor({ initialBudget: 1_000_000 });
+    const setBudget = vi.fn();
+    const member = governor.register({ setPointBudget: setBudget });
+    member.update({ memoryCeilingPoints: 1_200_000 });
+
+    // Frames far under target: on a machine with headroom the loop would grow
+    // by maxIncreaseStep for ever, because only the aggregate was clamped.
+    for (let round = 0; round < 30; round += 1) {
+      frames(governor, 1, 10);
+      vi.advanceTimersByTime(500);
+    }
+
+    const stats = governor.stats();
+    expect(stats.trackBudget).toBe(1_200_000);
+    expect(stats.aggregateBudget).toBe(1_200_000);
+    expect(stats.activeConstraint).toBe("memory");
+    expect(setBudget).toHaveBeenLastCalledWith(1_200_000);
+  });
+
+  it("stops asking for frames when only memory holds the budget down", () => {
+    const governor = createViewGovernor({ initialBudget: 1_000_000 });
+    const member = governor.register({ setPointBudget: vi.fn() });
+    member.update({
+      memoryCeilingPoints: 1_200_000,
+      physicalTileOperations: 0,
+      physicalHierarchyOperations: 0,
+    });
+
+    for (let round = 0; round < 30; round += 1) {
+      frames(governor, 1, 10);
+      vi.advanceTimersByTime(500);
+    }
+
+    // Pinned against memory is converged: the effective budget cannot move,
+    // so a host that repaints while needsFrame() is true would never idle.
+    expect(governor.stats().trackBudget).toBe(1_200_000);
+    expect(governor.needsFrame()).toBe(false);
+  });
+
+  it("walks a budget grown past a newly reported memory ceiling back down", () => {
+    const governor = createViewGovernor({ initialBudget: 4_000_000 });
+    const setBudget = vi.fn();
+    const member = governor.register({ setPointBudget: setBudget });
+    member.update({ memoryCeilingPoints: 500_000 });
+
+    // The member never sees more than memory allows, even before the loop
+    // has adjusted anything.
+    expect(setBudget).toHaveBeenLastCalledWith(500_000);
+
+    for (let round = 0; round < 5; round += 1) {
+      frames(governor, 1, 10);
+      vi.advanceTimersByTime(500);
+    }
+    expect(governor.stats().trackBudget).toBe(500_000);
+  });
+
+  it("lets memory hold the budget under the adaptive floor", () => {
+    const governor = createViewGovernor({
+      initialBudget: 1_000_000,
+      minBudget: 200_000,
+    });
+    const setBudget = vi.fn();
+    const member = governor.register({ setPointBudget: setBudget });
+    member.update({ memoryCeilingPoints: 50_000 });
+
+    // The floor bounds what the loop may choose, not what memory permits:
+    // drawing 200,000 points out of a 50,000-point budget is the failure the
+    // memory ceiling exists to prevent.
+    expect(governor.stats().aggregateBudget).toBe(50_000);
+    expect(setBudget).toHaveBeenLastCalledWith(50_000);
+  });
+
   it("applies the ceiling to the aggregate before splitting it", () => {
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
     const near = vi.fn();
