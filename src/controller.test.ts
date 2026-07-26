@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { createLodController, type TileBatch } from "./controller";
-import { createMemoryPool } from "./memoryPool";
+import {
+  createLodController,
+  type LodControllerOptions,
+  type TileBatch,
+} from "./controller";
+import { createMemoryPool, type MemoryPool } from "./memoryPool";
 import { keyToString, type VoxelKey } from "./octree";
 import type {
   NodeInfo,
@@ -152,6 +156,60 @@ const collectBatches = () => {
   return { batches, onTiles, scheduleRender };
 };
 
+/**
+ * Models the consumer the way the renderer adapter behaves, and refuses
+ * everything the controller must never emit: a key in both halves of one
+ * batch, a re-addition of a payload already on screen, or a removal of
+ * something the renderer was never handed.
+ */
+const mirrorRenderer = () => {
+  const visible = new Map<string, TileData>();
+  const batches: TileBatch[] = [];
+  // Batches arrive in a microtask, where a thrown assertion would never reach
+  // the test — violations are recorded and asserted from the test body.
+  const violations: string[] = [];
+  const scheduleRender = vi.fn();
+  const onTiles = (batch: TileBatch) => {
+    batches.push({ added: [...batch.added], removed: [...batch.removed] });
+    const removed = batch.removed.map(keyToString);
+    for (const entry of batch.added) {
+      const keyString = keyToString(entry.key);
+      if (removed.includes(keyString)) {
+        violations.push(`added and removed ${keyString}`);
+      }
+    }
+    for (const keyString of removed) {
+      if (!visible.delete(keyString)) {
+        violations.push(`removed unsubmitted ${keyString}`);
+      }
+    }
+    for (const { key, tile } of batch.added) {
+      const keyString = keyToString(key);
+      // Re-adding a key is only ever legal to swap in a different payload.
+      if (visible.get(keyString) === tile) {
+        violations.push(`re-added ${keyString}`);
+      }
+      visible.set(keyString, tile);
+    }
+  };
+  const visiblePoints = (): number =>
+    [...visible.values()].reduce((sum, tile) => sum + tile.pointCount, 0);
+  const touchedKeys = (): string[] =>
+    batches.flatMap((batch) => [
+      ...batch.added.map((entry) => keyToString(entry.key)),
+      ...batch.removed.map(keyToString),
+    ]);
+  return {
+    visible,
+    batches,
+    violations,
+    onTiles,
+    scheduleRender,
+    visiblePoints,
+    touchedKeys,
+  };
+};
+
 const settle = async (): Promise<void> => {
   await Promise.resolve();
   await Promise.resolve();
@@ -171,6 +229,22 @@ const makeController = (
     pointBudget: options?.pointBudget ?? 1000,
     selectionDelayMs: 0,
     cacheBytes: options?.cacheBytes,
+  });
+  return { controller, ...fake, ...sink };
+};
+
+const makeMirrored = (
+  tree: Record<string, FakeEntry>,
+  options?: { pointBudget?: number },
+) => {
+  const fake = makeFakeSource(tree);
+  const sink = mirrorRenderer();
+  const controller = createLodController({
+    source: fake.source,
+    onTiles: sink.onTiles,
+    scheduleRender: sink.scheduleRender,
+    pointBudget: options?.pointBudget ?? 1000,
+    selectionDelayMs: 0,
   });
   return { controller, ...fake, ...sink };
 };
@@ -1259,6 +1333,489 @@ describe("createLodController — selection stats", () => {
 
     controller.setSource(source);
     expect(controller.stats().selection.targetTiles).toBe(0);
+    controller.dispose();
+  });
+});
+
+describe("createLodController — batch coalescing", () => {
+  const AWAY = { ...VIEW, viewProj: LOOK_AWAY };
+
+  it("emits no actor for a cached tile selected and dropped in one task", async () => {
+    const { controller, deferred, batches, visible, violations } =
+      makeMirrored(SMALL_TREE);
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    for (const d of deferred.values()) d.resolve();
+    await settle();
+    controller.setCamera(AWAY);
+    await settle();
+    expect(visible.size).toBe(0);
+    expect(controller.stats().cachedTiles).toBe(3);
+
+    batches.length = 0;
+    // One task, two selections: the cache hits make all three resident and
+    // the next selection drops them again before the flush microtask runs.
+    controller.setCamera(VIEW);
+    expect(controller.stats().residentTiles).toBe(3);
+    controller.setCamera(AWAY);
+    expect(controller.stats().residentTiles).toBe(0);
+    await settle();
+
+    expect(violations).toEqual([]);
+    expect(batches).toEqual([]);
+    expect(visible.size).toBe(0);
+    controller.dispose();
+  });
+
+  it("emits no actor for a decoded tile dropped before its flush", async () => {
+    const { controller, deferred, batches, visible, violations } =
+      makeMirrored(SMALL_TREE);
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    batches.length = 0;
+
+    deferred.get("0-0-0-0")!.resolve();
+    // Exactly one turn: the fetch continuation claims residency and queues a
+    // flush that has not run yet.
+    await Promise.resolve();
+    expect(controller.stats().residentTiles).toBe(1);
+    controller.setCamera(AWAY);
+    expect(controller.stats().residentTiles).toBe(0);
+    await settle();
+
+    expect(violations).toEqual([]);
+    expect(batches).toEqual([]);
+    expect(visible.size).toBe(0);
+    controller.dispose();
+  });
+
+  it("leaves the renderer untouched when a tile is dropped and reselected", async () => {
+    const { controller, deferred, batches, visible, violations } =
+      makeMirrored(SMALL_TREE);
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    for (const d of deferred.values()) d.resolve();
+    await settle();
+    expect(visible.size).toBe(3);
+
+    batches.length = 0;
+    controller.setCamera(AWAY);
+    controller.setCamera(VIEW);
+    await settle();
+
+    expect(violations).toEqual([]);
+    expect(batches).toEqual([]);
+    expect(visible.size).toBe(3);
+    expect(controller.stats().residentTiles).toBe(3);
+    expect(controller.stats().residentPoints).toBe(220);
+    controller.dispose();
+  });
+
+  it("keeps renderer state equal to residency across a long sequence", async () => {
+    const { controller, deferred, visible, visiblePoints, violations } =
+      makeMirrored(SMALL_TREE);
+    const agrees = (): void => {
+      const stats = controller.stats();
+      expect(violations).toEqual([]);
+      expect(visible.size).toBe(stats.residentTiles);
+      expect(visiblePoints()).toBe(stats.residentPoints);
+      expect(stats.residentPoints).toBeGreaterThanOrEqual(0);
+      expect(stats.residentBytes).toBeGreaterThanOrEqual(0);
+      expect(stats.decodedBytes).toBe(stats.residentBytes + stats.cachedBytes);
+    };
+
+    await settle();
+    agrees();
+    controller.setCamera(VIEW);
+    await settle();
+    agrees();
+
+    deferred.get("0-0-0-0")!.resolve();
+    await settle();
+    agrees();
+
+    controller.setPointBudget(150); // drops both children
+    await settle();
+    agrees();
+
+    for (const d of deferred.values()) d.resolve();
+    await settle();
+    agrees();
+
+    controller.setPointBudget(1000);
+    await settle();
+    agrees();
+
+    controller.setCamera(AWAY);
+    await settle();
+    agrees();
+
+    controller.setCamera(VIEW);
+    await settle();
+    agrees();
+
+    controller.setActive(false);
+    await settle();
+    expect(controller.stats().residentPoints).toBe(0);
+    expect(controller.stats().residentBytes).toBe(0);
+    agrees();
+
+    controller.setActive(true);
+    await settle();
+    agrees();
+
+    controller.dispose();
+    await settle();
+    expect(visible.size).toBe(0);
+  });
+
+  it("never batches a structural node that carries no tile", async () => {
+    const structural: Record<string, FakeEntry> = {
+      "0-0-0-0": { pointCount: 0, children: ["1-0-0-0"] },
+      "1-0-0-0": { pointCount: 40 },
+    };
+    const { controller, deferred, visible, touchedKeys, violations } =
+      makeMirrored(structural);
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    for (const d of deferred.values()) d.resolve();
+    await settle();
+    expect([...visible.keys()]).toEqual(["1-0-0-0"]);
+
+    controller.setCamera(AWAY);
+    await settle();
+    controller.dispose();
+    await settle();
+
+    expect(violations).toEqual([]);
+    expect(touchedKeys()).not.toContain("0-0-0-0");
+    expect(visible.size).toBe(0);
+  });
+
+  it("dispose takes back exactly what the renderer was handed", async () => {
+    const { controller, deferred, batches, visible, violations } =
+      makeMirrored(SMALL_TREE);
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    batches.length = 0;
+
+    // Residency the consumer has not been told about yet: tearing down must
+    // not ask it to remove an actor it never created.
+    deferred.get("0-0-0-0")!.resolve();
+    await Promise.resolve();
+    expect(controller.stats().residentTiles).toBe(1);
+    controller.dispose();
+    await settle();
+
+    expect(violations).toEqual([]);
+    expect(batches).toEqual([]);
+    expect(visible.size).toBe(0);
+  });
+});
+
+describe("createLodController — decoded single ownership", () => {
+  /** What `tileBytes` charges for a position-only tile of this size. */
+  const decodedBytes = (pointCount: number): number => pointCount * 12 + 64;
+
+  /** Source that ignores the abort signal: cancellation is advisory only. */
+  const uncancellableSource = (resolvers: Array<(tile: TileData) => void>) => ({
+    metadata: () => METADATA,
+    async nodes() {
+      return [
+        {
+          key: { level: 0, x: 0, y: 0, z: 0 },
+          pointCount: 100,
+          bounds: {
+            min: [-0.5, -0.5, -0.5] as [number, number, number],
+            max: [0.5, 0.5, 0.5] as [number, number, number],
+          },
+          spacing: 0.1,
+          children: [],
+        },
+      ];
+    },
+    loadTile: () => new Promise<TileData>((r) => resolvers.push(r)),
+  });
+
+  it("drops a canceled request's payload while its replacement is live", async () => {
+    const resolvers: Array<(tile: TileData) => void> = [];
+    const sink = mirrorRenderer();
+    const controller = createLodController({
+      source: uncancellableSource(resolvers),
+      onTiles: sink.onTiles,
+      scheduleRender: sink.scheduleRender,
+      pointBudget: 1000,
+      selectionDelayMs: 0,
+    });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    expect(resolvers).toHaveLength(1);
+
+    // Cancel (advisory: the getter keeps running) and re-request the key.
+    controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    expect(resolvers).toHaveLength(2);
+    expect(controller.stats().inFlight).toBe(1);
+
+    // The canceled request lands first. The live request owns the key, so
+    // this payload is a duplicate and nothing may hold it.
+    resolvers[0]!(makeTile(100));
+    await settle();
+    expect(controller.stats()).toMatchObject({
+      decodedTiles: 0,
+      decodedBytes: 0,
+      cachedTiles: 0,
+      residentTiles: 0,
+      inFlight: 1,
+    });
+
+    resolvers[1]!(makeTile(100));
+    await settle();
+    const stats = controller.stats();
+    expect(stats).toMatchObject({
+      residentTiles: 1,
+      residentPoints: 100,
+      cachedTiles: 0,
+      cachedBytes: 0,
+      decodedTiles: 1,
+      inFlight: 0,
+    });
+    expect(stats.decodedBytes).toBe(decodedBytes(100));
+    expect(stats.residentBytes).toBe(stats.decodedBytes);
+    expect(sink.violations).toEqual([]);
+    expect(sink.visible.size).toBe(1);
+    controller.dispose();
+  });
+
+  it("keeps one owner when a canceled request lands after residency", async () => {
+    const resolvers: Array<(tile: TileData) => void> = [];
+    const sink = collectBatches();
+    const controller = createLodController({
+      source: uncancellableSource(resolvers),
+      onTiles: sink.onTiles,
+      scheduleRender: sink.scheduleRender,
+      pointBudget: 1000,
+      selectionDelayMs: 0,
+    });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+
+    resolvers[1]!(makeTile(100));
+    await settle();
+    expect(controller.stats().residentTiles).toBe(1);
+
+    resolvers[0]!(makeTile(100));
+    await settle();
+    const stats = controller.stats();
+    expect(stats.decodedTiles).toBe(1);
+    expect(stats.decodedBytes).toBe(decodedBytes(100));
+    expect(stats.cachedTiles).toBe(0);
+    controller.dispose();
+  });
+
+  it("hands the cached payload to residency instead of copying it", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    for (const d of deferred.values()) d.resolve();
+    await settle();
+    const residentBytes = controller.stats().residentBytes;
+    expect(controller.stats().decodedTiles).toBe(3);
+
+    controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
+    await settle();
+    expect(controller.stats()).toMatchObject({
+      residentTiles: 0,
+      residentBytes: 0,
+      cachedTiles: 3,
+      decodedTiles: 3,
+    });
+    expect(controller.stats().decodedBytes).toBe(residentBytes);
+
+    controller.setCamera(VIEW);
+    await settle();
+    expect(controller.stats()).toMatchObject({
+      residentTiles: 3,
+      cachedTiles: 0,
+      cachedBytes: 0,
+      decodedTiles: 3,
+    });
+    expect(controller.stats().decodedBytes).toBe(residentBytes);
+    controller.dispose();
+  });
+});
+
+describe("createLodController — numeric configuration", () => {
+  const NON_FINITE = [
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+  ];
+
+  const make = (overrides: Partial<LodControllerOptions>) =>
+    createLodController({
+      source: makeFakeSource(SMALL_TREE).source,
+      onTiles: () => {},
+      scheduleRender: () => {},
+      selectionDelayMs: 0,
+      ...overrides,
+    });
+
+  it("throws for a construction option outside its range", () => {
+    for (const value of [...NON_FINITE, 0, -1, -1e9]) {
+      expect(() => make({ pointBudget: value })).toThrow(/pointBudget/);
+      expect(() => make({ cacheBytes: value })).toThrow(/cacheBytes/);
+      expect(() => make({ fetchConcurrency: value })).toThrow(
+        /fetchConcurrency/,
+      );
+      expect(() => make({ memory: value })).toThrow(/memory/);
+    }
+    for (const value of [...NON_FINITE, -1, -1e9]) {
+      expect(() => make({ selectionDelayMs: value })).toThrow(
+        /selectionDelayMs/,
+      );
+      expect(() => make({ interactionSettleMs: value })).toThrow(
+        /interactionSettleMs/,
+      );
+      expect(() => make({ refinementCutoffPx: value })).toThrow(
+        /refinementCutoffPx/,
+      );
+    }
+  });
+
+  it("throws for an unusable or inverted presentation contract", () => {
+    const broken = [
+      { mode: "fixed", diameterCssPx: Number.NaN },
+      { mode: "fixed", diameterCssPx: 0 },
+      { mode: "fixed", diameterCssPx: Number.POSITIVE_INFINITY },
+      { mode: "auto", userScale: Number.NaN },
+      { mode: "auto", userScale: -1 },
+      { mode: "auto", userScale: 1, minDiameterCssPx: 5, maxDiameterCssPx: 2 },
+      {
+        mode: "auto",
+        userScale: 1,
+        minDiameterCssPx: Number.NEGATIVE_INFINITY,
+      },
+    ] as const;
+    for (const presentation of broken) {
+      expect(() => make({ presentation })).toThrow();
+    }
+  });
+
+  it("truncates fractional construction counts", () => {
+    const controller = make({ pointBudget: 1000.9, fetchConcurrency: 2.7 });
+    expect(controller.stats().pointBudget).toBe(1000);
+    controller.dispose();
+  });
+
+  it("ignores live setter values outside their range", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    for (const d of deferred.values()) d.resolve();
+    await settle();
+    const before = controller.stats();
+    expect(before.residentTiles).toBe(3);
+
+    for (const value of [...NON_FINITE, 0, -1, -1e9]) {
+      controller.setPointBudget(value);
+      const after = controller.stats();
+      expect(after.pointBudget).toBe(before.pointBudget);
+      expect(after.memoryCeilingPoints).toBe(before.memoryCeilingPoints);
+      expect(after.residentTiles).toBe(before.residentTiles);
+      expect(after.residentPoints).toBe(before.residentPoints);
+    }
+    for (const value of [...NON_FINITE, -1]) {
+      controller.setRefinementCutoffPx(value);
+      expect(controller.stats().refinementCutoffPx).toBe(
+        before.refinementCutoffPx,
+      );
+    }
+    for (const presentation of [
+      { mode: "fixed", diameterCssPx: Number.NaN },
+      { mode: "fixed", diameterCssPx: -2 },
+      { mode: "auto", userScale: Number.POSITIVE_INFINITY },
+      { mode: "auto", userScale: 1, minDiameterCssPx: 9, maxDiameterCssPx: 1 },
+    ] as const) {
+      controller.setPresentation(presentation);
+      expect(controller.stats().presentation).toEqual(before.presentation);
+    }
+
+    // A usable value still applies, truncated to whole points.
+    controller.setPointBudget(150.9);
+    expect(controller.stats().pointBudget).toBe(150);
+    expect(controller.stats().residentTiles).toBe(1);
+    controller.dispose();
+  });
+
+  it("ignores a camera view carrying any non-finite number", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    for (const d of deferred.values()) d.resolve();
+    await settle();
+    const before = controller.stats();
+
+    const broken = [
+      { ...VIEW, position: [Number.NaN, 0, 0] as [number, number, number] },
+      { ...VIEW, fovY: Number.POSITIVE_INFINITY },
+      { ...VIEW, viewportHeightCssPx: 0 },
+      { ...VIEW, viewportHeightCssPx: Number.NaN },
+      { ...VIEW, viewProj: [...IDENTITY.slice(0, 15), Number.NaN] },
+    ];
+    for (const view of broken) {
+      controller.setCamera(view);
+      await settle();
+      const after = controller.stats();
+      expect(after.selection.generation).toBe(before.selection.generation);
+      expect(after.residentTiles).toBe(before.residentTiles);
+      expect(Number.isFinite(after.selection.projectedImportance)).toBe(true);
+    }
+    controller.dispose();
+  });
+
+  it("treats a memory pool that answers nonsense as no memory", async () => {
+    const brokenPool: MemoryPool = {
+      register: () => ({ budgetBytes: () => Number.NaN, release: () => {} }),
+      totalBytes: () => Number.NaN,
+      setTotalBytes: () => {},
+      memberCount: () => 1,
+    };
+    const fake = makeFakeSource(SMALL_TREE);
+    const sink = collectBatches();
+    const controller = createLodController({
+      source: fake.source,
+      onTiles: sink.onTiles,
+      scheduleRender: sink.scheduleRender,
+      selectionDelayMs: 0,
+      memory: brokenPool,
+    });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+
+    const stats = controller.stats();
+    expect(Number.isFinite(stats.pointBudget)).toBe(true);
+    expect(stats.pointBudget).toBe(0);
+    expect(stats.memoryCeilingPoints).toBe(0);
+    expect(stats.memoryBudgetBytes).toBe(0);
+    expect(fake.loadCalls).toEqual([]);
     controller.dispose();
   });
 });

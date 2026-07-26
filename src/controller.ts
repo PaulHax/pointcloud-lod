@@ -56,6 +56,12 @@ export interface AutoPointPresentation {
 
 export type PointPresentation = FixedPointPresentation | AutoPointPresentation;
 
+/**
+ * Every numeric option is a programmer error when it is not finite or falls
+ * outside its documented range: construction throws naming the option and the
+ * value. The live setters take the opposite side of the same policy — see
+ * `LodController`.
+ */
 export interface LodControllerOptions {
   source: TileSource;
   /** Receives batched tile arrivals/removals (typically a renderer adapter). */
@@ -181,14 +187,25 @@ export interface LodSelectionStats {
   };
 }
 
+/**
+ * Setters carry live wire input, so they validate rather than throw: a value
+ * that is not finite or is out of range is ignored and changes no state.
+ * Construction is where an invalid number is fatal.
+ */
 export interface LodController {
-  /** Update the camera; selection reruns debounced (leading edge immediate). */
+  /**
+   * Update the camera; selection reruns debounced (leading edge immediate).
+   * A view with any non-finite number is ignored.
+   */
   setCamera(view: CameraView): void;
   /** Enter a camera interaction. Nested calls are reference counted. */
   beginInteraction(): void;
   /** Leave a camera interaction; the outermost end starts the settle window. */
   endInteraction(): void;
-  /** Set the visible-point budget; the memory ceiling still caps it. */
+  /**
+   * Set the visible-point budget, truncated to whole points; the memory
+   * ceiling still caps it. Anything below one point is ignored.
+   */
   setPointBudget(points: number): void;
   /**
    * Swap the tile source (e.g. a new asset revision behind a new endpoint).
@@ -200,8 +217,12 @@ export interface LodController {
   refresh(): void;
   /** Change the screen-space refinement cutoff and reselect immediately. */
   setRefinementCutoffPx(pixels: number): void;
-  /** Replace the explicit Fixed/Auto point-presentation contract. */
-  setPresentation(presentation: PointPresentation): void;
+  /**
+   * Replace the explicit Fixed/Auto point-presentation contract. Undefined
+   * restores the default; a contract with unusable or inverted bounds is
+   * ignored.
+   */
+  setPresentation(presentation: PointPresentation | undefined): void;
   /**
    * Enable or disable renderer submission. Disabling immediately removes all
    * submitted tiles, cancels tile requests, and moves decoded payloads into
@@ -233,6 +254,41 @@ const percentileOrNull = (
   p: number,
 ): number | null => (values.length === 0 ? null : percentile(values, p));
 
+/**
+ * Numeric policy, applied at every public boundary:
+ *
+ * - construction options are programmer errors — an invalid one throws with
+ *   the offending name and value;
+ * - live setters carry wire input — an invalid value is ignored and leaves
+ *   the controller exactly as it was.
+ *
+ * Either way nothing non-finite reaches selection, the memory ceiling, or the
+ * statistics: one NaN in `Math.min` silently empties a cloud and every
+ * comparison downstream of it answers false forever.
+ */
+const outOfRange = (value: number, min: number): boolean =>
+  !Number.isFinite(value) || value < min;
+
+/** Finite and strictly positive: what every diameter, scale, and share needs. */
+const notPositive = (value: number): boolean =>
+  !Number.isFinite(value) || value <= 0;
+
+/** Construction guard for counts and byte sizes; fractional values truncate. */
+const wholeAtLeast = (name: string, value: number, min: number): number => {
+  if (outOfRange(value, min)) {
+    throw new Error(`${name} must be a finite number >= ${min}, got ${value}`);
+  }
+  return Math.floor(value);
+};
+
+/** Construction guard for continuous quantities (milliseconds, pixels). */
+const finiteAtLeast = (name: string, value: number, min: number): number => {
+  if (outOfRange(value, min)) {
+    throw new Error(`${name} must be a finite number >= ${min}, got ${value}`);
+  }
+  return value;
+};
+
 const DEFAULT_PRESENTATION: FixedPointPresentation = {
   mode: "fixed",
   diameterCssPx: 2,
@@ -241,39 +297,73 @@ const DEFAULT_AUTO_MIN_DIAMETER_CSS_PX = 1.5;
 const DEFAULT_AUTO_MAX_DIAMETER_CSS_PX = 4;
 const INITIAL_AUTO_DIAMETER_CSS_PX = 2;
 
-const normalizePresentation = (
+type PresentationCheck =
+  | { readonly presentation: PointPresentation }
+  | { readonly error: string };
+
+/** One validation body for both the throwing and the ignoring boundary. */
+const checkPresentation = (
   value: PointPresentation | undefined,
-): PointPresentation => {
+): PresentationCheck => {
   const presentation = value ?? DEFAULT_PRESENTATION;
   if (presentation.mode === "fixed") {
-    if (
-      !Number.isFinite(presentation.diameterCssPx) ||
-      presentation.diameterCssPx <= 0
-    ) {
-      throw new Error("Fixed diameterCssPx must be finite and > 0");
+    if (notPositive(presentation.diameterCssPx)) {
+      return {
+        error: `Fixed diameterCssPx must be finite and > 0, got ${presentation.diameterCssPx}`,
+      };
     }
-    return { mode: "fixed", diameterCssPx: presentation.diameterCssPx };
+    return {
+      presentation: { mode: "fixed", diameterCssPx: presentation.diameterCssPx },
+    };
   }
   const min = presentation.minDiameterCssPx ?? DEFAULT_AUTO_MIN_DIAMETER_CSS_PX;
   const max = presentation.maxDiameterCssPx ?? DEFAULT_AUTO_MAX_DIAMETER_CSS_PX;
   if (
-    !Number.isFinite(presentation.userScale) ||
-    presentation.userScale <= 0 ||
-    !Number.isFinite(min) ||
-    min <= 0 ||
-    !Number.isFinite(max) ||
-    max < min
+    notPositive(presentation.userScale) ||
+    notPositive(min) ||
+    outOfRange(max, min)
   ) {
-    throw new Error(
-      "Auto userScale/minDiameterCssPx/maxDiameterCssPx must be finite, positive, and ordered",
-    );
+    return {
+      error:
+        "Auto userScale/minDiameterCssPx/maxDiameterCssPx must be finite, positive, and ordered",
+    };
   }
   return {
-    mode: "auto",
-    userScale: presentation.userScale,
-    minDiameterCssPx: min,
-    maxDiameterCssPx: max,
+    presentation: {
+      mode: "auto",
+      userScale: presentation.userScale,
+      minDiameterCssPx: min,
+      maxDiameterCssPx: max,
+    },
   };
+};
+
+const normalizePresentation = (
+  value: PointPresentation | undefined,
+): PointPresentation => {
+  const checked = checkPresentation(value);
+  if ("error" in checked) throw new Error(checked.error);
+  return checked.presentation;
+};
+
+/**
+ * A camera whose numbers are not all finite would poison the frustum planes,
+ * every screen-space error, and the selection comparisons that read them.
+ */
+const isFiniteView = (view: CameraView): boolean => {
+  if (
+    !Number.isFinite(view.fovY) ||
+    notPositive(view.viewportHeightCssPx)
+  ) {
+    return false;
+  }
+  for (const coordinate of view.position) {
+    if (!Number.isFinite(coordinate)) return false;
+  }
+  for (let index = 0; index < view.viewProj.length; index += 1) {
+    if (!Number.isFinite(view.viewProj[index])) return false;
+  }
+  return true;
 };
 
 const samePresentation = (
@@ -312,18 +402,42 @@ export const createLodController = (
   const {
     onTiles,
     scheduleRender,
-    fetchConcurrency = 6,
-    cacheBytes = 256 * 1024 * 1024,
-    selectionDelayMs = 150,
-    interactionSettleMs = 750,
-    refinementCutoffPx: initialRefinementCutoffPx = 1,
     onPointDiameterCssPx = () => {},
     onError = (error) => console.warn("pointcloud-lod:", error),
   } = options;
 
+  const fetchConcurrency = wholeAtLeast(
+    "fetchConcurrency",
+    options.fetchConcurrency ?? 6,
+    1,
+  );
+  const cacheBytes = wholeAtLeast(
+    "cacheBytes",
+    options.cacheBytes ?? 256 * 1024 * 1024,
+    1,
+  );
+  const selectionDelayMs = finiteAtLeast(
+    "selectionDelayMs",
+    options.selectionDelayMs ?? 150,
+    0,
+  );
+  const interactionSettleMs = finiteAtLeast(
+    "interactionSettleMs",
+    options.interactionSettleMs ?? 750,
+    0,
+  );
+
   let source = options.source;
-  let pointBudget = options.pointBudget ?? 2_000_000;
-  let refinementCutoffPx = initialRefinementCutoffPx;
+  let pointBudget = wholeAtLeast(
+    "pointBudget",
+    options.pointBudget ?? 2_000_000,
+    1,
+  );
+  let refinementCutoffPx = finiteAtLeast(
+    "refinementCutoffPx",
+    options.refinementCutoffPx ?? 1,
+    0,
+  );
   let presentation = normalizePresentation(options.presentation);
   let diameterCssPx =
     presentation.mode === "fixed"
@@ -427,7 +541,7 @@ export const createLodController = (
       ? options.memory
       : createMemoryPool(
           typeof options.memory === "number"
-            ? { totalBytes: options.memory }
+            ? { totalBytes: wholeAtLeast("memory", options.memory, 1) }
             : {},
         );
   let poolMember: MemoryPoolMember | null = null;
@@ -448,10 +562,20 @@ export const createLodController = (
       ? residentBytes / residentPoints
       : FALLBACK_BYTES_PER_POINT;
 
-  const memoryCeilingPoints = (): number =>
-    poolMember === null
-      ? 0
-      : Math.max(1, Math.floor(poolMember.budgetBytes() / bytesPerPoint()));
+  /**
+   * This controller's byte share. A pool handed in by the host is not ours to
+   * trust, and a non-finite share would make every budget comparison and both
+   * memory statistics NaN, so nonsense reads as no memory at all.
+   */
+  const memoryBudgetBytes = (): number => {
+    const bytes = poolMember?.budgetBytes() ?? 0;
+    return notPositive(bytes) ? 0 : bytes;
+  };
+
+  const memoryCeilingPoints = (): number => {
+    const bytes = memoryBudgetBytes();
+    return bytes === 0 ? 0 : Math.max(1, Math.floor(bytes / bytesPerPoint()));
+  };
 
   let target: ReadonlySet<string> = new Set<string>();
   let targetRevision = 0;
@@ -479,9 +603,57 @@ export const createLodController = (
   const inFlight = new Map<string, AbortController>();
   let queue: string[] = [];
 
-  let pendingAdded: { key: VoxelKey; tile: TileData }[] = [];
-  let pendingRemoved: VoxelKey[] = [];
+  // Decoded single ownership: a key's payload lives in exactly one place —
+  // a live request, the CPU cache, or renderer residency. A second copy would
+  // double-count decoded bytes and spend cache capacity on a tile the
+  // renderer already holds. Every transition goes through these three.
+  const takeResident = (keyString: string, tile: TileData): void => {
+    cache.delete(keyString);
+    resident.set(keyString, tile);
+    residentPoints += tile.pointCount;
+    residentBytes += tileBytes(tile);
+  };
+
+  /**
+   * Leave renderer/GPU residency. The decoded payload stays in the
+   * byte-bounded CPU cache for cheap reactivation; no dormant actor is kept.
+   */
+  const releaseResident = (keyString: string): void => {
+    const tile = resident.get(keyString);
+    if (tile === undefined) return;
+    resident.delete(keyString);
+    residentPoints -= tile.pointCount;
+    residentBytes -= tileBytes(tile);
+    cache.set(keyString, tile, tileBytes(tile));
+  };
+
+  /** Park a decoded payload only when nothing else owns the key. */
+  const cacheDecoded = (keyString: string, tile: TileData): void => {
+    if (resident.has(keyString) || inFlight.has(keyString)) return;
+    cache.set(keyString, tile, tileBytes(tile));
+  };
+
+  // The renderer's state as of the last batch it was handed. Every batch is
+  // the delta from here to current residency, so an add and a remove of the
+  // same key inside one microtask window cancel out instead of arriving as a
+  // contradictory batch the consumer has to guess the order of.
+  let submitted = new Map<string, TileData>();
   let flushScheduled = false;
+
+  const submittedDelta = (): TileBatch => {
+    const added: { key: VoxelKey; tile: TileData }[] = [];
+    const removed: VoxelKey[] = [];
+    for (const [keyString, tile] of resident) {
+      // A key whose payload was replaced is an addition, never a remove/add
+      // pair: added and removed stay disjoint within one batch.
+      if (submitted.get(keyString) === tile) continue;
+      added.push({ key: keyFromString(keyString), tile });
+    }
+    for (const keyString of submitted.keys()) {
+      if (!resident.has(keyString)) removed.push(keyFromString(keyString));
+    }
+    return { added, removed };
+  };
 
   const scheduleFlush = (): void => {
     if (flushScheduled) return;
@@ -489,13 +661,9 @@ export const createLodController = (
     queueMicrotask(() => {
       flushScheduled = false;
       if (disposed) return;
-      if (pendingAdded.length === 0 && pendingRemoved.length === 0) return;
-      const batch: TileBatch = {
-        added: pendingAdded,
-        removed: pendingRemoved,
-      };
-      pendingAdded = [];
-      pendingRemoved = [];
+      const batch = submittedDelta();
+      if (batch.added.length === 0 && batch.removed.length === 0) return;
+      submitted = new Map(resident);
       onTiles(batch);
       scheduleRender();
     });
@@ -701,27 +869,22 @@ export const createLodController = (
           // otherwise a stale arrival frees a live slot (uncapping
           // fetchConcurrency) and double-counts resident points and bytes.
           if (inFlight.get(keyString) !== abort) {
-            // Caching a key that is already resident would hold a second
-            // decoded copy of the same tile: decodedBytes would count it
-            // twice and the redundant copy would evict genuinely reusable
-            // entries from the CPU cache.
-            if (!resident.has(keyString)) {
-              cache.set(keyString, tile, tileBytes(tile));
-            }
+            // This payload is a duplicate of whatever owns the key now: the
+            // live request about to deliver it, or the residency/cache entry
+            // that already has it. Keeping it would count the same tile
+            // twice and evict genuinely reusable entries from the CPU cache.
+            cacheDecoded(keyString, tile);
             pump();
             return;
           }
           inFlight.delete(keyString);
           tileFailures.delete(keyString);
           if (target.has(keyString) && !resident.has(keyString)) {
-            resident.set(keyString, tile);
-            residentPoints += tile.pointCount;
-            residentBytes += tileBytes(tile);
-            pendingAdded.push({ key, tile });
+            takeResident(keyString, tile);
             updateReadyTerminalFrontier();
             scheduleFlush();
           } else {
-            cache.set(keyString, tile, tileBytes(tile));
+            cacheDecoded(keyString, tile);
           }
           pump();
         })
@@ -825,15 +988,9 @@ export const createLodController = (
     for (const key of neededPages) loadPage(key);
 
     // Deselected submitted tiles leave renderer/GPU residency immediately.
-    // Their decoded payload may remain in the byte-bounded CPU LRU for cheap
-    // reactivation; no dormant actor is retained.
-    for (const [keyString, tile] of [...resident]) {
+    for (const keyString of [...resident.keys()]) {
       if (target.has(keyString)) continue;
-      resident.delete(keyString);
-      residentPoints -= tile.pointCount;
-      residentBytes -= tileBytes(tile);
-      cache.set(keyString, tile, tileBytes(tile));
-      pendingRemoved.push(keyFromString(keyString));
+      releaseResident(keyString);
     }
 
     // Cancel fetches that no longer matter.
@@ -852,11 +1009,7 @@ export const createLodController = (
       if (entry?.pointCount === 0) continue;
       const cached = cache.get(keyString);
       if (cached !== undefined) {
-        cache.delete(keyString);
-        resident.set(keyString, cached);
-        residentPoints += cached.pointCount;
-        residentBytes += tileBytes(cached);
-        pendingAdded.push({ key: keyFromString(keyString), tile: cached });
+        takeResident(keyString, cached);
       } else if (!resting(tileFailures, keyString)) {
         toFetch.push(keyString);
       }
@@ -958,13 +1111,9 @@ export const createLodController = (
       projectedImportance: 0,
       readyTerminalFrontier: emptyReadyTerminalFrontier(),
     };
-    for (const keyString of resident.keys()) {
-      pendingRemoved.push(keyFromString(keyString));
-    }
     resident.clear();
     residentPoints = 0;
     residentBytes = 0;
-    pendingAdded = [];
   };
 
   // Hosts feed the camera on every render, unconditionally; an unchanged view
@@ -994,7 +1143,7 @@ export const createLodController = (
 
   return {
     setCamera(nextView) {
-      if (disposed) return;
+      if (disposed || !isFiniteView(nextView)) return;
       if (view !== null && sameView(view, nextView)) return;
       view = nextView;
       sseByKey.clear();
@@ -1025,8 +1174,8 @@ export const createLodController = (
     },
 
     setPointBudget(points) {
-      if (disposed) return;
-      pointBudget = points;
+      if (disposed || outOfRange(points, 1)) return;
+      pointBudget = Math.floor(points);
       runSelection();
     },
 
@@ -1048,7 +1197,7 @@ export const createLodController = (
     },
 
     setRefinementCutoffPx(pixels) {
-      if (disposed || !Number.isFinite(pixels) || pixels < 0) return;
+      if (disposed || outOfRange(pixels, 0)) return;
       if (pixels === refinementCutoffPx) return;
       refinementCutoffPx = pixels;
       runSelection();
@@ -1056,7 +1205,9 @@ export const createLodController = (
 
     setPresentation(nextPresentation) {
       if (disposed) return;
-      const normalized = normalizePresentation(nextPresentation);
+      const checked = checkPresentation(nextPresentation);
+      if ("error" in checked) return;
+      const normalized = checked.presentation;
       if (samePresentation(normalized, presentation)) return;
       presentation = normalized;
       if (presentation.mode === "fixed") {
@@ -1111,16 +1262,9 @@ export const createLodController = (
         readyTerminalFrontier: emptyReadyTerminalFrontier(),
       };
 
-      // Suppress any not-yet-delivered additions, then remove every actor the
-      // consumer may already own. Adapter removal is idempotent for the former.
-      pendingAdded = [];
-      for (const [keyString, tile] of resident) {
-        cache.set(keyString, tile, tileBytes(tile));
-        pendingRemoved.push(keyFromString(keyString));
-      }
-      resident.clear();
-      residentPoints = 0;
-      residentBytes = 0;
+      // Nothing stays resident while hidden; the flush turns that into
+      // removals for exactly the actors the consumer was last handed.
+      for (const keyString of [...resident.keys()]) releaseResident(keyString);
       scheduleFlush();
     },
 
@@ -1137,7 +1281,7 @@ export const createLodController = (
         cachedBytes,
         inFlight: inFlight.size,
         pointBudget: currentBudget(),
-        memoryBudgetBytes: poolMember?.budgetBytes() ?? 0,
+        memoryBudgetBytes: memoryBudgetBytes(),
         memoryCeilingPoints: memoryCeilingPoints(),
         interactionDepth,
         presentation: {
@@ -1158,17 +1302,15 @@ export const createLodController = (
       }
       clearSettleTimer();
       interactionDepth = 0;
-      // Removals already queued for a flush this teardown cancels are gone
-      // from `resident`, so the final batch has to carry them too — otherwise
-      // the consumer keeps actors nothing will ever ask it to drop.
-      const removedKeys = new Set(pendingRemoved.map(keyToString));
-      for (const keyString of resident.keys()) removedKeys.add(keyString);
-      const removed = [...removedKeys].map(keyFromString);
+      // The consumer still owns everything the last flush handed it —
+      // including tiles a flush this teardown cancels was about to remove.
+      // Take all of it back or it keeps actors nothing will ever drop.
+      const removed = [...submitted.keys()].map(keyFromString);
       dropEverything();
+      submitted = new Map();
       poolMember?.release();
       poolMember = null;
       disposed = true;
-      pendingRemoved = [];
       if (removed.length > 0) {
         onTiles({ added: [], removed });
         scheduleRender();
