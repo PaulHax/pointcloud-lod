@@ -20,6 +20,7 @@ import {
 import { selectNodes } from "./budget";
 import { percentile } from "./adaptiveBudget";
 import { createLruCache } from "./lru";
+import { finiteAtLeast, wholeAtLeast } from "./numeric";
 import {
   createMemoryPool,
   type MemoryPool,
@@ -299,22 +300,6 @@ const outOfRange = (value: number, min: number): boolean =>
 /** Finite and strictly positive: what every diameter, scale, and share needs. */
 const notPositive = (value: number): boolean =>
   !Number.isFinite(value) || value <= 0;
-
-/** Construction guard for counts and byte sizes; fractional values truncate. */
-const wholeAtLeast = (name: string, value: number, min: number): number => {
-  if (outOfRange(value, min)) {
-    throw new Error(`${name} must be a finite number >= ${min}, got ${value}`);
-  }
-  return Math.floor(value);
-};
-
-/** Construction guard for continuous quantities (milliseconds, pixels). */
-const finiteAtLeast = (name: string, value: number, min: number): number => {
-  if (outOfRange(value, min)) {
-    throw new Error(`${name} must be a finite number >= ${min}, got ${value}`);
-  }
-  return value;
-};
 
 const DEFAULT_PRESENTATION: FixedPointPresentation = {
   mode: "fixed",
