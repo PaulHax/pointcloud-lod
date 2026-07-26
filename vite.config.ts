@@ -23,6 +23,10 @@ export default defineConfig({
     sourcemap: true,
   },
   test: {
+    // The browser checks need a built example, a served fixture, and Chromium.
+    // They have their own config and command so this suite stays a fast,
+    // dependency-free unit run.
+    exclude: ['**/node_modules/**', '**/dist/**', 'test/browser/**'],
     // The adapter's vtk.js deep imports resolve to recording stubs so the
     // suite runs without the peer installed; real-GL behavior is covered by
     // downstream integration tests.

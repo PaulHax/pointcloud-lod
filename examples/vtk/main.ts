@@ -98,6 +98,11 @@ let loadedPointCount = 0;
 let frameQueued = false;
 let frameStartedAt: number | null = null;
 let lastFrameMs = 0;
+// When set, every frame reports this duration instead of its measured one, so
+// a check can drive the budget loop at a frame time this machine cannot
+// actually produce. It replaces the measurement rather than being added
+// alongside it: the loop must see one number per frame.
+let syntheticFrameMs: number | null = null;
 let loadGeneration = 0;
 
 const setMessage = (text: string, error = false): void => {
@@ -489,7 +494,9 @@ const updateMember = (): void => {
 interactor.onRenderEvent(() => {
   const startedAt = frameStartedAt;
   frameStartedAt = null;
-  if (startedAt !== null) lastFrameMs = performance.now() - startedAt;
+  if (startedAt !== null) {
+    lastFrameMs = syntheticFrameMs ?? performance.now() - startedAt;
+  }
   const view = cameraView();
   controller?.setCamera(view);
   updateMember();
@@ -722,8 +729,10 @@ if (initialUrl) {
   loadUrl();
 }
 
-// Driving handles for browser checks: the projection toggle backs the
-// orthographic zoom check, the budget mode backs the adaptive-path check.
+// Driving handles for browser checks. Everything here drives the page the way
+// a user or a host would — the camera moves, the panel changes, a frame is
+// requested — rather than reaching past it into the library, so a check that
+// passes says the assembled page works, not that the modules do.
 Object.assign(window, {
   pointCloudExample: {
     stats: () => ({
@@ -732,6 +741,7 @@ Object.assign(window, {
       governor: governor?.stats() ?? null,
       lastFrameMs,
       source: loadedName || null,
+      sourcePoints: loadedPointCount,
     }),
     setProjection: (projection: Projection) => {
       projectionSelect.value = projection;
@@ -745,5 +755,85 @@ Object.assign(window, {
       scheduleRender();
     },
     dispose: disposeCloud,
+
+    /** Resolves once the source has opened and its first selection has run. */
+    load: (url: string): Promise<void> => {
+      urlInput.value = url;
+      return loadSource(url, createCopcTileSource({ source: url }));
+    },
+
+    camera: {
+      read: () => ({
+        position: [...camera.getPosition()],
+        focalPoint: [...camera.getFocalPoint()],
+        parallelScale: camera.getParallelScale(),
+        viewAngle: camera.getViewAngle(),
+        parallelProjection: !!camera.getParallelProjection(),
+      }),
+      /** Absolute placement, for a check that needs a known camera. */
+      place: (next: {
+        position?: readonly number[];
+        focalPoint?: readonly number[];
+        parallelScale?: number;
+      }) => {
+        if (next.position) {
+          camera.setPosition(
+            next.position[0]!,
+            next.position[1]!,
+            next.position[2]!,
+          );
+        }
+        if (next.focalPoint) {
+          camera.setFocalPoint(
+            next.focalPoint[0]!,
+            next.focalPoint[1]!,
+            next.focalPoint[2]!,
+          );
+        }
+        if (next.parallelScale !== undefined) {
+          camera.setParallelScale(next.parallelScale);
+        }
+        renderer.resetCameraClippingRange();
+        scheduleRender();
+      },
+      /** Orbit about the focal point, degrees. */
+      azimuth: (degrees: number) => {
+        camera.azimuth(degrees);
+        renderer.resetCameraClippingRange();
+        scheduleRender();
+      },
+      /** Move along the view axis; >1 approaches. Parallel cameras zoom. */
+      dolly: (factor: number) => {
+        if (camera.getParallelProjection()) {
+          camera.setParallelScale(camera.getParallelScale() / factor);
+        } else {
+          camera.dolly(factor);
+        }
+        renderer.resetCameraClippingRange();
+        scheduleRender();
+      },
+    },
+
+    /** The anchor's draw switch, as a host toggling a layer would use it. */
+    setVisible: (visible: boolean) => {
+      adapter?.setVisible(visible);
+      scheduleRender();
+    },
+    /** Streaming activation — what actually releases a hidden cloud's memory. */
+    setActive: (active: boolean) => {
+      controller?.setActive(active);
+      scheduleRender();
+    },
+    setDevicePixelRatio: (ratio: number) => {
+      adapter?.setDevicePixelRatio(ratio);
+      scheduleRender();
+    },
+    /** Report every frame as this duration; null restores real measurement. */
+    setSyntheticFrameMs: (ms: number | null) => {
+      syntheticFrameMs = ms;
+      scheduleRender();
+    },
+    needsFrame: () => governor?.needsFrame() ?? false,
+    render: () => scheduleRender(),
   },
 });

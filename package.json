@@ -49,6 +49,7 @@
     "build": "vite build && tsc -p tsconfig.build.json",
     "example": "vite --config examples/vtk/vite.config.ts",
     "example:build": "vite build --config examples/vtk/vite.config.ts",
+    "test:browser": "npm run example:build && vitest run --config vitest.browser.config.ts",
     "verify:chain": "node scripts/verifyChain.mjs",
     "prepare": "npm run build"
   },
@@ -59,6 +60,7 @@
     "@semantic-release/github": "^11.0.0",
     "@semantic-release/npm": "^13.1.0",
     "@types/node": "^26.1.1",
+    "playwright": "^1.62.0",
     "semantic-release": "^25.0.0",
     "typescript": "^7.0.2",
     "vite": "^8.1.5",
