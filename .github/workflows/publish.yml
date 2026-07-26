@@ -35,8 +35,52 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  # The adapter's mapper exists in no released vtk.js, so the only proof that
+  # the shipped code can still render is building the example against the exact
+  # fork commit vtkjs-fork.env pins and asserting the mapper, its OpenGL
+  # override and the Geometry profile survived into the bundle.
+  example-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Read the pinned vtk.js commit
+        run: |
+          set -a
+          . ./vtkjs-fork.env
+          set +a
+          {
+            echo "VTKJS_FORK_REPO=$VTKJS_FORK_REPO"
+            echo "VTKJS_FORK_COMMIT=$VTKJS_FORK_COMMIT"
+            echo "VTK_JS_DIR=$RUNNER_TEMP/vtk-js/dist/esm"
+          } >> "$GITHUB_ENV"
+
+      - name: Build vtk.js at the pinned commit
+        # A shallow clone by branch cannot express "this exact commit", so fetch
+        # the sha itself and refuse to build anything else.
+        run: |
+          git init "$RUNNER_TEMP/vtk-js"
+          git -C "$RUNNER_TEMP/vtk-js" remote add origin "$VTKJS_FORK_REPO"
+          git -C "$RUNNER_TEMP/vtk-js" fetch --depth 1 origin "$VTKJS_FORK_COMMIT"
+          git -C "$RUNNER_TEMP/vtk-js" checkout --detach FETCH_HEAD
+          head="$(git -C "$RUNNER_TEMP/vtk-js" rev-parse HEAD)"
+          if [ "$head" != "$VTKJS_FORK_COMMIT" ]; then
+            echo "::error::vtk.js HEAD $head does not match the pinned $VTKJS_FORK_COMMIT"
+            exit 1
+          fi
+          (cd "$RUNNER_TEMP/vtk-js" && npm ci && npm run build:esm)
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm run example:build
+      - run: npm run verify:chain
+
   release:
-    needs: test
+    needs: [test, example-chain]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
