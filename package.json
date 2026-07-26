@@ -45,7 +45,7 @@
   },
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p examples/vtk/tsconfig.json",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tools.json && tsc --noEmit -p examples/vtk/tsconfig.json",
     "build": "vite build && tsc -p tsconfig.build.json",
     "example": "vite --config examples/vtk/vite.config.ts",
     "example:build": "vite build --config examples/vtk/vite.config.ts",

@@ -47,8 +47,8 @@ const TRACE_INTERVAL_MS = 2;
 const shown = (value: unknown): string => JSON.stringify(value, null, 2);
 
 /** Serve this session's cloud slowly enough that a read can be caught running. */
-const withReadLatency = (session: ExampleSession): Promise<void> =>
-  session.page.route(
+const withReadLatency = async (session: ExampleSession): Promise<void> => {
+  await session.page.route(
     (url) => url.pathname.endsWith(".laz"),
     async (route) => {
       await new Promise((done) => setTimeout(done, READ_LATENCY_MS));
@@ -57,6 +57,7 @@ const withReadLatency = (session: ExampleSession): Promise<void> =>
       await route.continue().catch(() => {});
     },
   );
+};
 
 /**
  * Reload the cloud and flip one switch at the first instant the controller is

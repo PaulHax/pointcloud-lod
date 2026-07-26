@@ -1,0 +1,14 @@
+{
+  // The library's own tsconfig covers `src` only, so until this existed the
+  // browser harness, the stress scenarios and the measurement script were
+  // never typechecked at all — vite strips their types without reading them,
+  // and vitest runs whatever survives. A harness that lies about a stats field
+  // fails at runtime, in a browser, as an undefined comparison that quietly
+  // passes.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["test/browser", "scripts", "src"]
+}

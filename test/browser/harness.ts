@@ -151,7 +151,9 @@ export interface ExampleStats {
     submittedBytes: number;
     pooledTiles: number;
     pooledBytes: number;
+    pooledPoints: number;
     gpuResidentTiles: number;
+    gpuResidentPoints: number;
     gpuResidentBytes: number;
     resourceCeilingBytes: number;
     drawnTiles: number;
