@@ -374,12 +374,29 @@ const normalizePresentation = (
 };
 
 /**
+ * The one scalar that sizes each projection. Hosts feed views from untyped
+ * JS, so an unrecognized discriminant reads as absent instead of silently
+ * being treated as perspective.
+ */
+const projectionScalar = (view: CameraView): number | undefined =>
+  view.projection === "perspective"
+    ? view.fovY
+    : view.projection === "orthographic"
+      ? view.parallelScale
+      : undefined;
+
+/**
  * A camera whose numbers are not all finite would poison the frustum planes,
  * every screen-space error, and the selection comparisons that read them.
  */
 const isFiniteView = (view: CameraView): boolean => {
+  const scalar = projectionScalar(view);
+  // A field of view at or past a half-turn has no usable tangent, and a
+  // non-positive parallel scale inverts the projected spacing.
   if (
-    !Number.isFinite(view.fovY) ||
+    scalar === undefined ||
+    notPositive(scalar) ||
+    (view.projection === "perspective" && view.fovY >= Math.PI) ||
     notPositive(view.viewportHeightCssPx)
   ) {
     return false;
@@ -1245,7 +1262,8 @@ export const createLodController = (
   // budgets forever.
   const sameView = (a: CameraView, b: CameraView): boolean => {
     if (
-      a.fovY !== b.fovY ||
+      a.projection !== b.projection ||
+      projectionScalar(a) !== projectionScalar(b) ||
       a.viewportHeightCssPx !== b.viewportHeightCssPx ||
       a.position[0] !== b.position[0] ||
       a.position[1] !== b.position[1] ||

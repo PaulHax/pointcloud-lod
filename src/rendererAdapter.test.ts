@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { PerspectiveCameraView } from "./camera";
 import { createLodController } from "./controller";
 import { keyToString, type VoxelKey } from "./octree";
 import { createRendererAdapter } from "./rendererAdapter";
@@ -546,9 +547,10 @@ const LOOK_AWAY_VIEW_PROJ = [
   1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -10, 0, 0, 1,
 ];
 
-const cameraView = (viewProj: number[]) => ({
+const cameraView = (viewProj: number[]): PerspectiveCameraView => ({
+  projection: "perspective",
   viewProj,
-  position: [0, 0, 0] as [number, number, number],
+  position: [0, 0, 0],
   fovY: Math.PI / 2,
   viewportHeightCssPx: 100,
 });

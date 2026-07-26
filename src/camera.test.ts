@@ -5,7 +5,11 @@ import {
   distanceToBounds,
   frustumPlanes,
   nodeScreenSpaceError,
+  orthographicScreenSpaceError,
+  perspectiveScreenSpaceError,
   screenSpaceError,
+  type OrthographicCameraView,
+  type PerspectiveCameraView,
 } from "./camera";
 import type { Bounds } from "./octree";
 
@@ -36,6 +40,37 @@ const perspective = (
     0,
     (2 * far * near) / (near - far),
     0,
+  ];
+};
+
+/**
+ * Column-major symmetric orthographic matrix (half-height `parallelScale`,
+ * looking down -Z) — the projection a vtk.js parallel camera renders.
+ */
+const orthographic = (
+  parallelScale: number,
+  aspect: number,
+  near: number,
+  far: number,
+): number[] => {
+  const halfWidth = parallelScale * aspect;
+  return [
+    1 / halfWidth,
+    0,
+    0,
+    0,
+    0,
+    1 / parallelScale,
+    0,
+    0,
+    0,
+    0,
+    -2 / (far - near),
+    0,
+    0,
+    0,
+    -(far + near) / (far - near),
+    1,
   ];
 };
 
@@ -140,37 +175,139 @@ describe("distanceToBounds", () => {
   });
 });
 
-describe("screenSpaceError", () => {
+describe("boundsIntersectsFrustum with an orthographic matrix", () => {
+  // Half-height 10, aspect 2 → the visible box spans x ±20, y ±10, z -1..-100.
+  const planes = frustumPlanes(orthographic(10, 2, 1, 100));
+
+  it("keeps a cube inside the parallel box", () => {
+    expect(
+      boundsIntersectsFrustum(planes, bounds([15, 5, -50], [1, 1, 1])),
+    ).toBe(true);
+  });
+
+  it("rejects a cube outside the side planes even though it is dead ahead", () => {
+    // A perspective frustum would widen with depth and keep this; a parallel
+    // one never does.
+    expect(
+      boundsIntersectsFrustum(planes, bounds([30, 0, -90], [1, 1, 1])),
+    ).toBe(false);
+  });
+
+  it("rejects a cube above the top plane", () => {
+    expect(
+      boundsIntersectsFrustum(planes, bounds([0, 15, -50], [1, 1, 1])),
+    ).toBe(false);
+  });
+
+  it("rejects cubes outside the near and far planes", () => {
+    expect(boundsIntersectsFrustum(planes, bounds([0, 0, 5], [1, 1, 1]))).toBe(
+      false,
+    );
+    expect(
+      boundsIntersectsFrustum(planes, bounds([0, 0, -200], [1, 1, 1])),
+    ).toBe(false);
+  });
+});
+
+describe("perspectiveScreenSpaceError", () => {
   it("projects spacing to pixels", () => {
     // fov 90° → tan(fov/2) = 1: 1 m spacing at 10 m over 1000 px = 50 px.
-    expect(screenSpaceError(1, 10, 1000, Math.PI / 2)).toBeCloseTo(50);
+    expect(perspectiveScreenSpaceError(1, 10, 1000, Math.PI / 2)).toBeCloseTo(
+      50,
+    );
   });
 
   it("halves with double distance", () => {
-    const near = screenSpaceError(1, 10, 1000, Math.PI / 2);
-    const far = screenSpaceError(1, 20, 1000, Math.PI / 2);
+    const near = perspectiveScreenSpaceError(1, 10, 1000, Math.PI / 2);
+    const far = perspectiveScreenSpaceError(1, 20, 1000, Math.PI / 2);
     expect(far).toBeCloseTo(near / 2);
   });
 
   it("stays finite when the camera touches the node", () => {
-    expect(screenSpaceError(1, 0, 1000, Math.PI / 2)).toBeGreaterThan(1e9);
-    expect(Number.isFinite(screenSpaceError(1, 0, 1000, Math.PI / 2))).toBe(
-      true,
-    );
+    const touching = perspectiveScreenSpaceError(1, 0, 1000, Math.PI / 2);
+    expect(touching).toBeGreaterThan(1e9);
+    expect(Number.isFinite(touching)).toBe(true);
+  });
+});
+
+describe("orthographicScreenSpaceError", () => {
+  it("projects spacing to pixels from the parallel scale alone", () => {
+    // Half-height 10 m over 1000 px = 50 px/m: a 0.5 m spacing is 25 px.
+    expect(orthographicScreenSpaceError(0.5, 1000, 10)).toBeCloseTo(25);
+  });
+
+  it("halves when the camera zooms out by two", () => {
+    expect(orthographicScreenSpaceError(0.5, 1000, 20)).toBeCloseTo(12.5);
+  });
+
+  it("stays finite at a degenerate parallel scale", () => {
+    const collapsed = orthographicScreenSpaceError(1, 1000, 0);
+    expect(collapsed).toBeGreaterThan(1e9);
+    expect(Number.isFinite(collapsed)).toBe(true);
+  });
+});
+
+const perspectiveView: PerspectiveCameraView = {
+  projection: "perspective",
+  viewProj: IDENTITY,
+  position: [0, 0, 10.5],
+  fovY: Math.PI / 2,
+  viewportHeightCssPx: 1000,
+};
+
+const orthographicView: OrthographicCameraView = {
+  projection: "orthographic",
+  viewProj: IDENTITY,
+  position: [0, 0, 10.5],
+  parallelScale: 10,
+  viewportHeightCssPx: 1000,
+};
+
+describe("screenSpaceError dispatches on the view's projection", () => {
+  it("reads fovY and distance for a perspective view", () => {
+    expect(screenSpaceError(1, 10, perspectiveView)).toBeCloseTo(50);
+    expect(screenSpaceError(1, 20, perspectiveView)).toBeCloseTo(25);
+  });
+
+  it("reads parallelScale and ignores distance for an orthographic view", () => {
+    expect(screenSpaceError(0.5, 10, orthographicView)).toBeCloseTo(25);
+    expect(screenSpaceError(0.5, 1e6, orthographicView)).toBeCloseTo(25);
   });
 });
 
 describe("nodeScreenSpaceError", () => {
-  it("combines cube distance with the view", () => {
-    const view = {
-      viewProj: IDENTITY,
-      position: [0, 0, 10.5] as [number, number, number],
-      fovY: Math.PI / 2,
-      viewportHeightCssPx: 1000,
-    };
+  const cube = bounds([0, 0, 0], [0.5, 0.25, 0.5]);
+
+  it("combines cube distance with a perspective view", () => {
     // Cube surface is 10 m from the camera.
-    expect(
-      nodeScreenSpaceError(bounds([0, 0, 0], [0.5, 0.25, 0.5]), 1, view),
-    ).toBeCloseTo(50);
+    expect(nodeScreenSpaceError(cube, 1, perspectiveView)).toBeCloseTo(50);
+  });
+
+  it("is distance-invariant under parallel projection", () => {
+    const near = nodeScreenSpaceError(cube, 0.5, orthographicView);
+    const far = nodeScreenSpaceError(cube, 0.5, {
+      ...orthographicView,
+      position: [0, 0, 5000],
+    });
+    expect(near).toBeCloseTo(25);
+    expect(far).toBeCloseTo(near);
+  });
+
+  it("is distance-dependent under perspective projection", () => {
+    const near = nodeScreenSpaceError(cube, 1, perspectiveView);
+    const far = nodeScreenSpaceError(cube, 1, {
+      ...perspectiveView,
+      position: [0, 0, 20.5],
+    });
+    expect(far).toBeCloseTo(near / 2);
+  });
+
+  it("refines an orthographic view only when the camera zooms in", () => {
+    const wide = nodeScreenSpaceError(cube, 0.5, orthographicView);
+    const zoomed = nodeScreenSpaceError(cube, 0.5, {
+      ...orthographicView,
+      parallelScale: 2.5,
+    });
+    expect(zoomed).toBeCloseTo(wide * 4);
   });
 });

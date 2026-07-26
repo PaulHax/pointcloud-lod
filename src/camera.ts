@@ -10,16 +10,33 @@ import type { Bounds, Vec3 } from "./octree";
 /** Column-major 4x4 matrix, OpenGL layout (translation in indices 12..14). */
 export type Mat16 = ArrayLike<number>;
 
-export interface CameraView {
+interface CameraViewCommon {
   /** Column-major view-projection matrix. */
   readonly viewProj: Mat16;
   /** Camera position in world coordinates. */
   readonly position: Vec3;
-  /** Vertical field of view, radians. */
-  readonly fovY: number;
   /** Viewport height in CSS pixels. */
   readonly viewportHeightCssPx: number;
 }
+
+export interface PerspectiveCameraView extends CameraViewCommon {
+  readonly projection: "perspective";
+  /** Vertical field of view, radians. */
+  readonly fovY: number;
+}
+
+export interface OrthographicCameraView extends CameraViewCommon {
+  readonly projection: "orthographic";
+  /** World-space half-height of the viewport (vtk.js `parallelScale`). */
+  readonly parallelScale: number;
+}
+
+/**
+ * The two projections turn a world spacing into pixels by different laws, and
+ * no numeric value in the view distinguishes them, so the mode is carried
+ * explicitly rather than inferred.
+ */
+export type CameraView = PerspectiveCameraView | OrthographicCameraView;
 
 /** Half-space `dot(normal, p) + d >= 0` containing the frustum interior. */
 export interface Plane {
@@ -84,12 +101,12 @@ export const distanceToBounds = (point: Vec3, bounds: Bounds): number => {
 };
 
 /**
- * Projected size of a world-space spacing, in pixels, for a perspective
- * camera: how far apart this node's points land on screen. Distance is
+ * Projected size of a world-space spacing, in pixels, under perspective
+ * projection: how far apart this node's points land on screen. Distance is
  * clamped so a camera inside the node reports a very large (never infinite)
  * error.
  */
-export const screenSpaceError = (
+export const perspectiveScreenSpaceError = (
   spacing: number,
   distance: number,
   viewportHeightCssPx: number,
@@ -97,6 +114,41 @@ export const screenSpaceError = (
 ): number =>
   (spacing * viewportHeightCssPx) /
   (2 * Math.max(distance, 1e-9) * Math.tan(fovY / 2));
+
+/**
+ * Projected size of a world-space spacing, in pixels, under parallel
+ * projection. Distance does not appear: every point projects at the same
+ * scale, fixed only by how much world height the viewport spans. Scale is
+ * clamped for the same reason distance is above.
+ */
+export const orthographicScreenSpaceError = (
+  spacing: number,
+  viewportHeightCssPx: number,
+  parallelScale: number,
+): number =>
+  (spacing * viewportHeightCssPx) / (2 * Math.max(parallelScale, 1e-9));
+
+/**
+ * Projected spacing for whichever projection the view declares. `distance` is
+ * read only by the perspective branch.
+ */
+export const screenSpaceError = (
+  spacing: number,
+  distance: number,
+  view: CameraView,
+): number =>
+  view.projection === "orthographic"
+    ? orthographicScreenSpaceError(
+        spacing,
+        view.viewportHeightCssPx,
+        view.parallelScale,
+      )
+    : perspectiveScreenSpaceError(
+        spacing,
+        distance,
+        view.viewportHeightCssPx,
+        view.fovY,
+      );
 
 /**
  * Screen-space error of one octree node: its level's point spacing projected
@@ -107,9 +159,4 @@ export const nodeScreenSpaceError = (
   spacing: number,
   view: CameraView,
 ): number =>
-  screenSpaceError(
-    spacing,
-    distanceToBounds(view.position, bounds),
-    view.viewportHeightCssPx,
-    view.fovY,
-  );
+  screenSpaceError(spacing, distanceToBounds(view.position, bounds), view);

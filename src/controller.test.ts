@@ -6,7 +6,12 @@ import {
   levelOf,
   type PageGraphSource,
 } from "../test/fixtures/pageGraph";
-import { distanceToBounds } from "./camera";
+import {
+  distanceToBounds,
+  type CameraView,
+  type OrthographicCameraView,
+  type PerspectiveCameraView,
+} from "./camera";
 import {
   createLodController,
   type LodControllerOptions,
@@ -32,10 +37,20 @@ const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 /** Pushes everything 10 units off in clip x: nothing is visible. */
 const LOOK_AWAY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -10, 0, 0, 1];
 
-const VIEW = {
+const VIEW: PerspectiveCameraView = {
+  projection: "perspective",
   viewProj: IDENTITY,
-  position: [0, 0, 0] as [number, number, number],
+  position: [0, 0, 0],
   fovY: Math.PI / 2,
+  viewportHeightCssPx: 100,
+};
+
+/** Same framing, parallel projection: half-height 1 over a 100 px viewport. */
+const ORTHOGRAPHIC_VIEW: OrthographicCameraView = {
+  projection: "orthographic",
+  viewProj: IDENTITY,
+  position: [0, 0, 0],
+  parallelScale: 1,
   viewportHeightCssPx: 100,
 };
 
@@ -742,6 +757,82 @@ describe("createLodController — ready frontier and presentation", () => {
         .p75;
     expect(p75).not.toBeNull();
     expect(p75!).toBeLessThan(0.01);
+    controller.dispose();
+  });
+
+  /** Projected spacing of the whole ready frontier, the diagnostic hosts read. */
+  const projectedSpacingP75 = (controller: {
+    stats: () => {
+      selection: {
+        readyTerminalFrontier: {
+          projectedSpacingCssPx: { p75: number | null };
+        };
+      };
+    };
+  }): number | null =>
+    controller.stats().selection.readyTerminalFrontier.projectedSpacingCssPx
+      .p75;
+
+  it("projects spacing from the parallel scale, not the distance, under an orthographic camera", async () => {
+    const tree: Record<string, FakeEntry> = {
+      "0-0-0-0": { pointCount: 100, spacing: 2 },
+    };
+    const near = makePresented(tree, {
+      presentation: { mode: "fixed", diameterCssPx: 2 },
+    });
+    const far = makePresented(tree, {
+      presentation: { mode: "fixed", diameterCssPx: 2 },
+    });
+    await settle();
+    // Half-height 1 over 100 px = 50 px/m, so a 2 m spacing projects to 100 px
+    // whether the camera sits on the node or a kilometre away.
+    near.controller.setCamera({ ...ORTHOGRAPHIC_VIEW, position: [0, 0, 10] });
+    far.controller.setCamera({ ...ORTHOGRAPHIC_VIEW, position: [0, 0, 1000] });
+    await settle();
+    for (const pending of near.deferred.values()) pending.resolve();
+    for (const pending of far.deferred.values()) pending.resolve();
+    await settle();
+
+    expect(projectedSpacingP75(near.controller)).toBeCloseTo(100);
+    expect(projectedSpacingP75(far.controller)).toBeCloseTo(100);
+
+    // Zooming a parallel camera in halves the scale and doubles the spacing.
+    near.controller.setCamera({
+      ...ORTHOGRAPHIC_VIEW,
+      position: [0, 0, 10],
+      parallelScale: 0.5,
+    });
+    await settle();
+    expect(projectedSpacingP75(near.controller)).toBeCloseTo(200);
+
+    near.controller.dispose();
+    far.controller.dispose();
+  });
+
+  it("treats a projection-mode swap as a camera change", async () => {
+    const tree: Record<string, FakeEntry> = {
+      "0-0-0-0": { pointCount: 100, spacing: 2 },
+    };
+    const { controller, deferred } = makePresented(tree, {
+      presentation: { mode: "fixed", diameterCssPx: 2 },
+    });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    for (const pending of deferred.values()) pending.resolve();
+    await settle();
+    const perspectiveSpacing = projectedSpacingP75(controller);
+    const generation = controller.stats().selection.generation;
+
+    // Same matrix, same position, same viewport: only the projection differs,
+    // and it must not be mistaken for the unchanged view a host re-feeds every
+    // render.
+    controller.setCamera(ORTHOGRAPHIC_VIEW);
+    await settle();
+    expect(controller.stats().selection.generation).toBeGreaterThan(generation);
+    expect(projectedSpacingP75(controller)).not.toBeCloseTo(
+      perspectiveSpacing!,
+    );
     controller.dispose();
   });
 
@@ -2072,12 +2163,20 @@ describe("createLodController — numeric configuration", () => {
     await settle();
     const before = controller.stats();
 
-    const broken = [
-      { ...VIEW, position: [Number.NaN, 0, 0] as [number, number, number] },
+    const broken: CameraView[] = [
+      { ...VIEW, position: [Number.NaN, 0, 0] },
       { ...VIEW, fovY: Number.POSITIVE_INFINITY },
+      { ...VIEW, fovY: 0 },
+      // A field of view of a half-turn or more has no usable tangent.
+      { ...VIEW, fovY: Math.PI },
       { ...VIEW, viewportHeightCssPx: 0 },
       { ...VIEW, viewportHeightCssPx: Number.NaN },
       { ...VIEW, viewProj: [...IDENTITY.slice(0, 15), Number.NaN] },
+      { ...ORTHOGRAPHIC_VIEW, parallelScale: Number.NaN },
+      { ...ORTHOGRAPHIC_VIEW, parallelScale: 0 },
+      { ...ORTHOGRAPHIC_VIEW, parallelScale: -1 },
+      // Untyped hosts can hand over anything; an unknown mode is not a camera.
+      { ...VIEW, projection: "isometric" } as unknown as CameraView,
     ];
     for (const view of broken) {
       controller.setCamera(view);

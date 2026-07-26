@@ -34,8 +34,12 @@ export {
   boundsIntersectsFrustum,
   distanceToBounds,
   screenSpaceError,
+  perspectiveScreenSpaceError,
+  orthographicScreenSpaceError,
   nodeScreenSpaceError,
   type CameraView,
+  type PerspectiveCameraView,
+  type OrthographicCameraView,
   type Mat16,
   type Plane,
 } from "./camera";
