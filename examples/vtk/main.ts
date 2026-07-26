@@ -253,6 +253,12 @@ const readGovernorOptions = (): ViewGovernorOptions | null => {
     minBudget: ADAPTIVE_MIN_BUDGET,
     interactionTargetMs,
     stationaryTargetMs,
+    // The default allows VTK 70% of a host frame, which is right for a view
+    // compositing a basemap and video underneath it. This page paints nothing
+    // but the point cloud, so VTK's whole-frame allowance is the whole frame;
+    // leaving the default would normalise every honest 33 ms frame up to 47 ms
+    // and walk the budget down to its floor while nothing was ever late.
+    vtkFrameFraction: 1,
     ...(maxBudget === null ? {} : { maxBudget: Math.floor(maxBudget) }),
   };
 };
@@ -537,6 +543,11 @@ interactor.onEndAnimation(() => {
 // ---------------------------------------------------------------------------
 
 const disposeCloud = (): void => {
+  // Teardown supersedes any load still in flight. Without this a dispose
+  // landing between the source opening and the controller being built is
+  // simply undone by the load it was meant to cancel, which then wires a
+  // controller into a page that asked for nothing.
+  loadGeneration += 1;
   member?.release();
   member = null;
   controller?.dispose();
@@ -579,9 +590,12 @@ const loadSource = async (
   name: string,
   sourcePromise: Promise<TileSource>,
 ): Promise<void> => {
-  const generation = ++loadGeneration;
   setMessage(`Reading ${name}…`);
+  // Tear down first, then claim the generation: disposeCloud() bumps it to
+  // cancel whatever was in flight, so a number taken before that call would be
+  // stale the moment it was read.
   disposeCloud();
+  const generation = ++loadGeneration;
   try {
     const source = await sourcePromise;
     if (generation !== loadGeneration) return;
@@ -758,6 +772,32 @@ Object.assign(window, {
       width: viewer.clientWidth,
       height: viewer.clientHeight,
     }),
+
+    /**
+     * What the renderer itself is holding, read from the scene rather than
+     * from the adapter that put it there.
+     *
+     * Every other statistic here comes from a handle that a leak takes with
+     * it: a disposed adapter reports nothing, so an actor it abandoned in the
+     * renderer is invisible to all of them. This is the one place a stale
+     * actor can actually be seen, and the point size is read off the actor
+     * that will draw it, so a device-pixel-ratio change is observed as an
+     * effect on the scene instead of as a setter echoing its argument.
+     */
+    scene: () => {
+      const actors = renderer.getActors();
+      const first = actors[0];
+      return {
+        actors: actors.length,
+        pointSizeDevicePx: first
+          ? (first.getProperty().getPointSize() ?? null)
+          : null,
+        mapperScaleFactor: first
+          ? ((first.getMapper() as { getScaleFactor?: () => number })
+              .getScaleFactor?.() ?? null)
+          : null,
+      };
+    },
     setProjection: (projection: Projection) => {
       projectionSelect.value = projection;
       syncProjection();
