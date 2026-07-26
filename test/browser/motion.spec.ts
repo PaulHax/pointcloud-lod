@@ -170,6 +170,17 @@ const REVERSAL_SECONDS = 8;
  * only interesting while reads are being abandoned.
  */
 const REVERSAL_DEGREES = 30;
+/**
+ * How far the reversal walks per pair of frames.
+ *
+ * Oscillating between exactly two orientations reverses direction but never
+ * looks anywhere new: after the first pass both poles are decoded, and the
+ * cache answers every reselection without issuing a read. Measured on a
+ * 9.1 M-point cloud, that burst produced zero physical reads in eight seconds
+ * — the bounds held, and held vacuously. Letting the axis drift keeps the
+ * reversal while giving each one fresh tiles to abandon.
+ */
+const REVERSAL_DRIFT_DEGREES = 7;
 
 describe("an orbit reversing as fast as the page will take it", () => {
   afterAll(async () => {
@@ -190,7 +201,9 @@ describe("an orbit reversing as fast as the page will take it", () => {
         const { samples } = await watching(session, SAMPLE_MS, () =>
           driveFrames(session, REVERSAL_SECONDS, async (index) => {
             await session.azimuth(
-              index % 2 === 0 ? REVERSAL_DEGREES : -REVERSAL_DEGREES,
+              index % 2 === 0
+                ? REVERSAL_DEGREES
+                : -REVERSAL_DEGREES + REVERSAL_DRIFT_DEGREES,
             );
             seen = extend(seen, await session.stats());
           }),
@@ -286,9 +299,11 @@ describe("a camera fed small deltas at video cadence", () => {
           }),
         );
 
-        expect(frames, "the drive never completed a frame").toBeGreaterThan(
-          MOTION_SECONDS * 5,
-        );
+        // Not a frame rate. A software rasteriser painting a few million
+        // points manages single digits per second, which says nothing about
+        // this library — the load-bearing assertion is the per-sample regime
+        // check above, and this only establishes that the drive drove.
+        expect(frames, "the drive never completed a frame").toBeGreaterThan(0);
         expect(
           flowing.asserted,
           "the regime was never asserted while deltas flowed",

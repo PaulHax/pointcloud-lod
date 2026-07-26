@@ -14,8 +14,12 @@ export default defineConfig({
     include: ["test/browser/**/*.spec.ts"],
     fileParallelism: false,
     // Streaming a cloud through SwiftShader is slow; the default 5 s expires
-    // during an ordinary load.
-    testTimeout: 120_000,
-    hookTimeout: 120_000,
+    // during an ordinary load. A real cloud is slower again by orders of
+    // magnitude — one software paint of a few million points takes seconds,
+    // and the adaptive loop will not call itself converged until a whole
+    // window of frames has been measured under the current budget. These
+    // bound a hang, not a duration anything is expected to take.
+    testTimeout: 600_000,
+    hookTimeout: 600_000,
   },
 });

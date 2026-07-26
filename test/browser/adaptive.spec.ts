@@ -46,6 +46,17 @@ const FAST_FRAME_MS = 1;
  */
 const NEUTRAL_FRAME_MS = 23;
 
+/**
+ * How long convergence may take.
+ *
+ * The loop will not call itself converged until a whole window of frames has
+ * been measured under the current budget, and a frame here is a real software
+ * paint however small the number reported for it. On a multi-million-point
+ * cloud that is seconds each, so a 30 s settle expired with six of the eight
+ * samples in hand — a slow machine, not a stuck loop. This bounds a hang.
+ */
+const SETTLE_MS = 300_000;
+
 /** Comfortably over the loop's 400 ms cooldown, so "stopped" is not "waiting". */
 const QUIET_MS = 1_500;
 /** Long enough to cover several cooldowns' worth of further slow frames. */
@@ -283,7 +294,7 @@ describe("the adaptive budget loop at stated frame times", () => {
     it(`gives points back when host frames run long, then holds: ${cloud.name}`, async () => {
       const session = await openAdaptive(cloud.urlPath);
       try {
-        const settled = await settleAndAssert(session);
+        const settled = await settleAndAssert(session, SETTLE_MS);
         const before = governorOf(settled).trackBudget;
         expect(
           before,
@@ -349,7 +360,7 @@ describe("the adaptive budget loop at stated frame times", () => {
           `the budget moved while nothing about the frames did\n${shown(hold)}`,
         ).toEqual([landed]);
 
-        await settleAndAssert(session);
+        await settleAndAssert(session, SETTLE_MS);
         expect(session.failures).toEqual([]);
       } finally {
         await session.close();
@@ -359,7 +370,7 @@ describe("the adaptive budget loop at stated frame times", () => {
     it(`spends settled headroom on points, then stops asking: ${cloud.name}`, async () => {
       const session = await openAdaptive(cloud.urlPath);
       try {
-        await settleAndAssert(session);
+        await settleAndAssert(session, SETTLE_MS);
 
         // Growth is only observable from below, and the honest way down is the
         // loop's own: slow frames until it is pinned on its floor.
@@ -440,7 +451,7 @@ describe("the adaptive budget loop at stated frame times", () => {
           "the budget moved on after growth was supposed to have stopped",
         ).toBe(grown.trackBudget);
 
-        await settleAndAssert(session);
+        await settleAndAssert(session, SETTLE_MS);
         expect(session.failures).toEqual([]);
       } finally {
         await session.close();
