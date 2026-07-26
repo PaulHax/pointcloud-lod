@@ -140,6 +140,27 @@ describe("createHttpTileSource", () => {
     expect(page.pageRef).toBe(true);
   });
 
+  it("passes the abort signal to hierarchy requests", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response(JSON.stringify({ nodes: {} }), { status: 200 }),
+    );
+    const source = createHttpTileSource({
+      endpoint: "/pc/a/rev1",
+      metadata: METADATA,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    const controller = new AbortController();
+    await source.nodes(
+      { level: 0, x: 0, y: 0, z: 0 },
+      { signal: controller.signal },
+    );
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "/pc/a/rev1/hierarchy/0-0-0-0.json",
+      { signal: controller.signal },
+    );
+  });
+
   it("fetches and parses tiles, passing the abort signal", async () => {
     const payload = makePct1({
       origin: [5, 6, 7],

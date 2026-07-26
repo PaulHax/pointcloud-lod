@@ -93,6 +93,18 @@ export interface LodControllerOptions {
   interactionSettleMs?: number;
   /** Parallel tile fetches. Default 6. */
   fetchConcurrency?: number;
+  /**
+   * Parallel hierarchy-page fetches. Default 4.
+   *
+   * Deliberately a second, separate ceiling rather than a share of
+   * `fetchConcurrency`: a page unblocks selection for a whole subtree, while a
+   * tile only adds detail to something already drawn. Behind one shared queue
+   * a page would wait for tiles that cannot be chosen correctly until it
+   * lands, so refinement stalls exactly when the camera is moving fastest.
+   * The two ceilings bound total I/O at `fetchConcurrency +
+   * hierarchyConcurrency` operations.
+   */
+  hierarchyConcurrency?: number;
   /** CPU cache for deselected tiles, bytes. Default 256 MiB. */
   cacheBytes?: number;
   /**
@@ -128,7 +140,22 @@ export interface LodControllerStats {
   /** Decoded bytes across submitted tiles and the dormant CPU cache. */
   readonly decodedBytes: number;
   readonly cachedBytes: number;
+  /** Tile requests whose result the controller still wants. */
   readonly inFlight: number;
+  /** Selected tiles waiting for a fetch slot. */
+  readonly queuedTiles: number;
+  /**
+   * Tile fetch/decode operations physically running, cancelled ones included:
+   * what `fetchConcurrency` actually bounds. Cancellation is advisory, so this
+   * can exceed `inFlight` until the abandoned promises settle.
+   */
+  readonly physicalTileOperations: number;
+  /** Hierarchy pages requested whose result the controller still wants. */
+  readonly hierarchyInFlight: number;
+  /** Needed hierarchy pages waiting for a slot. */
+  readonly queuedPages: number;
+  /** Hierarchy page operations physically running, cancelled ones included. */
+  readonly physicalHierarchyOperations: number;
   /** Effective visible-point budget currently driving selection. */
   readonly pointBudget: number;
   /** This controller's byte share of its memory pool. */
@@ -411,6 +438,11 @@ export const createLodController = (
     options.fetchConcurrency ?? 6,
     1,
   );
+  const hierarchyConcurrency = wholeAtLeast(
+    "hierarchyConcurrency",
+    options.hierarchyConcurrency ?? 4,
+    1,
+  );
   const cacheBytes = wholeAtLeast(
     "cacheBytes",
     options.cacheBytes ?? 256 * 1024 * 1024,
@@ -484,8 +516,22 @@ export const createLodController = (
     sseByKey.set(keyString, value);
     return value;
   };
+  /**
+   * Request order for both queues: coarse levels first, then the largest
+   * screen-space error. That is the selected frontier working outwards, so a
+   * hierarchy page is fetched in the order the pages it unblocks would be.
+   */
+  const byFrontierPriority = (a: string, b: string): number => {
+    const levelA = keyFromString(a).level;
+    const levelB = keyFromString(b).level;
+    if (levelA !== levelB) return levelA - levelB;
+    return sseFor(b) - sseFor(a);
+  };
+
   const pagesLoaded = new Set<string>();
-  const pagesLoading = new Set<string>();
+  /** Hierarchy pages requested whose result is still wanted. */
+  const pagesInFlight = new Map<string, AbortController>();
+  let pageQueue: string[] = [];
 
   // Selection re-requests whatever it still needs, so an endpoint that always
   // fails would be re-issued on every pass forever. Non-abort failures are
@@ -603,6 +649,17 @@ export const createLodController = (
   const inFlight = new Map<string, AbortController>();
   let queue: string[] = [];
 
+  // Cancellation is advisory wherever it matters: `abort()` frees the logical
+  // slot at once, but the COPC getter takes no signal, so the range read and
+  // the decode keep burning I/O and CPU until the promise settles. Concurrency
+  // is therefore counted on the physical operation — otherwise a
+  // look-away/look-back storm starts a fresh read per gesture while every
+  // abandoned one is still running, and the ceilings bound nothing at all.
+  // These drop only when a promise settles, epoch changes included: ignoring a
+  // result is not the same as stopping the work behind it.
+  let physicalTileOperations = 0;
+  let physicalHierarchyOperations = 0;
+
   // Decoded single ownership: a key's payload lives in exactly one place —
   // a live request, the CPU cache, or renderer residency. A second copy would
   // double-count decoded bytes and spend cache capacity on a tile the
@@ -669,41 +726,80 @@ export const createLodController = (
     });
   };
 
-  const loadPage = (key: VoxelKey): void => {
-    const keyString = keyToString(key);
-    if (
-      pagesLoaded.has(keyString) ||
-      pagesLoading.has(keyString) ||
-      resting(pageFailures, keyString)
+  /** Worth asking for: not held, not already asked for, not resting. */
+  const pageWanted = (keyString: string): boolean =>
+    !pagesLoaded.has(keyString) &&
+    !pagesInFlight.has(keyString) &&
+    !resting(pageFailures, keyString);
+
+  /**
+   * Replace the page queue with what selection needs now, highest priority
+   * first. Like the tile queue this is rebuilt rather than appended to: a page
+   * the camera has moved past must not keep its slot reservation.
+   */
+  const queuePages = (keyStrings: readonly string[]): void => {
+    pageQueue = [...new Set(keyStrings)]
+      .filter(pageWanted)
+      .sort(byFrontierPriority);
+    pumpPages();
+  };
+
+  const pumpPages = (): void => {
+    while (
+      !disposed &&
+      physicalHierarchyOperations < hierarchyConcurrency &&
+      pageQueue.length > 0
     ) {
-      return;
+      const keyString = pageQueue.shift()!;
+      if (!pageWanted(keyString)) continue;
+      const abort = new AbortController();
+      pagesInFlight.set(keyString, abort);
+      const requestEpoch = epoch;
+      physicalHierarchyOperations += 1;
+      source.nodes(keyFromString(keyString), { signal: abort.signal }).then(
+        (infos) => {
+          physicalHierarchyOperations -= 1;
+          if (pagesInFlight.get(keyString) === abort) {
+            pagesInFlight.delete(keyString);
+          }
+          if (disposed || requestEpoch !== epoch) {
+            pumpPages();
+            return;
+          }
+          pagesLoaded.add(keyString);
+          pageFailures.delete(keyString);
+          for (const info of infos) {
+            hierarchy.set(keyToString(info.key), {
+              pointCount: info.pointCount,
+              bounds: info.bounds,
+              spacing: info.spacing,
+              children: info.children ?? null,
+              pageRef: info.pageRef === true,
+            });
+          }
+          // A page reshapes the subtree below it, so the next queue is the one
+          // selection derives from it; pump again for the inactive/no-camera
+          // case where selection cannot run.
+          runSelection();
+          pumpPages();
+        },
+        (error) => {
+          physicalHierarchyOperations -= 1;
+          if (pagesInFlight.get(keyString) === abort) {
+            pagesInFlight.delete(keyString);
+          }
+          if (disposed || requestEpoch !== epoch) {
+            pumpPages();
+            return;
+          }
+          if (!isAbortError(error)) {
+            recordFailure(pageFailures, keyString);
+            onError(error);
+          }
+          pumpPages();
+        },
+      );
     }
-    pagesLoading.add(keyString);
-    const requestEpoch = epoch;
-    source
-      .nodes(key)
-      .then((infos) => {
-        if (disposed || requestEpoch !== epoch) return;
-        pagesLoading.delete(keyString);
-        pagesLoaded.add(keyString);
-        pageFailures.delete(keyString);
-        for (const info of infos) {
-          hierarchy.set(keyToString(info.key), {
-            pointCount: info.pointCount,
-            bounds: info.bounds,
-            spacing: info.spacing,
-            children: info.children ?? null,
-            pageRef: info.pageRef === true,
-          });
-        }
-        runSelection();
-      })
-      .catch((error) => {
-        if (disposed || requestEpoch !== epoch) return;
-        pagesLoading.delete(keyString);
-        if (!isAbortError(error)) recordFailure(pageFailures, keyString);
-        onError(error);
-      });
   };
 
   const childrenOf = (
@@ -782,14 +878,17 @@ export const createLodController = (
       for (const child of children) {
         const childString = keyToString(child);
         const childEntry = hierarchy.get(childString);
-        if (
-          childEntry === undefined ||
-          (childEntry.pageRef && !pagesLoaded.has(childString))
-        ) {
+        if (childEntry === undefined) {
           hierarchyBlocked = true;
           continue;
         }
         if (!boundsIntersectsFrustum(planes, childEntry.bounds)) continue;
+        // Matches selection: an invisible page reference is not requested, so
+        // it is not blocking anything either.
+        if (childEntry.pageRef && !pagesLoaded.has(childString)) {
+          hierarchyBlocked = true;
+          continue;
+        }
         if (!target.has(childString)) {
           // A visible, available child of a selected parent can only be absent
           // because the breadth-first point budget rejected it.
@@ -846,7 +945,11 @@ export const createLodController = (
   };
 
   const pump = (): void => {
-    while (inFlight.size < fetchConcurrency && queue.length > 0) {
+    while (
+      !disposed &&
+      physicalTileOperations < fetchConcurrency &&
+      queue.length > 0
+    ) {
       const keyString = queue.shift()!;
       if (
         !target.has(keyString) ||
@@ -859,15 +962,19 @@ export const createLodController = (
       inFlight.set(keyString, abort);
       const requestEpoch = epoch;
       const key = keyFromString(keyString);
-      source
-        .loadTile(key, { signal: abort.signal })
-        .then((tile) => {
-          if (disposed || requestEpoch !== epoch) return;
+      physicalTileOperations += 1;
+      source.loadTile(key, { signal: abort.signal }).then(
+        (tile) => {
+          physicalTileOperations -= 1;
+          if (disposed || requestEpoch !== epoch) {
+            pump();
+            return;
+          }
           // Aborting is advisory: the COPC getter takes no signal, so a
           // superseded request still resolves. Only the continuation that owns
           // the current in-flight slot may retire it or claim residency —
-          // otherwise a stale arrival frees a live slot (uncapping
-          // fetchConcurrency) and double-counts resident points and bytes.
+          // otherwise a stale arrival frees a live slot and double-counts
+          // resident points and bytes.
           if (inFlight.get(keyString) !== abort) {
             // This payload is a duplicate of whatever owns the key now: the
             // live request about to deliver it, or the residency/cache entry
@@ -887,9 +994,13 @@ export const createLodController = (
             cacheDecoded(keyString, tile);
           }
           pump();
-        })
-        .catch((error) => {
-          if (disposed || requestEpoch !== epoch) return;
+        },
+        (error) => {
+          physicalTileOperations -= 1;
+          if (disposed || requestEpoch !== epoch) {
+            pump();
+            return;
+          }
           if (inFlight.get(keyString) === abort) inFlight.delete(keyString);
           if (!isAbortError(error)) {
             recordFailure(tileFailures, keyString);
@@ -897,19 +1008,13 @@ export const createLodController = (
           }
           updateReadyTerminalFrontier();
           pump();
-        });
+        },
+      );
     }
   };
 
   const runSelection = (): void => {
     if (disposed || !active || view === null) return;
-    // The root page bootstraps the hierarchy, so it can never come back
-    // through neededPages: that path needs a hierarchy entry, and only the
-    // root page can create one. Without this, a failed bootstrap leaves the
-    // controller with nothing to draw and no way to ask again. loadPage is
-    // idempotent and honours the failure backoff, so this costs nothing on
-    // the normal path.
-    if (!pagesLoaded.has(keyToString(ROOT_KEY))) loadPage(ROOT_KEY);
     const budget = currentBudget();
     lastSelectionBudget = budget;
     const currentView = view;
@@ -934,14 +1039,19 @@ export const createLodController = (
           hierarchyUnavailableNodes += 1;
           return undefined;
         }
-        if (entry.pageRef && !pagesLoaded.has(keyString)) {
-          neededPages.push(key);
-          hierarchyPageBlockedNodes += 1;
-          return undefined;
-        }
+        // Culling comes first: a page reference carries the bounds of the
+        // subtree it stands for, so an invisible one must not be requested at
+        // all. Reading it would spend a hierarchy slot on a region no
+        // selection can use, which is precisely the fan-out the page queue
+        // exists to bound.
         if (!boundsIntersectsFrustum(planes, entry.bounds)) {
           frustumCulledNodes += 1;
           frustumCulledPoints += entry.pointCount;
+          return undefined;
+        }
+        if (entry.pageRef && !pagesLoaded.has(keyString)) {
+          neededPages.push(key);
+          hierarchyPageBlockedNodes += 1;
           return undefined;
         }
         const availableChildren = childrenOf(key, entry);
@@ -985,7 +1095,18 @@ export const createLodController = (
       projectedImportance: target.size > 0 ? sse(ROOT_KEY) : 0,
       readyTerminalFrontier: emptyReadyTerminalFrontier(),
     };
-    for (const key of neededPages) loadPage(key);
+    // The root page bootstraps the hierarchy, so it can never come back
+    // through neededPages: that path needs a hierarchy entry, and only the
+    // root page can create one. Without this, a failed bootstrap leaves the
+    // controller with nothing to draw and no way to ask again. Level 0 sorts
+    // to the front, and queuePages drops anything already held, in flight, or
+    // resting, so this costs nothing on the normal path.
+    const rootString = keyToString(ROOT_KEY);
+    queuePages(
+      pagesLoaded.has(rootString)
+        ? neededPages.map(keyToString)
+        : [rootString, ...neededPages.map(keyToString)],
+    );
 
     // Deselected submitted tiles leave renderer/GPU residency immediately.
     for (const keyString of [...resident.keys()]) {
@@ -1014,12 +1135,7 @@ export const createLodController = (
         toFetch.push(keyString);
       }
     }
-    queue = toFetch.sort((a, b) => {
-      const ka = keyFromString(a);
-      const kb = keyFromString(b);
-      if (ka.level !== kb.level) return ka.level - kb.level;
-      return sse(kb) - sse(ka);
-    });
+    queue = toFetch.sort(byFrontierPriority);
 
     updateReadyTerminalFrontier();
     scheduleFlush();
@@ -1078,14 +1194,20 @@ export const createLodController = (
   };
 
   const dropEverything = (): void => {
+    // The epoch bump is what makes every outstanding result irrelevant. The
+    // physical operation counts are deliberately left alone: the reads and
+    // decodes behind those results are still running, and pretending
+    // otherwise is how a source swap under a moving camera doubles real I/O.
     epoch += 1;
     for (const abort of inFlight.values()) abort.abort();
     inFlight.clear();
+    for (const abort of pagesInFlight.values()) abort.abort();
+    pagesInFlight.clear();
     queue = [];
+    pageQueue = [];
     hierarchy.clear();
     sseByKey.clear();
     pagesLoaded.clear();
-    pagesLoading.clear();
     pageFailures.clear();
     tileFailures.clear();
     cache.clear();
@@ -1138,8 +1260,11 @@ export const createLodController = (
     return true;
   };
 
+  /** Bootstrap path for the root page, used before any camera exists. */
+  const queueRootPage = (): void => queuePages([keyToString(ROOT_KEY)]);
+
   // Bootstrap: hierarchy root page loads eagerly; selection waits for camera.
-  if (active) loadPage(ROOT_KEY);
+  if (active) queueRootPage();
 
   return {
     setCamera(nextView) {
@@ -1188,7 +1313,7 @@ export const createLodController = (
       dropEverything();
       source = nextSource;
       scheduleFlush();
-      if (active) loadPage(ROOT_KEY);
+      if (active) queueRootPage();
     },
 
     refresh() {
@@ -1222,7 +1347,7 @@ export const createLodController = (
       active = nextActive;
       if (active) {
         joinMemoryPool();
-        if (!pagesLoaded.has(keyToString(ROOT_KEY))) loadPage(ROOT_KEY);
+        queueRootPage();
         runSelection();
         return;
       }
@@ -1234,7 +1359,11 @@ export const createLodController = (
       clearSettleTimer();
       poolMember?.release();
       poolMember = null;
+      // No new work while hidden. Hierarchy pages already in flight are left
+      // to land: unlike tiles they survive deactivation in `hierarchy`, so
+      // cancelling one only buys a refetch of the same bytes on reactivation.
       queue = [];
+      pageQueue = [];
       for (const abort of inFlight.values()) abort.abort();
       inFlight.clear();
 
@@ -1269,7 +1398,6 @@ export const createLodController = (
     },
 
     stats() {
-      const now = Date.now();
       const cachedBytes = cache.totalBytes();
       return {
         active,
@@ -1280,6 +1408,11 @@ export const createLodController = (
         decodedBytes: residentBytes + cachedBytes,
         cachedBytes,
         inFlight: inFlight.size,
+        queuedTiles: queue.length,
+        physicalTileOperations,
+        hierarchyInFlight: pagesInFlight.size,
+        queuedPages: pageQueue.length,
+        physicalHierarchyOperations,
         pointBudget: currentBudget(),
         memoryBudgetBytes: memoryBudgetBytes(),
         memoryCeilingPoints: memoryCeilingPoints(),

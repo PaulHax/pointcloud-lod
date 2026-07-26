@@ -12,6 +12,7 @@
 
 import { keyFromString, keyToString, type VoxelKey } from "./octree";
 import type {
+  LoadNodesOptions,
   LoadTileOptions,
   NodeInfo,
   TileData,
@@ -112,9 +113,10 @@ export const createHttpTileSource = (
   return {
     metadata: () => metadata,
 
-    async nodes(key: VoxelKey): Promise<NodeInfo[]> {
+    async nodes(key: VoxelKey, opts?: LoadNodesOptions): Promise<NodeInfo[]> {
       const response = await request(
         `${endpoint}/hierarchy/${keyToString(key)}.json`,
+        opts?.signal,
       );
       const body = (await response.json()) as {
         nodes: Record<string, HierarchyEntryJson>;

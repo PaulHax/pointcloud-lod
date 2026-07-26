@@ -1,12 +1,26 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  ROOT_CUBE,
+  createPageGraphSource,
+  levelOf,
+  type PageGraphSource,
+} from "../test/fixtures/pageGraph";
+import { distanceToBounds } from "./camera";
+import {
   createLodController,
   type LodControllerOptions,
   type TileBatch,
 } from "./controller";
 import { createMemoryPool, type MemoryPool } from "./memoryPool";
-import { keyToString, type VoxelKey } from "./octree";
+import {
+  ROOT_KEY,
+  childKeys,
+  keyFromString,
+  keyToString,
+  nodeBounds,
+  type VoxelKey,
+} from "./octree";
 import type {
   NodeInfo,
   TileData,
@@ -1656,6 +1670,292 @@ describe("createLodController — decoded single ownership", () => {
     });
     expect(controller.stats().decodedBytes).toBe(residentBytes);
     controller.dispose();
+  });
+});
+
+describe("createLodController — bounded physical work", () => {
+  const TILE_CEILING = 3;
+  const PAGE_CEILING = 2;
+
+  /**
+   * The page graph is driven by hand, so `refinementCutoffPx: 0` keeps
+   * screen-space error out of the picture entirely: what gets requested is
+   * then a pure function of the frustum and the point budget.
+   */
+  const makeScheduled = (
+    graph: PageGraphSource,
+    overrides?: Partial<LodControllerOptions>,
+  ) => {
+    const sink = mirrorRenderer();
+    const controller = createLodController({
+      source: graph.source,
+      onTiles: sink.onTiles,
+      scheduleRender: sink.scheduleRender,
+      pointBudget: 1_000_000,
+      selectionDelayMs: 0,
+      refinementCutoffPx: 0,
+      fetchConcurrency: TILE_CEILING,
+      hierarchyConcurrency: PAGE_CEILING,
+      ...overrides,
+    });
+    return { controller, ...sink };
+  };
+
+  /** Land everything outstanding until the whole page graph is resolved. */
+  const drainPages = async (
+    graph: PageGraphSource,
+    onRound?: () => void,
+  ): Promise<void> => {
+    let round = 0;
+    while (round < 200 && graph.activePages().length > 0) {
+      round += 1;
+      onRound?.();
+      graph.landPages();
+      await settle();
+    }
+  };
+
+  it("never runs more physical tile reads than fetchConcurrency", async () => {
+    // Cancellation is advisory here: the abandoned reads stay unresolved, so
+    // the only thing that can bound real I/O is counting them.
+    const graph = createPageGraphSource({
+      depth: 1,
+      branching: 8,
+      pointsPerNode: 10,
+    });
+    const { controller } = makeScheduled(graph);
+    await settle();
+    controller.setCamera(VIEW);
+    await drainPages(graph);
+    expect(graph.tileCalls.length).toBe(TILE_CEILING);
+
+    // Look away and back repeatedly. Every flip cancels the outstanding
+    // fetches and re-selects the same tiles; nothing may start until the
+    // abandoned reads actually finish.
+    for (let flip = 0; flip < 12; flip += 1) {
+      controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
+      await settle();
+      controller.setCamera(VIEW);
+      await settle();
+      expect(graph.activeTiles().length).toBeLessThanOrEqual(TILE_CEILING);
+      expect(controller.stats().physicalTileOperations).toBeLessThanOrEqual(
+        TILE_CEILING,
+      );
+    }
+    expect(graph.tileCalls.length).toBe(TILE_CEILING);
+
+    // The ceiling is a queue, not a deadlock: landing the abandoned reads
+    // releases the slots and the next tiles go out.
+    graph.landTiles();
+    await settle();
+    expect(graph.tileCalls.length).toBeGreaterThan(TILE_CEILING);
+    expect(controller.stats().physicalTileOperations).toBeLessThanOrEqual(
+      TILE_CEILING,
+    );
+    controller.dispose();
+  });
+
+  it("holds a tile slot across an epoch change until the read settles", async () => {
+    const stale = createPageGraphSource({ depth: 0, pointsPerNode: 10 });
+    const { controller } = makeScheduled(stale, { fetchConcurrency: 1 });
+    await settle();
+    controller.setCamera(VIEW);
+    await drainPages(stale);
+    expect(stale.tileCalls).toEqual(["0-0-0-0"]);
+
+    const fresh = createPageGraphSource({ depth: 0, pointsPerNode: 10 });
+    controller.setSource(fresh.source);
+    await settle();
+    fresh.landPages();
+    await settle();
+    // The replacement wants the same node, but the abandoned read still owns
+    // the only slot: a source swap must not double real I/O.
+    expect(controller.stats().physicalTileOperations).toBe(1);
+    expect(fresh.tileCalls).toEqual([]);
+
+    stale.landTiles();
+    await settle();
+    expect(fresh.tileCalls).toEqual(["0-0-0-0"]);
+    // The stale payload was never wanted, so nothing holds it.
+    expect(controller.stats()).toMatchObject({
+      decodedTiles: 0,
+      residentTiles: 0,
+      cachedTiles: 0,
+    });
+    controller.dispose();
+  });
+
+  it("never runs more physical page reads than hierarchyConcurrency", async () => {
+    const graph = createPageGraphSource({
+      depth: 3,
+      branching: 4,
+      pointsPerNode: 1,
+    });
+    const { controller } = makeScheduled(graph);
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+
+    await drainPages(graph, () => {
+      expect(graph.activePages().length).toBeLessThanOrEqual(PAGE_CEILING);
+      expect(
+        controller.stats().physicalHierarchyOperations,
+      ).toBeLessThanOrEqual(PAGE_CEILING);
+    });
+
+    // A page graph far wider and deeper than the ceiling still resolves whole,
+    // and every page is read exactly once.
+    expect(graph.pageCalls.length).toBe(graph.pageKeys().length);
+    expect(new Set(graph.pageCalls).size).toBe(graph.pageCalls.length);
+    expect(graph.pageKeys().length).toBeGreaterThan(PAGE_CEILING * 10);
+    controller.dispose();
+  });
+
+  it("requests each page once however often selection reruns", async () => {
+    const graph = createPageGraphSource({ depth: 2, branching: 2 });
+    const { controller } = makeScheduled(graph);
+    await settle();
+    controller.setCamera(VIEW);
+    for (let round = 0; round < 5; round += 1) {
+      controller.refresh();
+      await settle();
+    }
+    expect(graph.pageCalls).toEqual(["0-0-0-0"]);
+
+    graph.landPages();
+    await settle();
+    for (let round = 0; round < 5; round += 1) {
+      controller.refresh();
+      await settle();
+    }
+    expect(new Set(graph.pageCalls).size).toBe(graph.pageCalls.length);
+    controller.dispose();
+  });
+
+  it("reads the coarsest blocked page before any deeper one", async () => {
+    const graph = createPageGraphSource({ depth: 2, branching: 2 });
+    const { controller } = makeScheduled(graph, { hierarchyConcurrency: 1 });
+    await settle();
+    // Camera inside the first octant: its level-2 pages score a far larger
+    // screen-space error than the level-1 page of the octant behind the
+    // camera, so only the level tiebreak keeps the coarse page ahead.
+    controller.setCamera({ ...VIEW, position: [-0.25, -0.25, -0.25] });
+    await drainPages(graph);
+
+    const levels = graph.pageCalls.map(levelOf);
+    expect(levels.length).toBe(graph.pageKeys().length);
+    expect(levels).toEqual([...levels].sort((a, b) => a - b));
+    controller.dispose();
+  });
+
+  it("orders same-level pages by screen-space error", async () => {
+    const position: [number, number, number] = [0.4, 0.3, 0.2];
+    const graph = createPageGraphSource({ depth: 1, branching: 8 });
+    const { controller } = makeScheduled(graph, { hierarchyConcurrency: 1 });
+    await settle();
+    controller.setCamera({ ...VIEW, position });
+    await drainPages(graph);
+
+    // Same level and same spacing, so descending error is ascending distance.
+    const expected = childKeys(ROOT_KEY)
+      .map((key) => ({
+        keyString: keyToString(key),
+        distance: distanceToBounds(position, nodeBounds(ROOT_CUBE, key)),
+      }))
+      .sort((a, b) => a.distance - b.distance)
+      .map((node) => node.keyString);
+    expect(graph.pageCalls).toEqual(["0-0-0-0", ...expected]);
+    controller.dispose();
+  });
+
+  it("holds a page slot across an epoch change until the read settles", async () => {
+    const stale = createPageGraphSource({ depth: 1, branching: 2 });
+    const { controller } = makeScheduled(stale, { hierarchyConcurrency: 1 });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    expect(stale.pageCalls).toEqual(["0-0-0-0"]);
+
+    const fresh = createPageGraphSource({ depth: 1, branching: 2 });
+    controller.setSource(fresh.source);
+    await settle();
+    expect(controller.stats().physicalHierarchyOperations).toBe(1);
+    expect(fresh.pageCalls).toEqual([]);
+
+    // Landing the abandoned read frees the slot; its entries are ignored.
+    stale.landPages();
+    await settle();
+    expect(fresh.pageCalls).toEqual(["0-0-0-0"]);
+    expect(controller.stats().selection.targetTiles).toBe(0);
+    expect(stale.tileCalls).toEqual([]);
+    controller.dispose();
+  });
+
+  it("skips pages for subtrees the frustum rejects", async () => {
+    const graph = createPageGraphSource({ depth: 1, branching: 8 });
+    const { controller } = makeScheduled(graph);
+    await settle();
+    // Clip space shifted by -1.2: only world x >= 0.2 is visible, so the four
+    // octants left of the root centre are wholly outside.
+    controller.setCamera({
+      ...VIEW,
+      viewProj: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -1.2, 0, 0, 1],
+    });
+    await drainPages(graph);
+
+    expect(graph.pageCalls).toHaveLength(5); // the root page plus four octants
+    for (const keyString of graph.pageCalls.slice(1)) {
+      expect(keyFromString(keyString).x).toBe(1);
+    }
+    controller.dispose();
+  });
+
+  it("keeps tile and page work inside their own ceilings under churn", async () => {
+    const graph = createPageGraphSource({
+      depth: 2,
+      branching: 4,
+      pointsPerNode: 5,
+    });
+    const { controller, violations } = makeScheduled(graph);
+    await settle();
+
+    for (let round = 0; round < 30; round += 1) {
+      controller.setCamera(
+        round % 2 === 0 ? VIEW : { ...VIEW, viewProj: LOOK_AWAY },
+      );
+      await settle();
+      const stats = controller.stats();
+      expect(stats.physicalTileOperations).toBeLessThanOrEqual(TILE_CEILING);
+      expect(stats.physicalHierarchyOperations).toBeLessThanOrEqual(
+        PAGE_CEILING,
+      );
+      expect(graph.activeTiles().length).toBeLessThanOrEqual(TILE_CEILING);
+      expect(graph.activePages().length).toBeLessThanOrEqual(PAGE_CEILING);
+      // Total I/O is the documented sum of the two explicit ceilings.
+      expect(
+        stats.physicalTileOperations + stats.physicalHierarchyOperations,
+      ).toBeLessThanOrEqual(TILE_CEILING + PAGE_CEILING);
+      if (round % 3 === 0) {
+        graph.landPages();
+        graph.landTiles();
+        await settle();
+      }
+    }
+    expect(violations).toEqual([]);
+    controller.dispose();
+  });
+
+  it("rejects an invalid hierarchy concurrency at construction", () => {
+    for (const value of [Number.NaN, Number.POSITIVE_INFINITY, 0, -1]) {
+      expect(() =>
+        createLodController({
+          source: createPageGraphSource().source,
+          onTiles: () => {},
+          scheduleRender: () => {},
+          hierarchyConcurrency: value,
+        }),
+      ).toThrow(/hierarchyConcurrency/);
+    }
   });
 });
 

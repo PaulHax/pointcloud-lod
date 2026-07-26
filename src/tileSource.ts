@@ -51,6 +51,15 @@ export interface LoadTileOptions {
   readonly signal?: AbortSignal;
 }
 
+export interface LoadNodesOptions {
+  /**
+   * Abort in-flight hierarchy I/O; the promise rejects on abort. Hierarchy
+   * requests are scheduled and cancelled exactly like tile requests, so they
+   * carry the same contract.
+   */
+  readonly signal?: AbortSignal;
+}
+
 /**
  * A source of octree point-cloud tiles.
  *
@@ -65,7 +74,7 @@ export interface TileSource {
    * Hierarchy entries for the page rooted at `key` (the root page for the
    * root key). May return entries for several levels at once.
    */
-  nodes(key: VoxelKey): Promise<NodeInfo[]>;
+  nodes(key: VoxelKey, opts?: LoadNodesOptions): Promise<NodeInfo[]>;
   /** Fetch and decode one node's points. */
   loadTile(key: VoxelKey, opts?: LoadTileOptions): Promise<TileData>;
 }
