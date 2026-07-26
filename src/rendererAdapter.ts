@@ -122,6 +122,13 @@ export interface RendererAdapter {
   setResourceCeilingBytes(bytes: number): void;
   /** Renderer-owned resource and draw accounting. */
   stats(): RendererAdapterStats;
+  /**
+   * Diagnostics: the keys this adapter holds actors for, and the keys whose
+   * actors are pooled awaiting reuse or release. `submitted` must match the
+   * controller's submitted set exactly; anything in `pooled` is off screen and
+   * owned by nothing but the pool.
+   */
+  activeKeys(): { readonly submitted: string[]; readonly pooled: string[] };
   /** Remove and release every tile actor. Idempotent. */
   dispose(): void;
 }
@@ -150,6 +157,11 @@ export interface RendererAdapterStats {
    */
   readonly gpuResidentBytes: number;
   /** What participates in drawing: the submitted set, or nothing while hidden. */
+  /**
+   * The pool ceiling. Only the pool is trimmed to it, so submitted tiles alone
+   * may exceed it — but then the pool is empty.
+   */
+  readonly resourceCeilingBytes: number;
   readonly drawnTiles: number;
   readonly drawnPoints: number;
   readonly visible: boolean;
@@ -405,6 +417,7 @@ export const createRendererAdapter = (
         gpuResidentTiles: tiles.size + pendingRelease.size,
         gpuResidentPoints: submittedPoints + pooledPoints,
         gpuResidentBytes: submittedBytes + pooledBytes,
+        resourceCeilingBytes,
         drawnTiles: visible ? tiles.size : 0,
         drawnPoints: visible ? submittedPoints : 0,
         visible,
@@ -412,6 +425,11 @@ export const createRendererAdapter = (
         devicePixelRatio,
       };
     },
+
+    activeKeys: () => ({
+      submitted: [...tiles.keys()].sort(),
+      pooled: [...pendingRelease.keys()].sort(),
+    }),
 
     dispose() {
       if (disposed) return;

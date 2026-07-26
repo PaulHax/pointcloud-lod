@@ -48,17 +48,22 @@ export interface ExampleStats {
     decodedTiles: number;
     decodedBytes: number;
     cachedTiles: number;
+    cachedBytes: number;
     inFlight: number;
+    hierarchyInFlight: number;
     queuedTiles: number;
     physicalTileOperations: number;
     queuedPages: number;
     physicalHierarchyOperations: number;
+    fetchConcurrency: number;
+    hierarchyConcurrency: number;
     pointBudget: number;
     memoryCeilingPoints: number;
     memoryBudgetBytes: number;
     active: boolean;
     selection: {
       generation: number;
+      targetRevision: number;
       targetTiles: number;
       targetPoints: number;
       readyTerminalFrontier: {
@@ -75,6 +80,7 @@ export interface ExampleStats {
     pooledBytes: number;
     gpuResidentTiles: number;
     gpuResidentBytes: number;
+    resourceCeilingBytes: number;
     drawnTiles: number;
     drawnPoints: number;
     visible: boolean;
@@ -96,12 +102,28 @@ export interface ExampleStats {
   sourcePoints: number;
 }
 
+export interface ExampleKeys {
+  controller: { resident: string[]; submitted: string[] } | null;
+  adapter: { submitted: string[]; pooled: string[] } | null;
+}
+
+export interface Viewport {
+  width: number;
+  height: number;
+}
+
 export interface ExampleSession {
   readonly page: Page;
   readonly origin: string;
   /** Every uncaught error and rejected promise the page produced. */
   readonly failures: readonly string[];
   stats(): Promise<ExampleStats>;
+  /** Both sides' key sets, for asserting they agree. */
+  keys(): Promise<ExampleKeys>;
+  /** The CSS size selection is computed against. */
+  viewport(): Promise<Viewport>;
+  /** Resize the browser viewport, which resizes the canvas under it. */
+  resize(size: Viewport): Promise<void>;
   /** Load another cloud into the running page; resolves when it has opened. */
   load(url: string): Promise<void>;
   readCamera(): Promise<CameraReading>;
@@ -225,6 +247,22 @@ export const openExample = async (
     origin: server.origin,
     failures,
     stats,
+    keys: () =>
+      page.evaluate(
+        () => (window as never as ExampleWindow).pointCloudExample.keys(),
+      ) as Promise<ExampleKeys>,
+    viewport: () =>
+      page.evaluate(
+        () => (window as never as ExampleWindow).pointCloudExample.viewport(),
+      ) as Promise<Viewport>,
+    resize: async (size) => {
+      await page.setViewportSize(size);
+      // The render window resizes off the window's own resize event, and the
+      // controller only learns the new viewport height when a frame is drawn
+      // against it.
+      await session.render();
+      await session.frame();
+    },
     load: (url) =>
       page.evaluate(
         (target) => (window as never as ExampleWindow).pointCloudExample.load(target),
@@ -371,6 +409,8 @@ export interface CameraReading {
 interface ExampleWindow {
   pointCloudExample: {
     stats(): ExampleStats;
+    keys(): ExampleKeys;
+    viewport(): Viewport;
     load(url: string): Promise<void>;
     camera: {
       read(): CameraReading;

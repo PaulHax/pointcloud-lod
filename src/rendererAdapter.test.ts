@@ -77,6 +77,7 @@ describe("createRendererAdapter", () => {
       gpuResidentTiles: 1,
       gpuResidentPoints: 2,
       gpuResidentBytes: 94,
+      resourceCeilingBytes: 256 * 1024 * 1024,
       drawnTiles: 1,
       drawnPoints: 2,
       visible: true,

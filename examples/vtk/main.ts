@@ -743,6 +743,21 @@ Object.assign(window, {
       source: loadedName || null,
       sourcePoints: loadedPointCount,
     }),
+
+    /**
+     * Both sides' key sets, so a check can assert they agree rather than
+     * inferring agreement from two counts that happen to match.
+     */
+    keys: () => ({
+      controller: controller?.activeKeys() ?? null,
+      adapter: adapter?.activeKeys() ?? null,
+    }),
+
+    /** The CSS size selection is computed against, after any resize. */
+    viewport: () => ({
+      width: viewer.clientWidth,
+      height: viewer.clientHeight,
+    }),
     setProjection: (projection: Projection) => {
       projectionSelect.value = projection;
       syncProjection();

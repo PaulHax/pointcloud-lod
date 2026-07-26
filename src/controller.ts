@@ -157,6 +157,10 @@ export interface LodControllerStats {
   readonly queuedPages: number;
   /** Hierarchy page operations physically running, cancelled ones included. */
   readonly physicalHierarchyOperations: number;
+  /** The ceiling `physicalTileOperations` is held under. */
+  readonly fetchConcurrency: number;
+  /** The ceiling `physicalHierarchyOperations` is held under. */
+  readonly hierarchyConcurrency: number;
   /** Effective visible-point budget currently driving selection. */
   readonly pointBudget: number;
   /** This controller's byte share of its memory pool. */
@@ -258,6 +262,13 @@ export interface LodController {
    */
   setActive(active: boolean): void;
   stats(): LodControllerStats;
+  /**
+   * Diagnostics: the tiles held on screen, and the set last handed to the
+   * consumer. A pending flush is the only reason they differ, so once the
+   * controller is quiet they agree — and `submitted` is then exactly what the
+   * renderer adapter must hold, key for key.
+   */
+  activeKeys(): { readonly resident: string[]; readonly submitted: string[] };
   /** Cancel everything and release all tiles. Idempotent. */
   dispose(): void;
 }
@@ -1459,6 +1470,8 @@ export const createLodController = (
         hierarchyInFlight: pagesInFlight.size,
         queuedPages: pageQueue.length,
         physicalHierarchyOperations,
+        fetchConcurrency,
+        hierarchyConcurrency,
         pointBudget: currentBudget(),
         memoryBudgetBytes: memoryBudgetBytes(),
         memoryCeilingPoints: memoryCeilingPoints(),
@@ -1472,6 +1485,11 @@ export const createLodController = (
         selection: selectionStats,
       };
     },
+
+    activeKeys: () => ({
+      resident: [...resident.keys()].sort(),
+      submitted: [...submitted.keys()].sort(),
+    }),
 
     dispose() {
       if (disposed) return;
