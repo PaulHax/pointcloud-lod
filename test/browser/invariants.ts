@@ -53,12 +53,14 @@ export const assertLive = (stats: ExampleStats): void => {
     `more pages wanted than are running\n${shown(stats)}`,
   ).toBeLessThanOrEqual(cloud.physicalHierarchyOperations);
 
-  // The LRU is the only decoded store with a byte bound; resident payloads are
-  // bounded by the point budget instead, so they are not in this comparison.
+  // The LRU's bound is `cacheBytes`, not `memoryBudgetBytes`: the latter is
+  // this controller's share of the GPU pool, which it gives up the moment it
+  // is deactivated — precisely when the CPU cache is fullest, because
+  // deactivation moves every resident payload into it.
   expect(
     cloud.cachedBytes,
-    `the decoded cache exceeded its byte budget\n${shown(stats)}`,
-  ).toBeLessThanOrEqual(cloud.memoryBudgetBytes);
+    `the decoded cache exceeded its byte ceiling\n${shown(stats)}`,
+  ).toBeLessThanOrEqual(cloud.cacheBytes);
 
   for (const [label, value] of [
     ["residentTiles", cloud.residentTiles],
@@ -150,10 +152,17 @@ export const assertSettled = (stats: ExampleStats, keys: ExampleKeys): void => {
     cloud.residentPoints,
     `more points on screen than selection asked for\n${shown(stats)}`,
   ).toBeLessThanOrEqual(cloud.selection.targetPoints);
-  expect(
-    cloud.pointBudget,
-    `the budget exceeded what memory allows\n${shown(stats)}`,
-  ).toBeLessThanOrEqual(cloud.memoryCeilingPoints);
+
+  // Not `pointBudget <= memoryCeilingPoints`: the controller reports
+  // min(budget, ceiling), so that comparison is min(a,b) <= b and cannot fail.
+  // What can fail is the number the governor arrived at independently — the
+  // ceiling binds the loop, not just the value the loop is read back through.
+  if (stats.governor !== null && stats.governor.memoryCeilingPoints !== null) {
+    expect(
+      stats.governor.trackBudget,
+      `the governor's own budget exceeded what memory allows\n${shown(stats)}`,
+    ).toBeLessThanOrEqual(stats.governor.memoryCeilingPoints);
+  }
 
   if (stats.governor !== null) {
     expect(
@@ -205,11 +214,18 @@ export const watching = async <T>(
 
   try {
     const result = await body();
-    return { result, samples, peak };
-  } finally {
     running = false;
     await sampler;
+    // Only reached when the body succeeded, so nothing of its own is lost.
     if (failure !== null) throw failure;
+    return { result, samples, peak };
+  } catch (error) {
+    running = false;
+    await sampler;
+    // The body's own failure wins. Rethrowing the sampler's instead would
+    // hide every assertion inside the watched block behind whichever live
+    // bound happened to be unhappy at the same moment.
+    throw error;
   }
 };
 

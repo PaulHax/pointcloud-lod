@@ -28,6 +28,13 @@ export const FIXTURES = resolve(repoRoot, "test/fixtures");
 
 /** The committed fixture: small, single hierarchy page, always available. */
 export const FIXTURE_URL_PATH = "/fixtures/fixture.copc.laz";
+/**
+ * The committed fixture whose hierarchy spans 73 pages over 4 levels. Every
+ * real cloud on hand ships exactly one page, so this is the only asset that
+ * makes the bounded page scheduler, the page-blocked branch of selection, and
+ * multi-level tile traffic run at all.
+ */
+export const MULTIPAGE_URL_PATH = "/fixtures/multipage.copc.laz";
 
 /**
  * Extra clouds to run the matrix against, as a path list in
@@ -53,8 +60,13 @@ export interface CloudUnderTest {
   readonly name: string;
   readonly urlPath: string;
   readonly files: Record<string, string>;
-  /** The committed fixture is small enough to select whole; a real one is not. */
+  /**
+   * Holds more detail than any one view selects, so refinement has somewhere
+   * to descend and tiles actually stream. The small fixtures do not.
+   */
   readonly deep: boolean;
+  /** Its hierarchy spans more than one page, so pages must be fetched to select. */
+  readonly multipage: boolean;
 }
 
 export const FIXTURE_CLOUD: CloudUnderTest = {
@@ -62,30 +74,42 @@ export const FIXTURE_CLOUD: CloudUnderTest = {
   urlPath: FIXTURE_URL_PATH,
   files: {},
   deep: false,
+  multipage: false,
+};
+
+export const MULTIPAGE_CLOUD: CloudUnderTest = {
+  name: "the multipage fixture",
+  urlPath: MULTIPAGE_URL_PATH,
+  files: {},
+  deep: false,
+  multipage: true,
 };
 
 export const cloudsUnderTest = (): CloudUnderTest[] => [
   FIXTURE_CLOUD,
+  MULTIPAGE_CLOUD,
   ...extraClouds().map((path, index) => ({
     name: `supplied cloud ${index + 1}`,
     urlPath: `/supplied/${index + 1}/cloud.copc.laz`,
     files: { [`/supplied/${index + 1}/cloud.copc.laz`]: path },
     deep: true,
+    multipage: false,
   })),
 ];
 
-/** Two clouds to switch between: a second supplied one, else the fixture twice. */
+/**
+ * Two clouds to switch between, preferring a pair that genuinely differ.
+ *
+ * Supplied clouds first, because they differ in every way. Otherwise the two
+ * committed fixtures, which differ in point count, node count and hierarchy
+ * shape — enough for a switch to be arithmetically visible, which one file
+ * served at two URLs never is.
+ */
 export const cloudPair = (): [CloudUnderTest, CloudUnderTest] => {
-  const clouds = cloudsUnderTest();
-  if (clouds.length >= 3) return [clouds[1]!, clouds[2]!];
-  if (clouds.length === 2) return [clouds[0]!, clouds[1]!];
-  // One cloud served at two URLs is still two sources to the library — a
-  // different endpoint, a full teardown, a fresh hierarchy — and is what CI
-  // has. It cannot prove the two differ in content; a supplied pair can.
-  return [
-    FIXTURE_CLOUD,
-    { ...FIXTURE_CLOUD, name: "the fixture at a second URL", urlPath: `${FIXTURE_URL_PATH}?alias=2` },
-  ];
+  const supplied = cloudsUnderTest().filter((entry) => entry.deep);
+  if (supplied.length >= 2) return [supplied[0]!, supplied[1]!];
+  if (supplied.length === 1) return [supplied[0]!, MULTIPAGE_CLOUD];
+  return [FIXTURE_CLOUD, MULTIPAGE_CLOUD];
 };
 
 export interface ExampleStats {
@@ -97,6 +121,7 @@ export interface ExampleStats {
     decodedBytes: number;
     cachedTiles: number;
     cachedBytes: number;
+    cacheBytes: number;
     inFlight: number;
     hierarchyInFlight: number;
     queuedTiles: number;
@@ -160,6 +185,13 @@ export interface Viewport {
   height: number;
 }
 
+/** What the renderer holds, read from the scene rather than from the adapter. */
+export interface SceneReading {
+  actors: number;
+  pointSizeDevicePx: number | null;
+  mapperScaleFactor: number | null;
+}
+
 export interface ExampleSession {
   readonly page: Page;
   readonly origin: string;
@@ -170,6 +202,15 @@ export interface ExampleSession {
   keys(): Promise<ExampleKeys>;
   /** The CSS size selection is computed against. */
   viewport(): Promise<Viewport>;
+  /** What the renderer is holding — the only view a leaked actor appears in. */
+  scene(): Promise<SceneReading>;
+  /**
+   * A real pointer gesture on the canvas, which is the only way the
+   * interactor's animation callbacks fire and the governor sees *explicit*
+   * motion. Every other camera handle moves the camera programmatically, so
+   * the governor infers motion instead — a different code path.
+   */
+  drag(steps: { dx: number; dy: number }[], pauseMs?: number): Promise<void>;
   /** Resize the browser viewport, which resizes the canvas under it. */
   resize(size: Viewport): Promise<void>;
   /** Load another cloud into the running page; resolves when it has opened. */
@@ -313,6 +354,27 @@ export const openExample = async (
       page.evaluate(
         () => (window as never as ExampleWindow).pointCloudExample.viewport(),
       ) as Promise<Viewport>,
+    scene: () =>
+      page.evaluate(
+        () => (window as never as ExampleWindow).pointCloudExample.scene(),
+      ) as Promise<SceneReading>,
+    drag: async (steps, pauseMs = 16) => {
+      const box = await page.locator("#viewer").boundingBox();
+      if (box === null) throw new Error("the viewer has no box to drag in");
+      let x = box.x + box.width / 2;
+      let y = box.y + box.height / 2;
+      await page.mouse.move(x, y);
+      await page.mouse.down();
+      for (const { dx, dy } of steps) {
+        x += dx;
+        y += dy;
+        await page.mouse.move(x, y);
+        // The interactor paints a frame per move through its own animation
+        // loop; stepping faster than that measures the queue, not the gesture.
+        await page.waitForTimeout(pauseMs);
+      }
+      await page.mouse.up();
+    },
     resize: async (size) => {
       await page.setViewportSize(size);
       // The render window resizes off the window's own resize event, and the
@@ -469,6 +531,7 @@ interface ExampleWindow {
     stats(): ExampleStats;
     keys(): ExampleKeys;
     viewport(): Viewport;
+    scene(): SceneReading;
     load(url: string): Promise<void>;
     camera: {
       read(): CameraReading;
