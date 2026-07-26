@@ -36,7 +36,16 @@ The package has two entry points, and only one of them needs vtk.js:
 - **`pointcloud-lod/vtk`** — the renderer adapter. This requires
   `vtkPointGaussianMapper`, which is **not present in any released
   `@kitware/vtk.js`**. Until it lands upstream you must build vtk.js from
-  [the fork](https://github.com/PaulHax/vtk-js) at commit `804faaf46b`.
+  [the fork](https://github.com/PaulHax/vtk-js) at the exact commit in
+  [`vtkjs-fork.env`](./vtkjs-fork.env) — the one commit this package's CI
+  builds and tests the example against:
+
+  ```bash
+  source ./vtkjs-fork.env
+  git clone "$VTKJS_FORK_REPO" vtk-js && cd vtk-js
+  git checkout "$VTKJS_FORK_COMMIT"
+  npm ci && npm run build:esm
+  ```
 
 vtk.js is deliberately not declared as a peer dependency: no published version
 satisfies the adapter, so any semver range would be false.
@@ -44,6 +53,7 @@ satisfies the adapter, so any semver range would be false.
 ## Usage
 
 ```js
+import "@kitware/vtk.js/Rendering/Profiles/Geometry";
 import { createCopcTileSource, createLodController } from "pointcloud-lod";
 import { createRendererAdapter } from "pointcloud-lod/vtk";
 
@@ -70,8 +80,16 @@ const controller = createLodController({
   scheduleRender,
 });
 
-// Feed the controller a plain camera description on every camera change:
-controller.setCamera({ viewProj, position, fovY, viewportHeightCssPx });
+// Feed the controller a plain camera description on every camera change. The
+// projection mode is explicit — an orthographic view carries `parallelScale`
+// (the world-space half-height of the viewport) instead of `fovY`:
+controller.setCamera({
+  projection: "perspective",
+  viewProj,
+  position,
+  fovY,
+  viewportHeightCssPx,
+});
 adapter.setDevicePixelRatio(window.devicePixelRatio);
 
 // Tear down when done (both are idempotent):
@@ -83,6 +101,65 @@ For servers that reproject or transform points per tile, use
 `createHttpTileSource({ endpoint, metadata })` instead of the COPC source; it
 speaks a compact binary tile protocol (`PCT1`).
 
+### vtk.js example
+
+The runnable example in [`examples/vtk`](./examples/vtk/) loads either a local
+`.copc.laz` file (read through `File.slice()` range reads) or a COPC URL (HTTP
+Range), frames it automatically, and streams it through the same three pieces
+an application wires: one controller, one renderer adapter, and one view
+governor for the view.
+
+Its controls are all runtime, so one build loads any dataset:
+
+- **Point budget** — `Adaptive` gives the number to a `ViewGovernor`; `Fixed`
+  gives it straight to `setPointBudget`.
+- **Moving / settled target** — the two regimes' frame-time targets. Changing
+  either replaces the governor, since the library fixes its options at
+  construction.
+- **Maximum budget** — the optional configured maximum. Blank leaves the
+  memory-derived ceiling as the only upper bound.
+- **Projection** — perspective or orthographic, preserving the world height the
+  viewport covers, so the only thing a toggle changes is the law selection
+  refines by (an orthographic zoom moves `parallelScale`, not the eye).
+
+The panel answers "why is it drawing N points" without reading internal state:
+regime and what is holding it, explicit versus inferred motion, target frame
+time, percentile estimate, sample count, adaptive track budget, configured
+maximum, memory ceiling, aggregate view budget, this cloud's share, the last
+adjustment and its reason, the binding constraint, and the physical tile and
+hierarchy work counts — next to the controller's selection, decoded-memory,
+GPU-residency and frame-time statistics. A badge shows the current regime.
+
+The page holds an explicit motion reference for the interactor's gestures and
+infers the rest by comparing the camera it hands to LOD on every painted frame,
+releasing that reference after 250 ms of stillness. It times every paint,
+reports it through `recordHostFrame`, and repaints while `needsFrame()` is
+true. `window.pointCloudExample` exposes `stats()`, `setProjection()`,
+`setBudgetMode()` and `dispose()` for browser tests.
+
+Install a vtk.js build containing `vtkPointGaussianMapper` as described in
+[Requirements](#requirements), then run:
+
+```bash
+npm run example
+```
+
+If that vtk.js build is outside this package's `node_modules`, point the example
+at its ESM package directory:
+
+```bash
+VTK_JS_DIR=/path/to/vtk-js/dist/esm npm run example
+```
+
+A `?url=` query parameter loads a cloud on startup.
+
+Remote URLs must allow cross-origin `Range` requests. Raw LAS/LAZ is not
+streamable by the COPC source; convert it with a proven native COPC writer —
+PDAL's `writers.copc` or `untwine` — which is also what server-side preparation
+pipelines should run. No JavaScript/browser COPC writer is used or accepted
+here, not even as a development dependency: the one evaluated preserved the
+point count but silently rewrote RGB point format 7 as non-RGB format 6.
+
 ### Adaptive quality
 
 A controller on its own draws to whatever fixed budget you set. To adapt
@@ -91,6 +168,16 @@ view, shared by every controller drawing into that view. It splits one budget
 across its members from measured host-frame timings, so several clouds in a
 view compete for a single frame-time target instead of each chasing its own.
 
+Two regimes, two targets. A moving camera is being steered, so it gets the
+tighter **16 ms** target and trades points for responsiveness; a settled camera
+is being read, so it gets the looser **33 ms** target and spends the extra
+frame time on detail. With the default 20% hysteresis the no-change bands are
+12.8-19.2 ms while moving and 26.4-39.6 ms while settled. Both tracks start at
+**1,000,000** points (`initialBudget`) and never drop below **200,000**
+(`minBudget`). Releasing the camera never changes the picture on its own: the
+stationary track starts from exactly the density the moving regime just
+sustained and refines from there.
+
 ```js
 import { createViewGovernor } from "pointcloud-lod";
 
@@ -98,26 +185,59 @@ const governor = createViewGovernor();
 
 // Register each controller in the view. The governor pushes budgets in.
 const member = governor.register({
+  id: "cloud-1",
   setPointBudget: (points) => controller.setPointBudget(points),
   active: true,
 });
 
-// Report every completed host frame, including non-VTK work:
+// Report every completed host frame, including non-VTK work, then ask whether
+// the view still needs painting. The governor never schedules anything itself.
 governor.recordHostFrame({ hostFrameMs, vtkFrameMs });
+if (governor.needsFrame()) scheduleRender();
 
-// Bracket camera interaction so quality relaxes while moving and settles
-// after release. Controllers take the same pair:
-governor.beginInteraction();
+// Feed the split and the diagnostics from the controller's own statistics:
+const stats = controller.stats();
+member.update({
+  projectedImportance: stats.selection.projectedImportance,
+  memoryCeilingPoints: stats.memoryCeilingPoints,
+  physicalTileOperations: stats.physicalTileOperations,
+  physicalHierarchyOperations: stats.physicalHierarchyOperations,
+});
+
+// Hold the moving regime while the camera moves. References compose across
+// sources and the regime ends only when the last one is released, so an
+// inferred playback motion overlapping a pointer gesture behaves correctly.
+const gesture = governor.beginMotion("explicit");
 controller.beginInteraction();
 // ...camera moves...
-governor.endInteraction();
+gesture.release();
 controller.endInteraction();
+
+// Motion the host cannot announce — playback, scrubbing, programmatic
+// animation — is inferred by comparing the camera actually handed to LOD from
+// frame to frame, holding one "inferred" reference for the whole burst and
+// releasing it after a quiet debounce (250 ms in the shipped integrations).
+// A scene change with an unchanged camera is not motion.
 
 // Drop a controller out of the split without disposing it:
 member.update({ active: false });
 member.release();
 governor.dispose();
 ```
+
+`governor.stats()` explains any drawn point count without reading internal
+state: the regime and what is holding it, the target frame time, the recent
+percentile estimate and sample count, the adaptive track budget, the optional
+configured maximum (`maxBudget`), the memory-derived ceiling, the aggregate
+view budget and each member's share of it, the last adjustment's time,
+direction and reason, and which of `adaptive | configured-maximum | memory |
+inactive` is the binding constraint.
+
+The effective budget is `min(adaptive track budget, configured maximum,
+memory-derived ceiling)`, applied to the aggregate before the split so no
+member's share is sized against memory another member owns. The memory ceiling
+stays authoritative; `maxBudget` is an optional policy, diagnostics, and
+hardware-safety bound, and omitting it leaves memory as the only ceiling.
 
 ## Architecture
 
@@ -146,6 +266,13 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
   additive, so that invariant alone guarantees hole-free refinement),
   coarse-first fetching with bounded concurrency and cancellation,
   byte-budgeted LRU caching of deselected tiles, and batched delivery.
+  Tiles and hierarchy pages get separate ceilings (`fetchConcurrency`,
+  default 6, and `hierarchyConcurrency`, default 4) because a page unblocks
+  selection for a whole subtree and must not queue behind tile fetches that
+  cannot be chosen correctly until it lands. Both ceilings count *physical*
+  operations: cancellation is advisory wherever the underlying reader takes
+  no signal, so an abandoned read keeps its slot until its promise settles
+  and a look-away/look-back storm cannot multiply real I/O.
   Fixed presentation keeps one CSS-pixel diameter; Auto presentation derives
   the diameter from the p75 projected spacing of the ready terminal coverage
   frontier, scaled by `userScale` and clamped to the presentation's min/max,
@@ -160,6 +287,10 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
   not yet in a released vtk.js — see [Requirements](#requirements).
   CSS diameter stays separate from framebuffer density: the adapter applies
   device pixel ratio through the mapper at the final rendering boundary.
+  The controller owns residency and the adapter owns actors: `setVisible` is
+  a draw switch that keeps every actor alive (batches still apply while
+  hidden, so showing again restores exactly the submitted set), while
+  releasing a hidden cloud's tiles is the controller's `setActive(false)`.
 - **View governor** (`createViewGovernor`) — optional, one per view. Owns the
   point budget for every controller registered to that view and adapts it from
   measured host-frame timings, holding VTK to a fraction of the frame and
@@ -170,7 +301,10 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
 Camera math (`frustumPlanes`, `screenSpaceError`) is pure and
 renderer-agnostic: the controller takes a view-projection matrix and camera
 parameters as plain arrays, and requests renders only through an injected
-coalescing `scheduleRender` callback — the host owns render pacing.
+coalescing `scheduleRender` callback — the host owns render pacing. Both
+projections are first class: a perspective view shrinks a node's projected
+spacing with distance, a parallel one is set purely by `parallelScale`, so an
+orthographic camera refines on zoom rather than on approach.
 
 ## License
 

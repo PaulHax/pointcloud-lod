@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>pointcloud-lod vtk.js example</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main id="viewer"></main>
+    <section class="panel" aria-label="Point-cloud controls">
+      <header class="title-row">
+        <h1>pointcloud-lod</h1>
+        <span id="regime" class="regime" data-regime="idle">no cloud</span>
+      </header>
+
+      <label for="cloud-file">Local COPC file</label>
+      <input id="cloud-file" type="file" accept=".laz,.copc.laz" />
+
+      <div class="divider"><span>or</span></div>
+
+      <label for="cloud-url">COPC URL</label>
+      <div class="url-row">
+        <input
+          id="cloud-url"
+          type="url"
+          placeholder="https://example.com/cloud.copc.laz"
+          spellcheck="false"
+        />
+        <button id="load-url" type="button">Load</button>
+      </div>
+
+      <div class="field-grid">
+        <div>
+          <label for="budget-mode">Point budget</label>
+          <select id="budget-mode">
+            <option value="adaptive" selected>Adaptive</option>
+            <option value="fixed">Fixed</option>
+          </select>
+        </div>
+        <div>
+          <label for="projection">Projection</label>
+          <select id="projection">
+            <option value="perspective" selected>Perspective</option>
+            <option value="orthographic">Orthographic</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="fixed-controls" hidden>
+        <label for="point-budget">Fixed budget (points)</label>
+        <input
+          id="point-budget"
+          type="number"
+          min="1000"
+          step="100000"
+          value="2000000"
+        />
+      </div>
+
+      <div id="adaptive-controls">
+        <div class="field-grid">
+          <div>
+            <label for="moving-target">Moving target (ms)</label>
+            <input id="moving-target" type="number" min="1" step="1" value="16" />
+          </div>
+          <div>
+            <label for="stationary-target">Settled target (ms)</label>
+            <input
+              id="stationary-target"
+              type="number"
+              min="1"
+              step="1"
+              value="33"
+            />
+          </div>
+        </div>
+        <label for="max-points">Maximum budget (points, blank = memory only)</label>
+        <input
+          id="max-points"
+          type="number"
+          min="200000"
+          step="100000"
+          placeholder="none"
+        />
+      </div>
+
+      <output id="message" role="status">Choose a local COPC file or URL.</output>
+      <pre id="stats" aria-label="Streaming diagnostics"></pre>
+    </section>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
