@@ -163,7 +163,8 @@ export interface AdaptiveBudget {
   reduceNow(interacting: boolean, now: number, factor?: number): number;
   /**
    * Bound both tracks by a ceiling the loop must not integrate past — the
-   * memory-derived one, which moves as clouds come and go. `null` clears it.
+   * memory-derived one, which moves as clouds come and go. `null` clears it;
+   * a non-finite value is invalid input and leaves the ceiling untouched.
    * This is the same anti-windup role `maxBudget` plays: without it the loop
    * climbs toward frame-time headroom it can never spend, so it never reports
    * itself pinned and a host watching for convergence never idles.
@@ -186,6 +187,17 @@ export const DEFAULTS = {
   cooldownMs: 400,
   minSamples: 8,
 } as const;
+
+/**
+ * The largest budget any track may hold. A budget is a point count, so a value
+ * past exact integer representation is not one. It is also the loop's last
+ * anti-windup bound: a scene where extra points cost no frame time — a cloud
+ * smaller than its budget, or one already fully resident — otherwise grows the
+ * track for ever without a configured maximum or a reported memory ceiling, so
+ * the loop never reports itself pinned and a host watching for convergence
+ * never idles. This is a representability limit, not a quality policy.
+ */
+const MAX_POINTS = Number.MAX_SAFE_INTEGER;
 
 /**
  * Nearest-rank percentile of `values` (0..1). Does not mutate the input.
@@ -278,7 +290,9 @@ export const createAdaptiveBudget = (
   let ceiling = Number.POSITIVE_INFINITY;
 
   const clamp = (points: number): number =>
-    Math.round(Math.max(minBudget, Math.min(points, maxBudget, ceiling)));
+    Math.round(
+      Math.max(minBudget, Math.min(points, maxBudget, ceiling, MAX_POINTS)),
+    );
 
   const initialBudget = clamp(
     wholeAtLeast("initialBudget", options.initialBudget ?? DEFAULTS.initialBudget, 1),
@@ -397,7 +411,12 @@ export const createAdaptiveBudget = (
       const from = track.budget;
       track.budget = clamp(points);
       track.samples.length = 0;
-      track.lastAdjust = now;
+      // A restart is not an adjustment. Its window is empty, so `minSamples`
+      // is what makes the next decision wait for frames rendered under the new
+      // budget — and a cooldown baseline stamped here would come from whatever
+      // clock the caller happened to hold, not from the one frames are stamped
+      // with. Comparing those two epochs freezes the track for ever.
+      track.lastAdjust = Number.NEGATIVE_INFINITY;
       record(track, now, "none", "seeded", from, null);
       return track.budget;
     },
@@ -430,10 +449,16 @@ export const createAdaptiveBudget = (
       // appearing, then leaving — would otherwise erase what the loop had
       // learned and make it climb back from scratch each time. The next
       // adjustment walks the budget onto the ceiling and reports it pinned.
-      ceiling =
-        points === null || !Number.isFinite(points)
-          ? Number.POSITIVE_INFINITY
-          : Math.max(1, Math.floor(points));
+      if (points === null) {
+        ceiling = Number.POSITIVE_INFINITY;
+        return;
+      }
+      // `null` is the deliberate "no ceiling" signal. A non-finite number is
+      // not that signal, it is broken arithmetic upstream (a bytes-per-point
+      // division by zero, say), and the one thing it must never do is lift a
+      // memory bound: an invalid value leaves the ceiling exactly as it was.
+      if (!Number.isFinite(points)) return;
+      ceiling = Math.max(1, Math.floor(points));
     },
 
     stats() {

@@ -28,6 +28,13 @@ export interface HostFrameMetrics {
   readonly gpuMs?: number;
   readonly inputDelayMs?: number;
   readonly longTaskMs?: number;
+  /**
+   * When this frame was measured. Any epoch will do — `performance.now()`,
+   * `Date.now()`, a test clock — as long as the host stays on one of them:
+   * only differences matter, and the governor adopts whatever the host
+   * supplies as the timeline it stamps its own decisions with. Omitted means
+   * `Date.now()`.
+   */
   readonly now?: number;
 }
 
@@ -215,6 +222,17 @@ export const createViewGovernor = (
   let settleTimer: ReturnType<typeof setTimeout> | null = null;
   let emergencyCooldownUntil = Number.NEGATIVE_INFINITY;
 
+  /**
+   * The governor stamps cooldowns and restarts on the same timeline the host
+   * stamps its frames with. Mixing epochs — host frames on `performance.now()`
+   * against `Date.now()` stamps — makes every cooldown comparison meaningless:
+   * the tracks either freeze in permanent cooldown or never wait at all.
+   * `Date.now()` is only the fallback for a host that stamps nothing, and it
+   * is not monotonic either, which is the same hazard on a clock step.
+   */
+  let hostClock: number | null = null;
+  const stampNow = (): number => hostClock ?? Date.now();
+
   const moving = (): boolean => explicitMotion + inferredMotion > 0;
   const interacting = (): boolean => moving() || settling;
   const regime = (): BudgetRegime =>
@@ -329,7 +347,7 @@ export const createViewGovernor = (
       // regime just sustained, so releasing the camera changes nothing on
       // screen, and measures it fresh: samples taken while moving describe a
       // different regime and must not decide the next stationary step.
-      budget.restartAt(false, budget.budget(true), Date.now());
+      budget.restartAt(false, budget.budget(true), stampNow());
       distribute();
     }, interactionSettleMs);
   };
@@ -414,7 +432,7 @@ export const createViewGovernor = (
           // learned so this burst decides on its own frames. A motion source
           // holds its reference for the whole burst, so this runs once per
           // burst rather than once per frame.
-          budget.restartAt(true, budget.budget(true), Date.now());
+          budget.restartAt(true, budget.budget(true), stampNow());
           distribute();
         }
       }
@@ -432,7 +450,8 @@ export const createViewGovernor = (
 
     recordHostFrame(metrics) {
       if (disposed || !finiteNonNegative(metrics?.hostFrameMs)) return;
-      const now = finiteNonNegative(metrics.now) ? metrics.now : Date.now();
+      if (finiteNonNegative(metrics.now)) hostClock = metrics.now;
+      const now = stampNow();
       const candidates = [metrics.hostFrameMs];
       if (finiteNonNegative(metrics.vtkFrameMs)) {
         candidates.push(metrics.vtkFrameMs / vtkFrameFraction);

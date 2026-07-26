@@ -3,9 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createViewGovernor, type ViewGovernor } from "./viewGovernor";
 
 /**
- * One monotonic clock for both the governor's own `Date.now()` (settle timers)
- * and the timestamps frames are reported with: a frame stamped before the last
- * adjustment would read as a cooldown that never elapses.
+ * The clock frames are reported with. It tracks the fake timers so advancing
+ * them also advances the reported timeline — that is how a test lets a
+ * cooldown elapse — and it only ever moves forward, since a frame stamped
+ * before the last adjustment would read as a cooldown that never elapses.
  */
 let clock = 0;
 const tick = (): number => {
@@ -196,6 +197,45 @@ describe("createViewGovernor stationary refinement", () => {
     // target and must not decide the first stationary step.
     expect(stats.samples).toBe(0);
     expect(stats.lastAdjustment).toMatchObject({ reason: "seeded" });
+  });
+
+  it("adapts on a host clock that is not the wall clock", () => {
+    // `HostFrameMetrics.now` may be any epoch. A host that stamps frames with
+    // performance.now() — the clock it already measures frame time with —
+    // starts near 0 while the wall clock reads 1.7e12, so a governor that
+    // stamped its own decisions with Date.now() would compare the two and
+    // leave both tracks in a cooldown that never elapses.
+    vi.setSystemTime(1_700_000_000_000);
+    const governor = createViewGovernor({
+      initialBudget: 1_000_000,
+      interactionSettleMs: 750,
+    });
+    governor.register({ setPointBudget: vi.fn() }).update({
+      projectedImportance: 1,
+    });
+
+    let hostNow = 0;
+    const hostFrames = (count: number): void => {
+      for (let index = 0; index < count; index += 1) {
+        governor.recordHostFrame({ hostFrameMs: 2, now: hostNow });
+        hostNow += 16;
+      }
+    };
+
+    const gesture = governor.beginMotion("explicit");
+    hostFrames(200);
+    expect(governor.stats().regime).toBe("interaction");
+    // Wedged in a foreign-epoch cooldown, this budget never moves at all.
+    expect(governor.stats().trackBudget).toBeGreaterThan(1_000_000);
+
+    gesture.release();
+    vi.advanceTimersByTime(750);
+    const seeded = governor.stats().trackBudget;
+    hostFrames(400);
+    const stats = governor.stats();
+    expect(stats.regime).toBe("stationary");
+    expect(stats.trackBudget).toBeGreaterThan(seeded);
+    governor.dispose();
   });
 
   it("raises quality gradually while stationary frames are fast", () => {
@@ -618,6 +658,34 @@ describe("createViewGovernor ceilings", () => {
     const farStats = stats.members.find((member) => member.id === "far")!;
     expect(farStats.effectiveBudget).toBe(150_000);
     expect(farStats.activeConstraint).toBe("memory");
+  });
+
+  it("stops asking for frames when nothing reports a ceiling at all", () => {
+    // Every member report is optional: a member may only ever report its
+    // importance. With no configured maximum either, a scene where more
+    // points cost no frame time — one already fully resident, or smaller than
+    // its budget — must still converge instead of integrating for ever and
+    // repainting at full rate against a budget past exact integers.
+    const governor = createViewGovernor({ initialBudget: 1_000_000 });
+    const setPointBudget = vi.fn();
+    governor.register({ setPointBudget }).update({ projectedImportance: 1 });
+    moveAndSettle(governor, 750);
+
+    let rounds = 0;
+    while (governor.needsFrame() && rounds < 500) {
+      rounds += 1;
+      frames(governor, 2, 10);
+      vi.advanceTimersByTime(450);
+    }
+
+    expect(governor.needsFrame()).toBe(false);
+    const stats = governor.stats();
+    expect(stats.lastAdjustment?.reason).toBe("clamped");
+    expect(Number.isSafeInteger(stats.trackBudget)).toBe(true);
+    expect(Number.isSafeInteger(setPointBudget.mock.calls.at(-1)![0])).toBe(
+      true,
+    );
+    governor.dispose();
   });
 });
 

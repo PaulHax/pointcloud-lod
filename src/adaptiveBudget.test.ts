@@ -442,6 +442,44 @@ describe('createAdaptiveBudget numeric configuration', () => {
     ).toBe(800_000);
   });
 
+  it('ignores a non-finite ceiling instead of lifting the memory bound', () => {
+    const budget = createAdaptiveBudget({
+      ...OPTS,
+      initialBudget: 1_000_000,
+      cooldownMs: 0,
+    });
+    budget.setCeiling(400_000);
+    expect(feed(budget, 1, false, 12)).toBe(400_000);
+
+    // An invalid value is broken arithmetic upstream, never permission to
+    // spend more memory: it leaves the bound exactly where it was.
+    for (const value of NON_FINITE) {
+      budget.setCeiling(value);
+      expect(feed(budget, 1, false, 40)).toBe(400_000);
+    }
+
+    // `null` is the deliberate "no ceiling" signal and still clears it.
+    budget.setCeiling(null);
+    expect(feed(budget, 1, false, 40)).toBeGreaterThan(400_000);
+  });
+
+  it('stops growing at the largest representable point count', () => {
+    // Nothing configures a maximum and nothing reports a memory ceiling: on a
+    // scene where extra points cost no frame time the loop would otherwise
+    // integrate for ever, hand the host budgets past exact integer
+    // representation, and never report itself pinned.
+    const budget = createAdaptiveBudget({
+      ...OPTS,
+      initialBudget: 1_000_000,
+      cooldownMs: 0,
+    });
+    feed(budget, 1, false, 4000);
+    const stats = budget.stats().stationary;
+    expect(stats.budget).toBe(Number.MAX_SAFE_INTEGER);
+    expect(Number.isSafeInteger(stats.budget)).toBe(true);
+    expect(stats.lastAdjustment?.reason).toBe('clamped');
+  });
+
   it('ignores a non-finite emergency factor rather than poisoning the budget', () => {
     const budget = createAdaptiveBudget({ ...OPTS, initialBudget: 1_000_000 });
     expect(budget.reduceNow(false, 0, Number.NaN)).toBe(500_000);
