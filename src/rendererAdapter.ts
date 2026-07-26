@@ -1,10 +1,22 @@
 /**
  * vtk.js renderer adapter: consumes controller tile batches and manages one
- * vtkPolyData + vtkPointGaussianMapper + vtkActor per resident tile.
+ * vtkPolyData + vtkPointGaussianMapper + vtkActor per submitted tile.
  *
  * This is the only module in the library that imports '@kitware/vtk.js'.
  * The mapper renders each point as one gl.POINTS vertex (no cell topology),
  * so a tile's cost is exactly its point payload.
+ *
+ * Lifecycle contract — the controller owns residency, the adapter owns actors:
+ *
+ * - `applyBatch` is the only entry point that changes which tiles exist. A
+ *   batch is a disjoint delta against what the controller last submitted, so
+ *   an addition for a key already on screen means the payload was replaced.
+ * - `setVisible` is a draw switch and nothing else. Hiding keeps every actor
+ *   and its GPU resources so showing again is a pure state restore, and
+ *   batches keep applying while hidden (new actors are created invisible).
+ *   Freeing a hidden cloud is the controller's decision — `setActive(false)`
+ *   arrives here as removals — and `setResourceCeilingBytes` bounds whatever
+ *   the reuse pool still holds.
  *
  * The adapter never calls `renderWindow.render()`; every visual change goes
  * through the injected `scheduleRender`, which must coalesce (the host owns
@@ -81,12 +93,16 @@ export interface RendererAdapterOptions {
   diameterCssPx?: number;
   /** Initial CSS-to-framebuffer scale. Default 1. */
   devicePixelRatio?: number;
-  /** Initial visibility. Default true. */
+  /** Initial visibility. Default true. Tiles added while hidden stay hidden. */
   visible?: boolean;
 }
 
 export interface RendererAdapter {
-  /** Apply one controller batch (typically wired as `onTiles`). */
+  /**
+   * Apply one controller batch (typically wired as `onTiles`). Batches apply
+   * whether or not the adapter is visible; an addition for a key already on
+   * screen replaces that tile's payload.
+   */
   applyBatch(batch: TileBatch): void;
   /**
    * Anchor transform (column-major 16 floats, e.g. the scene actor's
@@ -95,17 +111,37 @@ export interface RendererAdapter {
   setBaseMatrix(matrix: ArrayLike<number> | null): void;
   setPointDiameterCssPx(diameterCssPx: number): void;
   setDevicePixelRatio(devicePixelRatio: number): void;
+  /**
+   * Draw switch only: hiding keeps every actor and its GPU resources, so
+   * showing again restores exactly the submitted set — including tiles that
+   * arrived while hidden. Releasing a hidden cloud's residency is the
+   * controller's call (`setActive(false)`, which arrives as removals).
+   */
   setVisible(visible: boolean): void;
   /** Set this adapter's allocation from the shared GPU-memory pool. */
   setResourceCeilingBytes(bytes: number): void;
-  /** Renderer-owned resource and active-draw accounting. */
+  /** Renderer-owned resource and draw accounting. */
   stats(): RendererAdapterStats;
   /** Remove and release every tile actor. Idempotent. */
   dispose(): void;
 }
 
+/**
+ * Three disjoint questions, three sets of fields: what the controller has
+ * submitted, what the reuse pool still holds, and what actually draws.
+ * `gpuResident*` is the sum of the first two — the resources this adapter
+ * owns, which is what a memory ceiling has to work from.
+ */
 export interface RendererAdapterStats {
-  /** Tiles with live polydata, mapper, and actor resources. */
+  /** Tiles matching the controller's submitted set; drawn while visible. */
+  readonly submittedTiles: number;
+  readonly submittedPoints: number;
+  readonly submittedBytes: number;
+  /** Retired tiles retained for same-key reuse; never drawn. */
+  readonly pooledTiles: number;
+  readonly pooledPoints: number;
+  readonly pooledBytes: number;
+  /** Submitted plus pooled: everything holding polydata/mapper/actor state. */
   readonly gpuResidentTiles: number;
   readonly gpuResidentPoints: number;
   /**
@@ -113,9 +149,10 @@ export interface RendererAdapterStats {
    * driver allocation overhead is not observable through WebGL.
    */
   readonly gpuResidentBytes: number;
-  /** Tiles and points whose actors currently participate in drawing. */
-  readonly activeDrawTiles: number;
-  readonly activeDrawPoints: number;
+  /** What participates in drawing: the submitted set, or nothing while hidden. */
+  readonly drawnTiles: number;
+  readonly drawnPoints: number;
+  readonly visible: boolean;
   readonly diameterCssPx: number;
   readonly devicePixelRatio: number;
 }
@@ -149,6 +186,10 @@ export const createRendererAdapter = (
   }
   let visible = options.visible ?? true;
   let baseMatrix: ArrayLike<number> = IDENTITY;
+  // A key lives in at most one of the two: removal moves its entry from
+  // `tiles` to `pendingRelease`, and a re-addition either takes that entry
+  // back or releases it. Nothing else may hold a reference to an entry, so
+  // teardown releases each actor exactly once.
   const tiles = new Map<string, TileActors>();
   const pendingRelease = new Map<string, TileActors>();
   let resourceCeilingBytes = 256 * 1024 * 1024;
@@ -199,13 +240,28 @@ export const createRendererAdapter = (
     entry.polyData.delete?.();
   };
 
-  const resourceBytes = (): number => {
+  /** Reuse is only sound while an entry still holds the payload being added. */
+  const holdsPayload = (entry: TileActors, tile: TileData): boolean =>
+    entry.positions === tile.positions && entry.rgb === tile.rgb;
+
+  const sumPoints = (entries: Iterable<TileActors>): number => {
+    let points = 0;
+    for (const entry of entries) points += entry.pointCount;
+    return points;
+  };
+
+  const sumBytes = (entries: Iterable<TileActors>): number => {
     let bytes = 0;
-    for (const entry of tiles.values()) bytes += entry.resourceBytes;
-    for (const entry of pendingRelease.values()) bytes += entry.resourceBytes;
+    for (const entry of entries) bytes += entry.resourceBytes;
     return bytes;
   };
 
+  const resourceBytes = (): number =>
+    sumBytes(tiles.values()) + sumBytes(pendingRelease.values());
+
+  // Only the pool is trimmable: the submitted set is what the controller
+  // decided fits its own memory ceiling, and dropping an actor from it would
+  // punch a hole nothing would ever refill (the controller sees no change).
   const trimPool = (additionalBytes = 0): void => {
     while (
       pendingRelease.size > 0 &&
@@ -237,16 +293,25 @@ export const createRendererAdapter = (
         changed = true;
       }
       for (const { key, tile } of batch.added) {
-        if (!visible) continue;
         const keyString = keyToString(key);
-        if (tiles.has(keyString)) continue;
+        const current = tiles.get(keyString);
+        if (current !== undefined) {
+          // Batches are disjoint deltas, so an addition for a key already on
+          // screen is a payload replacement — never a duplicate. Keeping the
+          // old actor would draw superseded points for the rest of the
+          // session, and its payload can never be reused, so it goes now.
+          if (holdsPayload(current, tile)) continue;
+          tiles.delete(keyString);
+          releaseTile(current);
+        }
         const stale = pendingRelease.get(keyString);
         if (stale !== undefined) {
           pendingRelease.delete(keyString);
-          if (stale.positions === tile.positions && stale.rgb === tile.rgb) {
+          if (holdsPayload(stale, tile)) {
+            stale.origin = tile.origin;
             stale.actor.getProperty().setPointSize(diameterCssPx);
             stale.mapper.setScaleFactor(devicePixelRatio);
-            stale.actor.setUserMatrix(tileMatrix(stale.origin));
+            stale.actor.setUserMatrix(tileMatrix(tile.origin));
             stale.actor.setVisibility(visible);
             tiles.set(keyString, stale);
             changed = true;
@@ -311,19 +376,11 @@ export const createRendererAdapter = (
     setVisible(nextVisible) {
       if (disposed || nextVisible === visible) return;
       visible = nextVisible;
-      if (!visible) {
-        // Hidden clouds own no GPU resources. Controller removal batches that
-        // follow this state change are harmless no-ops in the adapter.
-        for (const entry of tiles.values()) {
-          entry.actor.setVisibility(false);
-          releaseTile(entry);
-        }
-        for (const entry of pendingRelease.values()) releaseTile(entry);
-        tiles.clear();
-        pendingRelease.clear();
-      } else {
-        for (const entry of tiles.values()) entry.actor.setVisibility(true);
-      }
+      // Visibility is reversible on its own terms: hiding must not destroy
+      // state that only new controller batches could rebuild, or a show with
+      // no selection change behind it would leave the cloud blank forever.
+      // Pooled entries stay hidden either way — they are not submitted.
+      for (const entry of tiles.values()) entry.actor.setVisibility(visible);
       scheduleRender();
     },
 
@@ -334,20 +391,23 @@ export const createRendererAdapter = (
     },
 
     stats() {
-      let gpuResidentPoints = 0;
-      let gpuResidentBytes = 0;
-      for (const entry of [...tiles.values(), ...pendingRelease.values()]) {
-        gpuResidentPoints += entry.pointCount;
-        gpuResidentBytes += entry.resourceBytes;
-      }
-      let activeDrawPoints = 0;
-      for (const entry of tiles.values()) activeDrawPoints += entry.pointCount;
+      const submittedPoints = sumPoints(tiles.values());
+      const submittedBytes = sumBytes(tiles.values());
+      const pooledPoints = sumPoints(pendingRelease.values());
+      const pooledBytes = sumBytes(pendingRelease.values());
       return {
+        submittedTiles: tiles.size,
+        submittedPoints,
+        submittedBytes,
+        pooledTiles: pendingRelease.size,
+        pooledPoints,
+        pooledBytes,
         gpuResidentTiles: tiles.size + pendingRelease.size,
-        gpuResidentPoints,
-        gpuResidentBytes,
-        activeDrawTiles: visible ? tiles.size : 0,
-        activeDrawPoints: visible ? activeDrawPoints : 0,
+        gpuResidentPoints: submittedPoints + pooledPoints,
+        gpuResidentBytes: submittedBytes + pooledBytes,
+        drawnTiles: visible ? tiles.size : 0,
+        drawnPoints: visible ? submittedPoints : 0,
+        visible,
         diameterCssPx,
         devicePixelRatio,
       };
@@ -356,6 +416,8 @@ export const createRendererAdapter = (
     dispose() {
       if (disposed) return;
       disposed = true;
+      // Submitted and pooled entries are disjoint, so this releases every
+      // actor exactly once.
       for (const entry of tiles.values()) releaseTile(entry);
       for (const entry of pendingRelease.values()) releaseTile(entry);
       tiles.clear();
