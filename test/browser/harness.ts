@@ -139,6 +139,8 @@ export interface ExampleStats {
       targetRevision: number;
       targetTiles: number;
       targetPoints: number;
+      /** Selected tiles decoded nowhere — neither resident nor cached. */
+      targetUndecodedTiles: number;
       readyTerminalFrontier: {
         count: number;
         projectedSpacingCssPx: { p50: number | null; p75: number | null };
@@ -249,21 +251,38 @@ export interface ExampleSession {
 let sharedBrowser: Browser | null = null;
 
 /**
+ * True when `POINTCLOUD_LOD_BROWSER_GPU` asks for the machine's real GPU
+ * instead of SwiftShader. The stress matrix never needs it — nothing there
+ * asserts wall-clock speed — but a measurement run does: frame times taken
+ * under a software rasteriser describe SwiftShader, not the library.
+ */
+export const usingRealGpu = (): boolean =>
+  (process.env.POINTCLOUD_LOD_BROWSER_GPU ?? "") !== "";
+
+/**
  * One browser for the whole file. Launching Chromium costs far more than any
  * check in it, and a fresh page per check already isolates page state.
  */
 export const browser = async (): Promise<Browser> => {
   if (sharedBrowser === null) {
-    sharedBrowser = await chromium.launch({
-      args: [
-        // Headless Chromium has no GPU; SwiftShader rasterises WebGL in
-        // software. Recent builds refuse it for WebGL without the opt-in.
-        "--use-gl=angle",
-        "--use-angle=swiftshader",
-        "--enable-unsafe-swiftshader",
-        "--disable-dev-shm-usage",
-      ],
-    });
+    sharedBrowser = await chromium.launch(
+      usingRealGpu()
+        ? {
+            headless: false,
+            args: ["--disable-dev-shm-usage"],
+          }
+        : {
+            args: [
+              // Headless Chromium has no GPU; SwiftShader rasterises WebGL in
+              // software. Recent builds refuse it for WebGL without the
+              // opt-in.
+              "--use-gl=angle",
+              "--use-angle=swiftshader",
+              "--enable-unsafe-swiftshader",
+              "--disable-dev-shm-usage",
+            ],
+          },
+    );
   }
   return sharedBrowser;
 };
@@ -272,6 +291,13 @@ export const closeBrowser = async (): Promise<void> => {
   await sharedBrowser?.close();
   sharedBrowser = null;
 };
+
+/**
+ * The render viewport every session starts at: the browser's own default
+ * window, which is what these checks were written against back when the canvas
+ * filled it.
+ */
+export const DEFAULT_VIEWPORT: Viewport = { width: 1280, height: 720 };
 
 const POLL_INTERVAL_MS = 50;
 /** Selection is debounced, so convergence needs a quiet window, not an
@@ -383,7 +409,45 @@ export const openExample = async (
       await page.mouse.up();
     },
     resize: async (size) => {
-      await page.setViewportSize(size);
+      // `size` is the render viewport, not the browser window: the page's
+      // control panel is a column of the layout and takes its width out of the
+      // window, so the two differ. Every law under test is about the pixels
+      // selection is computed against, and each reads far better stated in
+      // those than in a window size carrying a panel-shaped offset.
+      //
+      // The window-to-viewport relation is linear in each axis, with a bend
+      // where the panel stops scaling, so two probes on one side of that bend
+      // land on the answer exactly. The first probe assumes no panel at all,
+      // which is right on the axis the panel does not touch.
+      let probe = { width: size.width, height: size.height };
+      let previous: { window: Viewport; seen: Viewport } | null = null;
+      let seen = await (async () => {
+        await page.setViewportSize(probe);
+        return session.viewport();
+      })();
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        if (seen.width === size.width && seen.height === size.height) break;
+        const next = { ...probe };
+        for (const axis of ["width", "height"] as const) {
+          if (seen[axis] === size[axis]) continue;
+          const spread = previous ? probe[axis] - previous.window[axis] : 0;
+          const slope =
+            spread === 0 ? 1 : (seen[axis] - previous!.seen[axis]) / spread;
+          next[axis] = Math.round(
+            probe[axis] + (size[axis] - seen[axis]) / (slope || 1),
+          );
+        }
+        previous = { window: probe, seen };
+        probe = next;
+        await page.setViewportSize(probe);
+        seen = await session.viewport();
+      }
+      if (seen.width !== size.width || seen.height !== size.height) {
+        throw new Error(
+          `no window size gives a ${size.width}x${size.height} viewport: ` +
+            `${probe.width}x${probe.height} leaves ${seen.width}x${seen.height}`,
+        );
+      }
       // The render window resizes off the window's own resize event, and the
       // controller only learns the new viewport height when a frame is drawn
       // against it.
@@ -515,6 +579,13 @@ export const openExample = async (
       await server.close();
     },
   };
+
+  // Every check is written against one render viewport — how much detail a
+  // budget buys, and how far a frame time can push it, are both counted in
+  // pixels — so the size is stated here rather than inherited from whatever
+  // the browser's default window leaves once the page's panel has taken its
+  // column.
+  await session.resize(DEFAULT_VIEWPORT);
 
   // The cloud is requested by the query string; wait for it to be readable
   // before handing the session over, so no check has to re-implement that.

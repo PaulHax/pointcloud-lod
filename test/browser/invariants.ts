@@ -28,9 +28,12 @@ const shown = (stats: ExampleStats): string => JSON.stringify(stats, null, 2);
  * while the physical counts only fall when the abandoned promise actually
  * settles. A leak of read slots shows up here and nowhere else.
  */
-export const assertLive = (stats: ExampleStats): void => {
+export const assertLive = (stats: ExampleStats): boolean => {
   const cloud = stats.controller;
-  if (cloud === null) return;
+  // No controller means nothing to assert — the caller must not count this
+  // sample toward any "the invariants were watched" guard, or a scenario that
+  // spent its whole run torn down would pass having checked nothing.
+  if (cloud === null) return false;
 
   expect(
     cloud.physicalTileOperations,
@@ -91,13 +94,14 @@ export const assertLive = (stats: ExampleStats): void => {
       Number.isFinite(view.trackBudget),
       `the governor's budget stopped being a finite number\n${shown(stats)}`,
     ).toBe(true);
-    if (view.memoryCeilingPoints !== null) {
-      expect(
-        view.trackBudget,
-        `the governor grew past the memory ceiling\n${shown(stats)}`,
-      ).toBeLessThanOrEqual(view.memoryCeilingPoints);
-    }
+    // No live `trackBudget <= memoryCeilingPoints` here: `setCeiling`
+    // deliberately leaves an already-learned budget above a ceiling that just
+    // fell (a second member registering shrinks every share), and only the
+    // next adjustment walks it down. Asserting the bound between those two
+    // moments reports the library's documented behaviour as a defect. The
+    // settled tier owns the comparison, after the loop has had its frames.
   }
+  return true;
 };
 
 /**
@@ -193,10 +197,14 @@ export const watching = async <T>(
     while (running) {
       const stats = await session.stats().catch(() => null);
       if (stats !== null) {
-        samples += 1;
         try {
-          assertLive(stats);
+          // Count only samples that asserted something: a null controller is
+          // skipped inside assertLive, and counting it would let a `samples >
+          // 0` guard be satisfied by a scenario that watched nothing. A throw
+          // still counts — the invariants ran, they just failed.
+          if (assertLive(stats)) samples += 1;
         } catch (error) {
+          samples += 1;
           failure ??= error;
           // Keep sampling: stopping here would race the body's own teardown.
         }
@@ -221,10 +229,11 @@ export const watching = async <T>(
     return { result, samples, peak };
   } catch (error) {
     running = false;
-    await sampler;
-    // The body's own failure wins. Rethrowing the sampler's instead would
-    // hide every assertion inside the watched block behind whichever live
-    // bound happened to be unhappy at the same moment.
+    // The body's own failure wins. The sampler's rejection is swallowed too:
+    // `waitForTimeout` rejects when the page died, which is precisely when the
+    // body has the error worth reading, and letting the sampler's rejection
+    // propagate here would replace it.
+    await sampler.catch(() => {});
     throw error;
   }
 };

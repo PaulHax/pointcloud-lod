@@ -79,7 +79,11 @@ interface Extremes {
   readonly physicalTiles: number;
   readonly inFlight: number;
   readonly fetchConcurrency: number;
-  /** Smallest margin seen between what selection wanted and what was decoded. */
+  /**
+   * Worst deficit seen between what selection wanted and what was decoded —
+   * the controller's own per-selection count, not a global difference, which
+   * tiles decoded for other selections would mask to zero.
+   */
   readonly undecodedTiles: number;
 }
 
@@ -102,7 +106,7 @@ const extend = (seen: Extremes, stats: ExampleStats): Extremes => {
     fetchConcurrency: Math.min(seen.fetchConcurrency, cloud.fetchConcurrency),
     undecodedTiles: Math.max(
       seen.undecodedTiles,
-      cloud.selection.targetTiles - cloud.decodedTiles,
+      cloud.selection.targetUndecodedTiles,
     ),
   };
 };

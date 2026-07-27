@@ -20,20 +20,30 @@
  */
 
 import { promises as fs } from "node:fs";
-import { resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 import {
   closeBrowser,
   cloudsUnderTest,
   openExample,
+  usingRealGpu,
   type ExampleSession,
   type ExampleStats,
 } from "../test/browser/harness";
 
 const OUT = resolve(
-  process.argv[2] ??
-    "/tmp/claude-1000/-home-paulhax-src-tele/e35fcdef-3c6f-4d2f-a60d-abd251745070/scratchpad/measurements",
+  process.argv[2] ?? join(tmpdir(), "pointcloud-lod-measurements"),
 );
+
+/**
+ * What the frame-time columns actually measured. Under the default
+ * SwiftShader launch they describe a software rasteriser and say nothing
+ * about the library on real hardware; set `POINTCLOUD_LOD_BROWSER_GPU=1` for
+ * numbers a report can stand behind. Recorded into the report so a table can
+ * never be quoted without its provenance.
+ */
+const GL_MODE = usingRealGpu() ? "real-gpu" : "swiftshader-software";
 
 /** How long the moving regime is held before the camera stops. */
 const MOVING_MS = 20_000;
@@ -53,6 +63,8 @@ const percentile = (values: number[], fraction: number): number | null => {
 
 interface Track {
   frameMs: number[];
+  /** Last `lastFrameMs` value taken, so polling cannot re-count one paint. */
+  lastSeenFrameMs: number;
   budgets: { atMs: number; regime: string; budget: number }[];
   peaks: {
     physicalTileOperations: number;
@@ -66,6 +78,7 @@ interface Track {
 
 const emptyTrack = (): Track => ({
   frameMs: [],
+  lastSeenFrameMs: 0,
   budgets: [],
   peaks: {
     physicalTileOperations: 0,
@@ -80,7 +93,14 @@ const emptyTrack = (): Track => ({
 const observe = (track: Track, stats: ExampleStats, atMs: number): void => {
   const cloud = stats.controller;
   if (cloud === null) return;
-  if (stats.lastFrameMs > 0) track.frameMs.push(stats.lastFrameMs);
+  // `lastFrameMs` is a gauge: it holds one paint's duration until the next
+  // paint replaces it. The poll runs every 50 ms, so pushing it every poll
+  // would weight each frame by how long it lasted — a "p90" over that series
+  // describes wall-clock occupancy, not frames. One sample per new value.
+  if (stats.lastFrameMs > 0 && stats.lastFrameMs !== track.lastSeenFrameMs) {
+    track.lastSeenFrameMs = stats.lastFrameMs;
+    track.frameMs.push(stats.lastFrameMs);
+  }
   if (stats.governor !== null) {
     track.budgets.push({
       atMs,
@@ -113,6 +133,7 @@ const sampleUntil = async (
   session: ExampleSession,
   track: Track,
   start: number,
+  label: string,
   done: (stats: ExampleStats) => boolean,
   timeoutMs: number,
 ): Promise<ExampleStats> => {
@@ -124,7 +145,12 @@ const sampleUntil = async (
     if (done(last)) return last;
     await session.page.waitForTimeout(50);
   }
-  return last;
+  // A run that never converged must not be written into the report as if it
+  // had: every column downstream of this sample would silently describe an
+  // arbitrary moment mid-stream.
+  throw new Error(
+    `timed out after ${timeoutMs} ms waiting for ${label}\n${JSON.stringify(last, null, 2)}`,
+  );
 };
 
 const measure = async (
@@ -149,6 +175,7 @@ const measure = async (
       session,
       load,
       start,
+      "the first drawn points",
       (stats) => (stats.adapter?.drawnPoints ?? 0) > 0,
       120_000,
     );
@@ -158,6 +185,7 @@ const measure = async (
       session,
       load,
       start,
+      "load convergence",
       (stats) =>
         stats.controller !== null &&
         stats.controller.physicalTileOperations === 0 &&
@@ -195,6 +223,7 @@ const measure = async (
       session,
       stationary,
       start,
+      "stationary convergence",
       (stats) =>
         stats.governor !== null &&
         stats.governor.regime === "stationary" &&
@@ -264,7 +293,7 @@ const main = async (): Promise<void> => {
   }
   await closeBrowser();
 
-  const report = { measuredAt: new Date().toISOString(), results };
+  const report = { measuredAt: new Date().toISOString(), gl: GL_MODE, results };
   await fs.writeFile(
     `${OUT}/measurements.json`,
     `${JSON.stringify(report, null, 2)}\n`,
@@ -288,8 +317,14 @@ const main = async (): Promise<void> => {
       ].join(" | "),
     ),
   ].join("\n");
-  await fs.writeFile(`${OUT}/measurements.md`, `${table}\n`);
-  process.stdout.write(`\n${table}\n\nwrote ${OUT}\n`);
+  const glNote =
+    GL_MODE === "real-gpu"
+      ? "Frame-time columns measured on the machine's real GPU."
+      : "Frame-time columns measured under SwiftShader (software rasteriser) " +
+        "and describe it, not the library on real hardware; set " +
+        "POINTCLOUD_LOD_BROWSER_GPU=1 for reportable numbers.";
+  await fs.writeFile(`${OUT}/measurements.md`, `${table}\n\n${glNote}\n`);
+  process.stdout.write(`\n${table}\n\n${glNote}\n\nwrote ${OUT}\n`);
 };
 
 await main();
