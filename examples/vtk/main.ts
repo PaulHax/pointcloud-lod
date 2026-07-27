@@ -62,6 +62,7 @@ const pointBudgetInput = element<HTMLInputElement>("#point-budget");
 const movingTargetInput = element<HTMLInputElement>("#moving-target");
 const stationaryTargetInput = element<HTMLInputElement>("#stationary-target");
 const maxPointsInput = element<HTMLInputElement>("#max-points");
+const resetViewButton = element<HTMLButtonElement>("#reset-view");
 const regimeBadge = element<HTMLElement>("#regime");
 const message = element<HTMLOutputElement>("#message");
 const stats = element<HTMLElement>("#stats");
@@ -635,6 +636,9 @@ const updateDiagnostics = (): void => {
  */
 let clippingDirty = true;
 
+/** Where loading the current cloud framed it, so the view can go back. */
+let framing: { center: number[]; radius: number } | null = null;
+
 const scheduleRender = (): void => {
   if (frameQueued) return;
   frameQueued = true;
@@ -731,6 +735,7 @@ const disposeCloud = (): void => {
   adapter = null;
   loadedName = "";
   loadedPointCount = 0;
+  framing = null;
   // Framing the next cloud is not motion the user asked for.
   lastRenderedView = null;
 };
@@ -775,9 +780,20 @@ const frameRoot = async (source: TileSource): Promise<void> => {
   const low = usable ? min : [...root.bounds.min];
   const high = usable ? max : [...root.bounds.max];
 
-  const center = low.map((value, axis) => (value + high[axis]!) / 2);
-  const span = high.map((value, axis) => value - low[axis]!);
-  const radius = Math.max(Math.hypot(...span) / 2, 1e-6);
+  framing = {
+    center: low.map((value, axis) => (value + high[axis]!) / 2),
+    radius: Math.max(
+      Math.hypot(...high.map((value, axis) => value - low[axis]!)) / 2,
+      1e-6,
+    ),
+  };
+  applyFraming();
+};
+
+/** Put the camera back where loading the current cloud put it. */
+const applyFraming = (): void => {
+  if (framing === null) return;
+  const { center, radius } = framing;
   // Far enough back that a sphere of that radius fits the vertical field.
   const distance = radius / Math.tan((VIEW_ANGLE / 2) * RADIANS);
   const elevation = START_ELEVATION * RADIANS;
@@ -940,6 +956,15 @@ fileInput.addEventListener("change", () => {
   urlInput.value = "";
   showInAddressBar(null);
   void loadSource(file.name, localFileSource(file));
+});
+
+resetViewButton.addEventListener("click", () => {
+  if (framing === null) return;
+  applyFraming();
+  // The controller selects against the camera it was last given, so the new
+  // one has to reach it before the next frame is drawn against the old one.
+  controller?.setCamera(cameraView());
+  scheduleRender();
 });
 
 loadUrlButton.addEventListener("click", loadUrl);
