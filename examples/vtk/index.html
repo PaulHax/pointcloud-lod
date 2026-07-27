@@ -8,7 +8,6 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main id="viewer"></main>
     <section class="panel" aria-label="Point-cloud controls">
       <header class="title-row">
         <h1>pointcloud-lod</h1>
@@ -95,8 +94,9 @@
       </div>
 
       <output id="message" role="status">Choose a local COPC file or URL.</output>
-      <pre id="stats" aria-label="Streaming diagnostics"></pre>
+      <div id="stats" aria-label="Streaming diagnostics"></div>
     </section>
+    <main id="viewer"></main>
     <script type="module" src="./main.ts"></script>
   </body>
 </html>

@@ -333,20 +333,24 @@ const movedBeyondJitter = (previous: number, next: number): boolean =>
  * World-to-clip entries describing where the camera is looking, row-major as
  * `cameraView()` transposes it (index = row * 4 + column).
  *
- * The clip-z row (8, 9, 10, 11) is deliberately left out, exactly as the
- * bridge leaves out its own: a host folds a depth remap derived from the
- * scene's visible bounds into that row, so a tile arriving or being evicted
- * rewrites those four numbers while the camera stands perfectly still. Every
- * camera move shows up in the x, y and w rows; the one motion that lives only
- * in clip z — dollying an orthographic camera along its view axis — shows up
- * in the eye point instead, which is compared alongside.
+ * The clip-z row is deliberately left out, exactly as the bridge leaves out
+ * its own: a host folds a depth remap derived from the scene's visible bounds
+ * into that row, so a tile arriving or being evicted rewrites those four
+ * numbers while the camera stands perfectly still. Every camera move shows up
+ * in the x, y and w rows; the one motion that lives only in clip z — dollying
+ * an orthographic camera along its view axis — shows up in the eye point
+ * instead, which is compared alongside.
+ *
+ * `viewProj` is column-major (`index = column * 4 + row`), so the clip-z row
+ * is entries 2, 6, 10 and 14 — not 8..11, which are column 2 and move under
+ * ordinary rotation.
  *
  * This page hands the projection a fixed z range, so the row never moves here
  * and excluding it changes nothing on screen. It is here because the example
  * exists to show a host what to implement, and a host reading its own
  * composite matrix will have the remap folded in.
  */
-const MOTION_MATRIX_INDICES = [0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 15];
+const MOTION_MATRIX_INDICES = [0, 1, 3, 4, 5, 7, 8, 9, 11, 12, 13, 15];
 
 /** Everything about the camera that changes what LOD selects. */
 const motionScalars = (view: CameraView): number[] => [
@@ -486,104 +490,110 @@ const points = (value: number): string => Math.round(value).toLocaleString();
 const millis = (value: number | null): string =>
   value === null ? "—" : `${value.toFixed(1)} ms`;
 const mib = (bytes: number): string => `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
-const row = (name: string, value: string): string =>
-  `${name.padEnd(15)}${value}`;
+/**
+ * One diagnostics line, kept as label and value rather than as padded text.
+ *
+ * The panel refreshes ten times a second, and every value in it changes width
+ * as it changes: a wrapped line would reflow the rows below it and the table
+ * would never sit still long enough to read. Laying the two out as columns
+ * that clip instead of wrap fixes every row's position for as long as the
+ * section's shape holds.
+ */
+type StatRow = { label: string; value: string };
+type StatSection = { title: string; rows: StatRow[] };
 
-const governorLines = (view: ViewGovernorStats): string[] => {
+const row = (label: string, value: string): StatRow => ({ label, value });
+
+const governorLines = (view: ViewGovernorStats): StatSection => {
   const cloud = view.members[0] ?? null;
   const adjustment = view.lastAdjustment;
-  return [
-    "BUDGET CHAIN",
-    row(
-      "regime",
-      `${view.regime}${view.motion.settling ? " (settling)" : ""}`,
-    ),
-    row(
-      "motion",
-      `${view.motion.source ?? "none"} — explicit ${
-        view.motion.explicitReferences
-      }, inferred ${view.motion.inferredReferences}`,
-    ),
-    row("target", millis(view.targetFrameTimeMs)),
-    row("estimate", `${millis(view.estimateMs)} of ${view.samples} samples`),
-    row("track budget", points(view.trackBudget)),
-    row(
-      "maximum",
-      view.configuredMaxPoints === null
-        ? "none configured"
-        : points(view.configuredMaxPoints),
-    ),
-    row(
-      "memory ceiling",
-      view.memoryCeilingPoints === null
-        ? "not reported"
-        : points(view.memoryCeilingPoints),
-    ),
-    row("aggregate", points(view.aggregateBudget)),
-    row(
-      "cloud share",
-      cloud
-        ? `${points(cloud.effectiveBudget)} (${cloud.activeConstraint})`
-        : "no member registered",
-    ),
-    row("constraint", view.activeConstraint),
-    row(
-      "adjustment",
-      adjustment
-        ? `${adjustment.direction}/${adjustment.reason} ` +
-            `${points(adjustment.fromBudget)} → ${points(adjustment.toBudget)}`
-        : "none yet",
-    ),
-    row(
-      "physical work",
-      `${view.physicalTileOperations} tile, ` +
-        `${view.physicalHierarchyOperations} hierarchy`,
-    ),
-    row("needs frame", view.needsFrame ? "yes" : "no"),
-  ];
+  return {
+    title: "Budget chain",
+    rows: [
+      row("regime", `${view.regime}${view.motion.settling ? " settling" : ""}`),
+      row("motion", view.motion.source ?? "none"),
+      row(
+        "references",
+        `${view.motion.explicitReferences} explicit, ` +
+          `${view.motion.inferredReferences} inferred`,
+      ),
+      row("target", millis(view.targetFrameTimeMs)),
+      row("estimate", `${millis(view.estimateMs)} of ${view.samples}`),
+      row("track budget", points(view.trackBudget)),
+      row(
+        "maximum",
+        view.configuredMaxPoints === null
+          ? "none configured"
+          : points(view.configuredMaxPoints),
+      ),
+      row(
+        "memory ceiling",
+        view.memoryCeilingPoints === null
+          ? "not reported"
+          : points(view.memoryCeilingPoints),
+      ),
+      row("aggregate", points(view.aggregateBudget)),
+      row("cloud share", cloud ? points(cloud.effectiveBudget) : "no member"),
+      row("constraint", view.activeConstraint),
+      row(
+        "adjustment",
+        adjustment
+          ? `${adjustment.direction} · ${adjustment.reason}`
+          : "none yet",
+      ),
+      row(
+        "moved budget",
+        adjustment
+          ? `${points(adjustment.fromBudget)} → ${points(adjustment.toBudget)}`
+          : "—",
+      ),
+      row(
+        "physical work",
+        `${view.physicalTileOperations} tile, ` +
+          `${view.physicalHierarchyOperations} page`,
+      ),
+      row("needs frame", view.needsFrame ? "yes" : "no"),
+    ],
+  };
 };
 
-const cloudLines = (): string[] => {
+const cloudLines = (): StatSection | null => {
   const cloud = controller?.stats();
   const drawn = adapter?.stats();
-  if (!cloud || !drawn) return [];
+  if (!cloud || !drawn) return null;
   const { selection } = cloud;
-  return [
-    "CLOUD",
-    row("source", `${loadedName} (${points(loadedPointCount)} points)`),
-    row(
-      "selection",
-      `${points(selection.targetPoints)} points in ` +
-        `${selection.targetTiles} tiles`,
-    ),
-    row("point budget", points(cloud.pointBudget)),
-    row("importance", selection.projectedImportance.toFixed(2)),
-    row(
-      "resident",
-      `${points(cloud.residentPoints)} points, ${cloud.residentTiles} tiles`,
-    ),
-    row(
-      "decoded",
-      `${mib(cloud.decodedBytes)} (${cloud.cachedTiles} cached tiles)`,
-    ),
-    row(
-      "tile work",
-      `${cloud.inFlight} wanted, ${cloud.queuedTiles} queued, ` +
-        `${cloud.physicalTileOperations} physical`,
-    ),
-    row(
-      "page work",
-      `${cloud.hierarchyInFlight} wanted, ${cloud.queuedPages} queued, ` +
-        `${cloud.physicalHierarchyOperations} physical`,
-    ),
-    row(
-      "drawn",
-      `${points(drawn.drawnPoints)} points, ${drawn.drawnTiles} tiles`,
-    ),
-    row("gpu", `${mib(drawn.gpuResidentBytes)} resident`),
-    row("point diameter", `${drawn.diameterCssPx.toFixed(2)} css px`),
-    row("last frame", millis(lastFrameMs)),
-  ];
+  return {
+    title: "Cloud",
+    rows: [
+      row("source", loadedName),
+      row("points", points(loadedPointCount)),
+      row(
+        "selection",
+        `${points(selection.targetPoints)} in ${selection.targetTiles} tiles`,
+      ),
+      row("point budget", points(cloud.pointBudget)),
+      row("importance", selection.projectedImportance.toFixed(2)),
+      row(
+        "resident",
+        `${points(cloud.residentPoints)} in ${cloud.residentTiles} tiles`,
+      ),
+      row("decoded", `${mib(cloud.decodedBytes)} in ${cloud.cachedTiles}`),
+      row(
+        "tile work",
+        `${cloud.inFlight} wanted, ${cloud.queuedTiles} queued, ` +
+          `${cloud.physicalTileOperations} physical`,
+      ),
+      row(
+        "page work",
+        `${cloud.hierarchyInFlight} wanted, ${cloud.queuedPages} queued, ` +
+          `${cloud.physicalHierarchyOperations} physical`,
+      ),
+      row("drawn", `${points(drawn.drawnPoints)} in ${drawn.drawnTiles} tiles`),
+      row("gpu", `${mib(drawn.gpuResidentBytes)} resident`),
+      row("point diameter", `${drawn.diameterCssPx.toFixed(2)} css px`),
+      row("last frame", millis(lastFrameMs)),
+    ],
+  };
 };
 
 const updateRegimeBadge = (view: ViewGovernorStats | null): void => {
@@ -604,16 +614,61 @@ const updateRegimeBadge = (view: ViewGovernorStats | null): void => {
       : "settled";
 };
 
+/**
+ * Values are written into elements that already exist, and the table is only
+ * rebuilt when its rows actually differ — otherwise ten rebuilds a second
+ * would drop any text the reader had selected, and would lose the tooltip on
+ * whichever row they were hovering.
+ */
+let renderedShape = "";
+const renderedValues = new Map<string, HTMLElement>();
+
+const renderStats = (sections: StatSection[]): void => {
+  const shape = sections
+    .map(({ title, rows }) => `${title}:${rows.map((r) => r.label).join(",")}`)
+    .join("|");
+  if (shape !== renderedShape) {
+    renderedShape = shape;
+    renderedValues.clear();
+    stats.replaceChildren(
+      ...sections.flatMap(({ title, rows }) => {
+        const heading = document.createElement("h2");
+        heading.textContent = title;
+        const grid = document.createElement("dl");
+        for (const { label } of rows) {
+          const name = document.createElement("dt");
+          name.textContent = label;
+          const value = document.createElement("dd");
+          renderedValues.set(`${title}/${label}`, value);
+          grid.append(name, value);
+        }
+        return [heading, grid];
+      }),
+    );
+  }
+  for (const { title, rows } of sections) {
+    for (const { label, value } of rows) {
+      const cell = renderedValues.get(`${title}/${label}`);
+      if (!cell || cell.textContent === value) continue;
+      cell.textContent = value;
+      // The column clips rather than wraps, so the full text has to stay
+      // reachable for the rows that overflow it — a source URL, mostly.
+      cell.title = value;
+    }
+  }
+};
+
 const updateDiagnostics = (): void => {
   const view = governor?.stats() ?? null;
   updateRegimeBadge(view);
-  const sections = [
-    view
-      ? governorLines(view)
-      : ["BUDGET CHAIN", row("mode", "fixed (no view governor)")],
-    cloudLines(),
-  ].filter((lines) => lines.length > 0);
-  stats.textContent = sections.map((lines) => lines.join("\n")).join("\n\n");
+  renderStats(
+    [
+      view
+        ? governorLines(view)
+        : { title: "Budget chain", rows: [row("mode", "fixed budget")] },
+      cloudLines(),
+    ].filter((section): section is StatSection => section !== null),
+  );
 };
 
 // ---------------------------------------------------------------------------
@@ -1018,26 +1073,24 @@ setInterval(updateDiagnostics, DIAGNOSTICS_INTERVAL_MS);
 
 const OPEN_LIDAR = "https://open-lidar-data.s3.eu-central-1.amazonaws.com/data";
 
-/** Public COPC clouds, all CORS-enabled and served over HTTP ranges. */
+/**
+ * Public COPC clouds, all CORS-enabled and served over HTTP ranges.
+ *
+ * Every one carries colour. Intensity-only surveys — Dublin City, SoFi
+ * Stadium — stream just as well but render as a white mass, which shows the
+ * example's point off worse than a smaller cloud that you can actually read.
+ */
 const HOSTED_SCENES: { label: string; url: string }[] = [
   {
-    label: "Dublin City — 98M pts, 394/m², no colour (CC-BY-4.0)",
-    url: `${OPEN_LIDAR}/IE/NYU_EDU/Dublin_City_2015/copc/T_316000_233500.copc.laz`,
-  },
-  {
-    label: "SoFi Stadium — 364M pts, no colour (CC-BY-4.0)",
-    url: "https://hobu-lidar.s3.amazonaws.com/sofi.copc.laz",
-  },
-  {
-    label: "Luxembourg — 16M pts, 65/m², colour (CC0)",
+    label: "Luxembourg city — 16M pts, 65/m² (CC0)",
     url: `${OPEN_LIDAR}/LU/Gouvernement_LUX/Lidar_2019/copc/LIDAR2019_NdP_54500_98500_EPSG2169.copc.laz`,
   },
   {
-    label: "Autzen Stadium — 11M pts, colour (CC-BY-4.0)",
+    label: "Autzen Stadium — 11M pts (CC-BY-4.0)",
     url: "https://s3.amazonaws.com/hobu-lidar/autzen-classified.copc.laz",
   },
   {
-    label: "Luxembourg village — 163k pts, colour (CC0)",
+    label: "Luxembourg village — 163k pts (CC0)",
     url: `${OPEN_LIDAR}/LU/Gouvernement_LUX/Lidar_2019/copc/LIDAR2019_NdP_100000_82500_EPSG2169.copc.laz`,
   },
 ];
