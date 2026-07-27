@@ -449,16 +449,37 @@ export const createAdaptiveBudget = (
       // appearing, then leaving — would otherwise erase what the loop had
       // learned and make it climb back from scratch each time. The next
       // adjustment walks the budget onto the ceiling and reports it pinned.
+      const previous = ceiling;
       if (points === null) {
         ceiling = Number.POSITIVE_INFINITY;
-        return;
+      } else {
+        // `null` is the deliberate "no ceiling" signal. A non-finite number
+        // is not that signal, it is broken arithmetic upstream (a
+        // bytes-per-point division by zero, say), and the one thing it must
+        // never do is lift a memory bound: an invalid value leaves the
+        // ceiling exactly as it was.
+        if (!Number.isFinite(points)) return;
+        ceiling = Math.max(1, Math.floor(points));
       }
-      // `null` is the deliberate "no ceiling" signal. A non-finite number is
-      // not that signal, it is broken arithmetic upstream (a bytes-per-point
-      // division by zero, say), and the one thing it must never do is lift a
-      // memory bound: an invalid value leaves the ceiling exactly as it was.
-      if (!Number.isFinite(points)) return;
-      ceiling = Math.max(1, Math.floor(points));
+      // A budget pinned at the old ceiling recorded "clamped", which reads as
+      // converged and lets the host stop repainting — correct until the bound
+      // it was pinned to moves. When the ceiling rises meaningfully past such
+      // a budget (a member leaving returns its memory share), clear the stale
+      // verdict so `needsFrame()` asks for the frames refinement needs. Only
+      // an actual rise qualifies — a track clamped with the ceiling already
+      // infinite is pinned at some other bound this change cannot lift — and
+      // the margin keeps bytes-per-point jitter, which nudges the ceiling
+      // every tile, from re-arming an adjustment loop with nothing to gain.
+      if (ceiling > previous) {
+        for (const track of [stationary, interaction]) {
+          if (
+            track.lastAdjustment?.reason === "clamped" &&
+            ceiling > track.budget * (1 + hysteresis)
+          ) {
+            track.lastAdjustment = null;
+          }
+        }
+      }
     },
 
     stats() {

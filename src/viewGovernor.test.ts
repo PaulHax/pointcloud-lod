@@ -482,8 +482,84 @@ describe("createViewGovernor emergency response", () => {
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
     const setBudget = vi.fn();
     governor.register({ setPointBudget: setBudget });
+    // The emergency cut only runs in the moving regime, so hold a motion
+    // reference: without one the mild-delay assertion passes whatever the
+    // threshold says, because the branch under test is never reached.
+    const motion = governor.beginMotion("explicit");
     governor.recordHostFrame({ hostFrameMs: 5, inputDelayMs: 20, now: tick() });
     expect(setBudget).not.toHaveBeenCalledWith(500_000);
+    // The same frame with a severe delay must cut — this is what proves the
+    // mild case exercised a live branch rather than a skipped one.
+    governor.recordHostFrame({ hostFrameMs: 5, inputDelayMs: 80, now: tick() });
+    expect(setBudget).toHaveBeenCalledWith(500_000);
+    motion.release();
+  });
+
+  it("keeps the moving window across bursts inside the settle window", () => {
+    const governor = createViewGovernor({
+      initialBudget: 1_000_000,
+      interactionSettleMs: 100,
+      minSamples: 8,
+      cooldownMs: 0,
+    });
+    const setBudget = vi.fn();
+    governor.register({ setPointBudget: setBudget });
+    // Eight begin/release pairs with one fast frame each — the shape wheel
+    // ticks and scrub steps arrive in. Restarting the moving track on every
+    // burst would clear its window before `minSamples` frames could ever
+    // accumulate, so the moving regime would never adapt at all.
+    for (let burst = 0; burst < 8; burst += 1) {
+      const motion = governor.beginMotion("explicit");
+      governor.recordHostFrame({ hostFrameMs: 5, now: tick() });
+      motion.release();
+      vi.advanceTimersByTime(50);
+    }
+    // The eighth burst's frame completes the window: 5 ms against the 16 ms
+    // moving target grows by the +25% step cap.
+    expect(setBudget).toHaveBeenLastCalledWith(1_250_000);
+  });
+
+  it("does not reselect for ceiling jitter smaller than the dead-band", () => {
+    const governor = createViewGovernor({ initialBudget: 1_000_000 });
+    const setBudget = vi.fn();
+    const member = governor.register({ setPointBudget: setBudget });
+    member.update({ memoryCeilingPoints: 900_000 });
+    expect(setBudget).toHaveBeenLastCalledWith(900_000);
+    const applied = setBudget.mock.calls.length;
+    // The reported ceiling is derived from measured bytes-per-point, which
+    // drifts a fraction of a percent with every tile that lands or leaves.
+    // Applying each drift would run a synchronous reselection per frame.
+    for (let index = 0; index < 20; index += 1) {
+      member.update({
+        memoryCeilingPoints: 900_000 + (index % 2 === 0 ? 800 : -800),
+      });
+    }
+    expect(setBudget.mock.calls.length).toBe(applied);
+    // A move past the band still applies immediately.
+    member.update({ memoryCeilingPoints: 700_000 });
+    expect(setBudget).toHaveBeenLastCalledWith(700_000);
+  });
+
+  it("resumes stationary refinement when a ceiling rise returns headroom", () => {
+    const governor = createViewGovernor({
+      initialBudget: 1_000_000,
+      minSamples: 1,
+      cooldownMs: 0,
+    });
+    const setBudget = vi.fn();
+    const member = governor.register({ setPointBudget: setBudget });
+    member.update({ memoryCeilingPoints: 500_000 });
+    // Fast frames walk the budget onto the ceiling; once pinned, the track
+    // reports "clamped", which is convergence for as long as the bound stands.
+    frames(governor, 5, 3);
+    expect(governor.stats().needsFrame).toBe(false);
+    // The bound moves — another cloud left the view and its share came back.
+    // A governor that still reads "clamped" as converged would never ask for
+    // the frame that lets refinement use the returned headroom.
+    member.update({ memoryCeilingPoints: 2_000_000 });
+    expect(governor.stats().needsFrame).toBe(true);
+    frames(governor, 5, 2);
+    expect(setBudget.mock.calls.at(-1)![0]).toBeGreaterThan(500_000);
   });
 
   it("accounts for VTK's configured share of the complete host frame", () => {

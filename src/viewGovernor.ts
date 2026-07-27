@@ -190,6 +190,16 @@ interface MemberState {
  */
 const MIN_SHARE_OF_EVEN_SPLIT = 0.25;
 
+/**
+ * A member's share moves with its memory ceiling, and the ceiling is derived
+ * from measured bytes-per-point, which shifts a little with every tile that
+ * lands or leaves. Applying a share is a synchronous, undebounced reselection
+ * in the controller, so a change has to be worth one before it is applied.
+ * Shares are recomputed from the fresh aggregate every pass, so skipped drift
+ * accumulates and is applied once it crosses the band rather than being lost.
+ */
+const DISTRIBUTE_DEADBAND = 0.01;
+
 export const createViewGovernor = (
   options: ViewGovernorOptions = {},
 ): ViewGovernor => {
@@ -327,6 +337,17 @@ export const createViewGovernor = (
             Math.max(1, Math.floor(total / active.length))
         : 0;
       if (next === member.budget) continue;
+      // Deactivation (0) and first assignment always apply; between live
+      // budgets, jitter smaller than the dead-band is not worth the
+      // reselection it would trigger. `member.budget` keeps the applied
+      // value, so the skipped drift stays visible to the next comparison.
+      if (
+        member.budget > 0 &&
+        next > 0 &&
+        Math.abs(next - member.budget) < member.budget * DISTRIBUTE_DEADBAND
+      ) {
+        continue;
+      }
       member.budget = next;
       member.setPointBudget(next);
     }
@@ -425,14 +446,19 @@ export const createViewGovernor = (
         if (kind === "explicit") explicitMotion += 1;
         else inferredMotion += 1;
         if (explicitMotion + inferredMotion === 1) {
+          // Motion that resumes inside the settle window is the same burst
+          // for sampling purposes: wheel ticks and scrub steps arrive as many
+          // short begin/release pairs, and restarting the track on every one
+          // would clear its window faster than `minSamples` frames can fill
+          // it — the moving regime would never adapt at all. Only motion that
+          // begins from genuine stationary rest restarts the track: those
+          // samples measured a scene and a load that have since moved on.
+          const resuming = settling;
           clearSettle();
           settling = false;
-          // The moving track's samples are from the previous burst of motion;
-          // the scene and the load have moved on. Restart it at the density it
-          // learned so this burst decides on its own frames. A motion source
-          // holds its reference for the whole burst, so this runs once per
-          // burst rather than once per frame.
-          budget.restartAt(true, budget.budget(true), stampNow());
+          if (!resuming) {
+            budget.restartAt(true, budget.budget(true), stampNow());
+          }
           distribute();
         }
       }

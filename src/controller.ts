@@ -195,6 +195,14 @@ export interface LodSelectionStats {
   readonly targetRevision: number;
   readonly targetTiles: number;
   readonly targetPoints: number;
+  /**
+   * Selected tiles with no decoded payload anywhere — neither resident nor in
+   * the CPU cache. Read live at `stats()` time, not snapshotted at selection:
+   * it is the number that says whether quiet I/O is explained by everything
+   * already being decoded, which a global decoded count cannot (tiles decoded
+   * for other selections mask the deficit).
+   */
+  readonly targetUndecodedTiles: number;
   readonly consideredNodes: number;
   readonly availableNodes: number;
   readonly selectedNodes: number;
@@ -243,7 +251,10 @@ export interface LodController {
   endInteraction(): void;
   /**
    * Set the visible-point budget, truncated to whole points; the memory
-   * ceiling still caps it. Anything below one point is ignored.
+   * ceiling still caps it. Zero means draw nothing — it is the share a view
+   * governor assigns a deactivated member, and rejecting it would leave the
+   * previous budget silently in force while diagnostics report zero.
+   * Negative and non-finite values are ignored.
    */
   setPointBudget(points: number): void;
   /**
@@ -646,7 +657,7 @@ export const createLodController = (
   let target: ReadonlySet<string> = new Set<string>();
   let targetRevision = 0;
   let selectionGeneration = 0;
-  let selectionStats: LodSelectionStats = {
+  let selectionStats: Omit<LodSelectionStats, "targetUndecodedTiles"> = {
     generation: 0,
     targetRevision: 0,
     targetTiles: 0,
@@ -1359,7 +1370,7 @@ export const createLodController = (
     },
 
     setPointBudget(points) {
-      if (disposed || outOfRange(points, 1)) return;
+      if (disposed || outOfRange(points, 0)) return;
       pointBudget = Math.floor(points);
       runSelection();
     },
@@ -1490,7 +1501,19 @@ export const createLodController = (
         cachedTiles: cache.count(),
         cacheBytes,
         refinementCutoffPx,
-        selection: selectionStats,
+        selection: {
+          ...selectionStats,
+          // Live, not a selection-time snapshot: how many selected tiles have
+          // no decoded payload anywhere (neither resident nor cached). This
+          // is the number that distinguishes "the burst issued no reads
+          // because everything it wanted was already decoded" from "it
+          // wanted tiles it does not hold and read nothing" — a global
+          // decoded count cannot, because tiles decoded for *other*
+          // selections mask the deficit.
+          targetUndecodedTiles: [...target].filter(
+            (keyString) => !resident.has(keyString) && !cache.has(keyString),
+          ).length,
+        },
       };
     },
 

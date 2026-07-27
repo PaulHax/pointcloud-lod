@@ -460,6 +460,15 @@ describe("createLodController", () => {
       cachedTiles: 3,
       memoryBudgetBytes: 0,
     });
+    // Deactivation is when the cache ceiling matters: the GPU-pool share just
+    // fell to zero while the payloads stayed. The stats must report the LRU's
+    // own bound, and the contents must honour it — this is the invariant the
+    // browser stress scenarios watch, locked here so `cacheBytes` cannot be
+    // dropped from `stats()` without a unit failure.
+    const deactivated = controller.stats();
+    expect(deactivated.cacheBytes).toBe(256 * 1024 * 1024);
+    expect(deactivated.cachedBytes).toBeGreaterThan(0);
+    expect(deactivated.cachedBytes).toBeLessThanOrEqual(deactivated.cacheBytes);
     expect(batches.flatMap((batch) => batch.removed)).toHaveLength(3);
 
     // Camera changes while hidden update the stored view but cannot submit or
@@ -1967,10 +1976,14 @@ describe("createLodController — bounded physical work", () => {
     }
 
     // Fully settled means no hole: every selected tile is on screen, and no
-    // key was ever read twice.
+    // key was ever read twice. The lower bounds are what keep this from
+    // passing vacuously: a broken page path that selects nothing satisfies
+    // every dedup assertion with an empty call list.
     const stats = controller.stats();
+    expect(stats.selection.targetTiles).toBeGreaterThan(0);
     expect(stats.residentTiles).toBe(stats.selection.targetTiles);
     expect(visible.size).toBe(stats.residentTiles);
+    expect(graph.tileCalls.length).toBeGreaterThanOrEqual(stats.residentTiles);
     expect(new Set(graph.tileCalls).size).toBe(graph.tileCalls.length);
     expect(violations).toEqual([]);
     controller.dispose();
@@ -2132,7 +2145,53 @@ describe("createLodController — bounded physical work", () => {
         await settle();
       }
     }
+    // The ceilings only mean something if work actually ran up against them:
+    // an implementation that issued nothing at all satisfies every
+    // upper-bound assertion in the loop.
+    expect(graph.pageCalls.length).toBeGreaterThan(0);
+    expect(graph.tileCalls.length).toBeGreaterThan(0);
     expect(violations).toEqual([]);
+    controller.dispose();
+  });
+
+  it("accepts a zero point budget as draw nothing", async () => {
+    const graph = createPageGraphSource({
+      depth: 1,
+      branching: 2,
+      pointsPerNode: 5,
+    });
+    const { controller, visible } = makeScheduled(graph);
+    await settle();
+    controller.setCamera(VIEW);
+    await drainPages(graph);
+    let round = 0;
+    while (
+      round < 50 &&
+      (controller.stats().queuedTiles > 0 || graph.activeTiles().length > 0)
+    ) {
+      round += 1;
+      graph.landTiles();
+      await settle();
+    }
+    expect(controller.stats().residentTiles).toBeGreaterThan(0);
+
+    // Zero is the share a view governor hands a deactivated member. Rejecting
+    // it would keep the previous budget silently in force while the
+    // governor's diagnostics report the member draws nothing.
+    controller.setPointBudget(0);
+    await settle();
+    expect(controller.stats().selection.targetTiles).toBe(0);
+    expect(controller.stats().residentTiles).toBe(0);
+    expect(visible.size).toBe(0);
+
+    // And back: the payloads waited in the cache, so restoring the budget
+    // restores the picture without a single new read.
+    const readsBefore = graph.tileCalls.length;
+    controller.setPointBudget(1_000_000);
+    await settle();
+    expect(controller.stats().residentTiles).toBeGreaterThan(0);
+    expect(visible.size).toBeGreaterThan(0);
+    expect(graph.tileCalls.length).toBe(readsBefore);
     controller.dispose();
   });
 
@@ -2223,7 +2282,9 @@ describe("createLodController — numeric configuration", () => {
     const before = controller.stats();
     expect(before.residentTiles).toBe(3);
 
-    for (const value of [...NON_FINITE, 0, -1, -1e9]) {
+    // Zero is not in this list: it is a valid budget meaning "draw nothing",
+    // the share a governor hands a deactivated member.
+    for (const value of [...NON_FINITE, -1, -1e9]) {
       controller.setPointBudget(value);
       const after = controller.stats();
       expect(after.pointBudget).toBe(before.pointBudget);

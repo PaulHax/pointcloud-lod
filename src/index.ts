@@ -67,14 +67,19 @@ export {
 
 // The adaptive budget loop is the view governor's internal. Only the types
 // that appear in the governor's own surface are re-exported.
-export type {
-  AdaptiveBudgetOptions,
-  AdaptiveBudgetStats,
-  AdaptiveBudgetTrackStats,
-  BudgetAdjustment,
-  BudgetAdjustmentDirection,
-  BudgetAdjustmentReason,
-  BudgetRegime,
+export {
+  // The adaptive policy's numbers are part of the public contract: a host
+  // that validates a configured maximum against the floor must read the floor
+  // from here, not restate it — a restated copy drifts the first time the
+  // policy moves.
+  DEFAULTS,
+  type AdaptiveBudgetOptions,
+  type AdaptiveBudgetStats,
+  type AdaptiveBudgetTrackStats,
+  type BudgetAdjustment,
+  type BudgetAdjustmentDirection,
+  type BudgetAdjustmentReason,
+  type BudgetRegime,
 } from "./adaptiveBudget";
 
 export {
