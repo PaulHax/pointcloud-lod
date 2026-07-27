@@ -1,15 +1,24 @@
 /**
- * The two view inputs a host changes underneath a running selection: the size
- * of the canvas, and the projection the camera declares.
+ * The three view inputs a host changes underneath a running selection: the size
+ * of the canvas, the projection the camera declares, and the ratio of
+ * framebuffer pixels to CSS pixels it draws at.
  *
- * Neither is a drawing-only property. Detail is chosen against the viewport's
- * CSS height and against the projection mode, so a height that never reaches
- * selection is invisible in every settled state — the view goes on choosing
- * detail for a viewport that no longer exists and looks perfectly converged
- * doing it. The comparisons here therefore hold everything else still: two
- * viewports of the same aspect at one camera differ in nothing but how many
- * pixels a world unit projects to, and a projection round trip returns the
- * camera it started from.
+ * The first two are not drawing-only properties. Detail is chosen against the
+ * viewport's CSS height and against the projection mode, so a height that never
+ * reaches selection is invisible in every settled state — the view goes on
+ * choosing detail for a viewport that no longer exists and looks perfectly
+ * converged doing it. The comparisons here therefore hold everything else
+ * still: two viewports of the same aspect at one camera differ in nothing but
+ * how many pixels a world unit projects to, and a projection round trip returns
+ * the camera it started from.
+ *
+ * The ratio is the one that is drawing-only, and so the one with nowhere to
+ * show up except the scene. The adapter leaves the point diameter on the actor
+ * property in CSS pixels and hands the ratio to the mapper as its scale factor;
+ * the fork's point-gaussian shader multiplies the two into `gl_PointSize`. A
+ * ratio that reached the adapter's field but neither actor nor mapper is a
+ * change nothing draws, so the checks below read it off the scene the renderer
+ * will draw with rather than off the field it was stored in.
  */
 
 import { afterAll, describe, expect, it } from "vitest";
@@ -21,6 +30,7 @@ import {
   type CloudUnderTest,
   type ExampleSession,
   type ExampleStats,
+  type SceneReading,
   type Viewport,
 } from "./harness";
 import { settleAndAssert, watching } from "./invariants";
@@ -46,12 +56,74 @@ const rootProjectedSpacing = (stats: ExampleStats): number =>
 
 type AdapterReport = NonNullable<ExampleStats["adapter"]> & {
   readonly devicePixelRatio: number;
+  /** The uniform diameter the controller's presentation policy asked for. */
+  readonly diameterCssPx: number;
 };
 
 const drawingRatio = (stats: ExampleStats): number =>
   (stats.adapter! as AdapterReport).devicePixelRatio;
 
+const drawingDiameterCssPx = (stats: ExampleStats): number =>
+  (stats.adapter! as AdapterReport).diameterCssPx;
+
 const shown = (stats: ExampleStats): string => JSON.stringify(stats, null, 2);
+
+/**
+ * What one point will be drawn at, in framebuffer pixels, read off the actor
+ * and the mapper the renderer holds.
+ *
+ * The two halves are not interchangeable. The adapter leaves the actor property
+ * in CSS pixels (`setPointSize(diameterCssPx)`) and gives the ratio to the
+ * mapper (`setScaleFactor(devicePixelRatio)`), and the shader assigns
+ * `gl_PointSize = getPointSize() * getScaleFactor()`. This product is the whole
+ * of what a ratio change may move, and the CSS half is the whole of what it
+ * must leave alone — an adapter that premultiplied the ratio into the actor
+ * property as well would draw every point ratio-squared too large.
+ */
+const drawnDiameterDevicePx = (scene: SceneReading): number =>
+  scene.pointSizeDevicePx! * scene.mapperScaleFactor!;
+
+/**
+ * The scene's own account of the ratio, and the renderer's own count of what
+ * holds it.
+ *
+ * `scene()` reports the renderer's first actor, which is the oldest one it
+ * still holds — actors are appended and removal preserves order. The reuse pool
+ * holds actors the renderer owns but never draws and which a ratio change is
+ * not required to reach, so this states that the pool is empty before reading:
+ * otherwise an undrawn actor's stale numbers would be reported as the scene's.
+ */
+const assertSceneDrawsAtRatio = async (
+  session: ExampleSession,
+  stats: ExampleStats,
+  ratio: number,
+): Promise<number> => {
+  const scene = await session.scene();
+  // The renderer's count, not the adapter's: a leaked actor is subtracted from
+  // every number the adapter reports and from none of the ones here.
+  expect(
+    scene.actors,
+    `the renderer and the adapter disagree about how many actors exist\n${shown(stats)}`,
+  ).toBe(stats.adapter!.gpuResidentTiles);
+  expect(
+    scene.actors,
+    `nothing is on screen to be drawn at a ratio\n${shown(stats)}`,
+  ).toBeGreaterThan(0);
+  expect(
+    stats.adapter!.pooledTiles,
+    `an undrawn pooled actor may be the one the scene reports\n${shown(stats)}`,
+  ).toBe(0);
+
+  expect(
+    scene.mapperScaleFactor,
+    `the mapper the renderer draws with is not scaling to ${ratio}\n${shown(stats)}`,
+  ).toBe(ratio);
+  expect(
+    scene.pointSizeDevicePx,
+    `the actor's point size is no longer the CSS diameter\n${shown(stats)}`,
+  ).toBe(drawingDiameterCssPx(stats));
+  return drawnDiameterDevicePx(scene);
+};
 
 /** Scale-free, because a cloud's coordinates may be metres or eastings. */
 const relativeGap = (a: number, b: number): number =>
@@ -79,6 +151,20 @@ const RESIZE_SWEEP: readonly Viewport[] = [
 
 /** A range of ratios, and back, so the sweep has to undo as well as apply. */
 const RATIO_SWEEP: readonly number[] = [1, 2, 3, 1];
+
+/**
+ * The same journey for the drawn size, with the fractional ratios real displays
+ * actually report — a ratio that only ever arrives as a small integer can be
+ * carried by a rounding step and never noticed.
+ */
+const DRAWN_RATIO_SWEEP: readonly number[] = [1.5, 2, 3, 1.25, 1];
+
+/**
+ * Two more ratios for the ordering checks, neither of them 1 and neither of
+ * them each other, so no step can pass by leaving the ratio where it was.
+ */
+const FRESH_ACTOR_RATIO = 3;
+const ARRIVING_ACTOR_RATIO = 2;
 
 /**
  * One aspect ratio, two heights. Equal aspect keeps the composite projection
@@ -175,6 +261,63 @@ const compareHeights = async (session: ExampleSession): Promise<void> => {
     short.controller!.selection.targetTiles,
     `the shorter viewport selected more tiles\n${shown(short)}`,
   ).toBeLessThanOrEqual(tall.controller!.selection.targetTiles);
+};
+
+/**
+ * How long a load has to hold still, with tiles on screen and no read of any
+ * kind outstanding, before it counts as finished arriving. The harness uses the
+ * same window to call a run converged, and for the same reason: selection is
+ * debounced, so an idle instant is not the end of the stream.
+ */
+const ARRIVAL_QUIET_MS = 400;
+/** Loads to spend looking for the window before calling it unreachable. */
+const MID_STREAM_ATTEMPTS = 4;
+
+/**
+ * Reload the cloud and return the first state with tiles already on screen and
+ * reads still outstanding — the one moment a ratio change has both populations
+ * of actor to reach at once.
+ *
+ * Polled with no pause between reads, and reloaded rather than waited on when a
+ * load finishes without showing the window. The committed fixture is nine tiles
+ * over a loopback socket: its whole arrival can pass inside a single 50 ms
+ * polling step, and once a load has converged the window does not come back.
+ */
+const loadUntilMidStream = async (
+  session: ExampleSession,
+  cloud: CloudUnderTest,
+): Promise<ExampleStats> => {
+  for (let attempt = 0; attempt < MID_STREAM_ATTEMPTS; attempt += 1) {
+    await session.load(cloud.urlPath);
+    const deadline = Date.now() + SETTLE_MS;
+    let quietSince: number | null = null;
+    while (Date.now() < deadline) {
+      const stats = await session.stats();
+      const held = stats.controller!;
+      // Hierarchy reads count: a page still on its way is more tiles still on
+      // their way, and on a multi-page cloud that is most of the stream.
+      const outstanding =
+        held.queuedTiles +
+        held.inFlight +
+        held.physicalTileOperations +
+        held.queuedPages +
+        held.physicalHierarchyOperations;
+      const onScreen = stats.adapter?.submittedTiles ?? 0;
+      if (onScreen > 0 && outstanding > 0) return stats;
+      if (outstanding > 0) {
+        quietSince = null;
+        continue;
+      }
+      quietSince ??= Date.now();
+      // Tiles on screen and nothing outstanding for a whole quiet window: this
+      // load has finished arriving, and the moment it never showed will not
+      // turn up now.
+      if (onScreen > 0 && Date.now() - quietSince >= ARRIVAL_QUIET_MS) break;
+    }
+  }
+  throw new Error(
+    `no load of ${cloud.name} was caught with tiles on screen and more still arriving`,
+  );
 };
 
 /** Alternating modes; the last one is where the churn lands. */
@@ -278,6 +421,14 @@ describe("a viewport that changes under a running selection", () => {
                 stats.adapter!.gpuResidentTiles,
                 `GPU tiles grew at device pixel ratio ${ratio}\n${shown(stats)}`,
               ).toBeLessThanOrEqual(held.gpuResidentTiles);
+              // The adapter's own numbers cannot see an actor it stopped
+              // tracking, and a rebuilt-actor implementation of the ratio is
+              // exactly how one gets abandoned in the renderer. The renderer's
+              // count can.
+              expect(
+                (await session.scene()).actors,
+                `the renderer holds actors the adapter has lost at device pixel ratio ${ratio}\n${shown(stats)}`,
+              ).toBe(stats.adapter!.gpuResidentTiles);
             }
           },
         );
@@ -292,6 +443,140 @@ describe("a viewport that changes under a running selection", () => {
           (await session.keys()).adapter?.submitted,
           `the ratio sweep changed which tiles are held\n${shown(settled)}`,
         ).toEqual(baselineKeys.adapter?.submitted);
+        expect(session.failures).toEqual([]);
+      } finally {
+        await session.close();
+      }
+    });
+  }
+});
+
+describe("a device pixel ratio that changes under a drawn scene", () => {
+  for (const cloud of cloudsUnderTest()) {
+    it(`scales what the renderer draws by the ratio and the CSS diameter by nothing: ${cloud.name}`, async () => {
+      const session = await openFixedBudget(cloud);
+      try {
+        const baseline = await settleAndAssert(session, SETTLE_MS);
+        const baselineCssPx = drawingDiameterCssPx(baseline);
+        const baselineRatio = drawingRatio(baseline);
+        const baselineDrawn = await assertSceneDrawsAtRatio(
+          session,
+          baseline,
+          baselineRatio,
+        );
+
+        const { samples } = await watching(
+          session,
+          SAMPLE_INTERVAL_MS,
+          async () => {
+            for (const ratio of DRAWN_RATIO_SWEEP) {
+              await session.setDevicePixelRatio(ratio);
+              await session.frame();
+              const stats = await session.stats();
+              const drawn = await assertSceneDrawsAtRatio(
+                session,
+                stats,
+                ratio,
+              );
+
+              // The camera never moves here, so the diameter the presentation
+              // policy asked for is fixed for the whole sweep. The ratio is
+              // only allowed to multiply it: a ratio that fed back into the
+              // CSS diameter would change how large a point looks on a display
+              // that did not change.
+              expect(
+                drawingDiameterCssPx(stats),
+                `the device pixel ratio moved the CSS point diameter\n${shown(stats)}`,
+              ).toBe(baselineCssPx);
+
+              // The law itself, stated against the scene rather than against
+              // the field the ratio was stored in: what reaches the shader is
+              // proportional to the ratio, exactly.
+              expect(
+                drawn / baselineDrawn,
+                `the drawn point size did not follow the ratio to ${ratio}\n${shown(stats)}`,
+              ).toBeCloseTo(ratio / baselineRatio, 10);
+            }
+          },
+        );
+        expect(
+          samples,
+          "the sampler never read the run it was watching",
+        ).toBeGreaterThan(0);
+
+        // The sweep ends where it started, so the scene has to have undone
+        // every step as well as applied it.
+        const settled = await settleAndAssert(session, SETTLE_MS);
+        expect(
+          await assertSceneDrawsAtRatio(session, settled, 1),
+          `the scene did not come back to the diameter it started at\n${shown(settled)}`,
+        ).toBeCloseTo(baselineCssPx, 10);
+        expect(session.failures).toEqual([]);
+      } finally {
+        await session.close();
+      }
+    });
+
+    it(`draws actors it already had and actors that arrive later at one ratio: ${cloud.name}`, async () => {
+      const session = await openFixedBudget(cloud);
+      try {
+        await settleAndAssert(session, SETTLE_MS);
+
+        // First the ordering with nothing to update: deactivating hands this
+        // cloud's share of the GPU pool back, which releases the reuse pool as
+        // well as the drawn set, so the ratio is stated against an empty
+        // renderer and every actor that comes back is built under it. A ratio
+        // the adapter only ever applied to the actors it had at the time never
+        // reaches these.
+        await session.setActive(false);
+        await session.until(
+          "the renderer to hold nothing",
+          (stats) => (stats.adapter?.gpuResidentTiles ?? 1) === 0,
+          SETTLE_MS,
+        );
+        expect(
+          (await session.scene()).actors,
+          "an actor outlived the residency that owned it",
+        ).toBe(0);
+        await session.setDevicePixelRatio(FRESH_ACTOR_RATIO);
+        await session.setActive(true);
+        const rebuilt = await settleAndAssert(session, SETTLE_MS);
+        expect(
+          rebuilt.adapter!.submittedTiles,
+          `the cloud never came back to be drawn\n${shown(rebuilt)}`,
+        ).toBeGreaterThan(0);
+        await assertSceneDrawsAtRatio(session, rebuilt, FRESH_ACTOR_RATIO);
+
+        // Then the ordering that mixes both populations: a ratio changed while
+        // tiles are still arriving has to reach the actors already on screen
+        // and the actors the outstanding reads have yet to create. A fresh load
+        // is what makes tiles physically arrive again — reactivation restores
+        // them from the decoded cache in a single batch, with no window to land
+        // in — and it builds a new adapter at the page's own ratio, so the
+        // change below is a change for every actor either way.
+        const { result: arrived } = await watching(
+          session,
+          SAMPLE_INTERVAL_MS,
+          async () => {
+            const midflight = await loadUntilMidStream(session, cloud);
+            await session.setDevicePixelRatio(ARRIVING_ACTOR_RATIO);
+            const settled = await settleAndAssert(session, SETTLE_MS);
+            // Says the staging happened: tiles genuinely landed after the
+            // change, so the settled scene is a mixture and not one population
+            // asserted twice.
+            expect(
+              settled.adapter!.submittedTiles,
+              `no tile arrived after the ratio changed, so nothing here was created under it\n${shown(settled)}`,
+            ).toBeGreaterThan(midflight.adapter!.submittedTiles);
+            return settled;
+          },
+        );
+
+        // The renderer reports its oldest surviving actor, which is one that
+        // predated the change; the count above says the rest were created after
+        // it. Both populations answer with the same ratio, so neither the
+        // update loop nor the actor the adapter builds has been left behind.
+        await assertSceneDrawsAtRatio(session, arrived, ARRIVING_ACTOR_RATIO);
         expect(session.failures).toEqual([]);
       } finally {
         await session.close();

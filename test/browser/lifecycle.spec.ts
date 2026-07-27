@@ -28,6 +28,7 @@ import {
   type ExampleKeys,
   type ExampleSession,
   type ExampleStats,
+  type SceneReading,
 } from "./harness";
 import { settleAndAssert, watching } from "./invariants";
 
@@ -59,6 +60,53 @@ const withReadLatency = async (session: ExampleSession): Promise<void> => {
   );
 };
 
+/** One consistent picture of both sides and of the renderer itself. */
+interface Snapshot {
+  stats: ExampleStats;
+  keys: ExampleKeys;
+  scene: SceneReading;
+}
+
+/**
+ * Read the adapter's accounting and the renderer's own actor collection in a
+ * single page task.
+ *
+ * The two have to be compared, and while reads are in flight a batch lands
+ * between any two round trips — so three separate reads would be three
+ * different moments, and the comparison would fail on the tiles that arrived
+ * between them rather than on anything the switch under test did.
+ *
+ * The actor count is the reading nothing else can stand in for: every number
+ * in `stats()` comes from the adapter, so an actor the adapter no longer knows
+ * about is missing from all of them and present only here.
+ */
+const snapshot = (session: ExampleSession): Promise<Snapshot> =>
+  session.page.evaluate(() => {
+    const api = (
+      window as never as {
+        pointCloudExample: {
+          stats(): ExampleStats;
+          keys(): ExampleKeys;
+          scene(): SceneReading;
+        };
+      }
+    ).pointCloudExample;
+    return { stats: api.stats(), keys: api.keys(), scene: api.scene() };
+  });
+
+/**
+ * What the renderer holds is the adapter's submitted set plus its reuse pool:
+ * a retired actor stays in the renderer, hidden, until the pool is trimmed to
+ * `resourceCeilingBytes`. The example puts nothing else in the scene, so this
+ * is exact — anything above it is an actor no live adapter would remove again.
+ */
+const assertRendererHoldsOnlyItsOwn = (view: Snapshot, when: string): void => {
+  expect(
+    view.scene.actors,
+    `${when}: the renderer holds actors the adapter does not account for\n${shown(view)}`,
+  ).toBe(view.stats.adapter!.submittedTiles + view.stats.adapter!.pooledTiles);
+};
+
 /**
  * Reload the cloud and flip one switch at the first instant the controller is
  * both drawing tiles and still reading more.
@@ -72,13 +120,14 @@ const withReadLatency = async (session: ExampleSession): Promise<void> => {
 const reloadAndInterrupt = (
   session: ExampleSession,
   options: { url: string; flip: "hide" | "deactivate"; pollMs: number },
-): Promise<{ stats: ExampleStats; keys: ExampleKeys }> =>
+): Promise<Snapshot> =>
   session.page.evaluate(async ({ url, flip, pollMs }) => {
     const api = (
       window as never as {
         pointCloudExample: {
           stats(): ExampleStats;
           keys(): ExampleKeys;
+          scene(): SceneReading;
           load(target: string): Promise<void>;
           setVisible(visible: boolean): void;
           setActive(active: boolean): void;
@@ -99,9 +148,12 @@ const reloadAndInterrupt = (
         (stats.adapter?.submittedTiles ?? 0) > 0
       ) {
         const keys = api.keys();
+        // Read in the same task as the flip, so it is what the flip
+        // interrupted rather than what the page had drifted to since.
+        const scene = api.scene();
         if (flip === "hide") api.setVisible(false);
         else api.setActive(false);
-        return { stats, keys };
+        return { stats, keys, scene };
       }
       await new Promise((done) => setTimeout(done, pollMs));
     }
@@ -219,6 +271,11 @@ describe("a cloud hidden while it is still decoding tiles", () => {
         expect(atHide.stats.controller!.physicalTileOperations).toBeGreaterThan(0);
         expect(atHide.stats.adapter!.visible).toBe(true);
         expect(atHide.stats.adapter!.drawnTiles).toBeGreaterThan(0);
+        assertRendererHoldsOnlyItsOwn(atHide, "at the hide");
+        expect(
+          atHide.scene.actors,
+          `the renderer held no actors to hide\n${shown(atHide.scene)}`,
+        ).toBeGreaterThan(0);
 
         // Hiding is a draw switch: the renderer must still hold every actor it
         // held a moment ago, and only stop drawing them.
@@ -237,6 +294,17 @@ describe("a cloud hidden while it is still decoding tiles", () => {
           ),
           `hiding released tiles the renderer was holding\n${shown(justHiddenKeys)}`,
         ).toEqual([]);
+        // The same claim about the renderer rather than about the adapter's
+        // account of it. Reads are still in flight, so the count may only have
+        // grown — an actor removed from the scene by a hide is the failure,
+        // and it is one the adapter's own numbers would not show if the hide
+        // had detached the actor without telling the adapter.
+        const hiddenNow = await snapshot(session);
+        expect(
+          hiddenNow.scene.actors,
+          `hiding took actors out of the renderer\n${shown({ atHide: atHide.scene, hiddenNow })}`,
+        ).toBeGreaterThanOrEqual(atHide.scene.actors);
+        assertRendererHoldsOnlyItsOwn(hiddenNow, "just after the hide");
 
         const hidden = await watching(session, SAMPLE_INTERVAL_MS, async () => {
           // The reads the switch interrupted have to land in the renderer
@@ -278,6 +346,9 @@ describe("a cloud hidden while it is still decoding tiles", () => {
           `nothing arrived while hidden, so the restore proves nothing\n${shown(beforeShow)}`,
         ).toBeGreaterThan(0);
 
+        // Everything has converged, so both sides of the show are read from a
+        // quiet page and the actor count can be compared exactly.
+        const beforeShowScene = (await snapshot(session)).scene;
         await session.setVisible(true);
         await session.frame();
         const restored = await session.stats();
@@ -307,6 +378,45 @@ describe("a cloud hidden while it is still decoding tiles", () => {
         );
 
         await settleAndAssert(session, 120_000);
+
+        // Hiding and showing again with nothing arriving: the count the
+        // renderer reports must be the same number three times over, because a
+        // draw switch is the one change that cannot alter what the scene
+        // holds. Mid-decode the count may legitimately grow, which is why the
+        // exact statement belongs here rather than up at the interrupt.
+        const shownAtRest = await snapshot(session);
+        assertRendererHoldsOnlyItsOwn(shownAtRest, "shown at rest");
+        expect(
+          shownAtRest.scene.actors,
+          `showing changed how many actors the renderer holds\n${shown({ beforeShowScene, shownAtRest })}`,
+        ).toBe(beforeShowScene.actors);
+        expect(shownAtRest.stats.adapter!.drawnTiles).toBeGreaterThan(0);
+
+        await session.setVisible(false);
+        await session.frame();
+        const hiddenAtRest = await snapshot(session);
+        expect(
+          hiddenAtRest.scene.actors,
+          `hiding changed how many actors the renderer holds\n${shown({ shownAtRest, hiddenAtRest })}`,
+        ).toBe(shownAtRest.scene.actors);
+        expect(
+          hiddenAtRest.stats.adapter!.drawnTiles,
+          `hiding left tiles drawing\n${shown(hiddenAtRest.stats)}`,
+        ).toBe(0);
+        assertRendererHoldsOnlyItsOwn(hiddenAtRest, "hidden at rest");
+
+        await session.setVisible(true);
+        await session.frame();
+        const shownAgain = await snapshot(session);
+        expect(
+          shownAgain.scene.actors,
+          `showing changed how many actors the renderer holds\n${shown({ hiddenAtRest, shownAgain })}`,
+        ).toBe(shownAtRest.scene.actors);
+        expect(shownAgain.stats.adapter!.drawnTiles).toBe(
+          shownAtRest.stats.adapter!.drawnTiles,
+        );
+        assertRendererHoldsOnlyItsOwn(shownAgain, "shown again");
+
         expect(session.failures).toEqual([]);
       } finally {
         await session.close();
@@ -337,6 +447,14 @@ describe("a cloud deactivated while it is still decoding tiles", () => {
         ).toBeGreaterThan(0);
         expect(
           atDeactivate.stats.controller!.residentTiles,
+        ).toBeGreaterThan(0);
+        // What the renderer was holding when the switch flipped, so the zero
+        // below is residency actually given up rather than a scene that never
+        // had anything in it.
+        assertRendererHoldsOnlyItsOwn(atDeactivate, "at the deactivation");
+        expect(
+          atDeactivate.scene.actors,
+          `the renderer held no actors to shed\n${shown(atDeactivate.scene)}`,
         ).toBeGreaterThan(0);
 
         const quiet = await watching(session, SAMPLE_INTERVAL_MS, async () => {
@@ -378,6 +496,14 @@ describe("a cloud deactivated while it is still decoding tiles", () => {
           expect(
             inactive.adapter!.gpuResidentTiles,
             `GPU resources outlived deactivation\n${shown(inactive)}`,
+          ).toBe(0);
+          // And the renderer has to agree. Shedding residency means giving the
+          // actors up, not parking them: an actor left in the scene draws
+          // nothing while its adapter reports zero of everything, so this is
+          // the only reading that can tell "released" from "forgotten".
+          expect(
+            (await session.scene()).actors,
+            `the renderer kept actors a deactivated cloud released\n${shown(inactive)}`,
           ).toBe(0);
 
           // Released payloads are parked, not thrown away: that is the whole
@@ -427,6 +553,17 @@ describe("a cloud deactivated while it is still decoding tiles", () => {
         // mid-decode still owes the camera the selection it asked for.
         await session.setActive(true);
         await settleAndAssert(session, 120_000);
+        const back = await snapshot(session);
+        // The actors have to come back to the renderer, not just to the
+        // adapter's books: a reactivation that resubmitted tiles without
+        // re-adding their actors would satisfy every count above and draw
+        // nothing.
+        expect(
+          back.scene.actors,
+          `reactivation put nothing back in the renderer\n${shown(back)}`,
+        ).toBeGreaterThan(0);
+        assertRendererHoldsOnlyItsOwn(back, "after reactivation");
+        expect(back.stats.adapter!.drawnTiles).toBeGreaterThan(0);
         expect(session.failures).toEqual([]);
       } finally {
         await session.close();
@@ -442,7 +579,12 @@ describe("a cloud deactivated while it is still decoding tiles", () => {
         // at all. Mid-decode deactivation is the check above.
         const loaded = await settleAndAssert(session, 120_000);
         const loadedKeys = await session.keys();
+        const loadedScene = (await snapshot(session)).scene;
         expect(loaded.controller!.residentTiles).toBeGreaterThan(0);
+        expect(
+          loadedScene.actors,
+          `the renderer holds nothing before deactivation, so shedding it proves nothing\n${shown(loadedScene)}`,
+        ).toBeGreaterThan(0);
 
         await session.setActive(false);
         // Removed actors go to the adapter's reuse pool, and the ceiling that
@@ -473,6 +615,14 @@ describe("a cloud deactivated while it is still decoding tiles", () => {
           inactive.adapter!.gpuResidentTiles,
           `GPU resources outlived deactivation\n${shown(inactive)}`,
         ).toBe(0);
+        // Deactivation is the switch that must actually cost the renderer its
+        // actors: it held `loadedScene.actors` a moment ago and must hold none
+        // now. Every count above comes from the adapter, which reports zero
+        // for an actor it has forgotten just as readily as for one it removed.
+        expect(
+          (await session.scene()).actors,
+          `the renderer parked a deactivated cloud's actors instead of giving them up\n${shown({ loadedScene, inactive })}`,
+        ).toBe(0);
         expect(
           inactive.controller!.cachedTiles,
           `decoded payloads were discarded rather than cached\n${shown(inactive)}`,
@@ -499,6 +649,7 @@ describe("a cloud deactivated while it is still decoding tiles", () => {
         expect(back.samples).toBeGreaterThan(0);
 
         const backKeys = await session.keys();
+        const backScene = (await snapshot(session)).scene;
         expect(back.result.controller!.active).toBe(true);
         expect(
           backKeys.controller!.resident,
@@ -510,6 +661,15 @@ describe("a cloud deactivated while it is still decoding tiles", () => {
         expect(back.result.controller!.residentPoints).toBe(
           loaded.controller!.residentPoints,
         );
+        // The renderer is back to exactly what it held before the shed: the
+        // same tile set rebuilt, and not one actor more — a shed that released
+        // an actor's resources without removing it from the scene, or a
+        // reactivation that added a second actor for a key it already had,
+        // both land here and nowhere else.
+        expect(
+          backScene.actors,
+          `the renderer came back holding a different number of actors\n${shown({ loadedScene, backScene, adapter: back.result.adapter })}`,
+        ).toBe(loadedScene.actors);
 
         // The same instrument over a cold load of the same cloud, so the two
         // numbers are comparable. Routing is installed on this page, which

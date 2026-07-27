@@ -103,6 +103,12 @@ let lastFrameMs = 0;
 // actually produce. It replaces the measurement rather than being added
 // alongside it: the loop must see one number per frame.
 let syntheticFrameMs: number | null = null;
+/**
+ * The scale the host wants, which is not always the window's own: loading a
+ * cloud builds a new adapter, and reading `window.devicePixelRatio` there
+ * would silently discard a ratio the host had set for this view.
+ */
+let currentDevicePixelRatio = window.devicePixelRatio;
 let loadGeneration = 0;
 
 const setMessage = (text: string, error = false): void => {
@@ -187,9 +193,28 @@ const movedBeyondJitter = (previous: number, next: number): boolean =>
   Math.abs(previous - next) >
   MOTION_RELATIVE_EPSILON * Math.max(1, Math.abs(previous), Math.abs(next));
 
+/**
+ * World-to-clip entries describing where the camera is looking, row-major as
+ * `cameraView()` transposes it (index = row * 4 + column).
+ *
+ * The clip-z row (8, 9, 10, 11) is deliberately left out, exactly as the
+ * bridge leaves out its own: a host folds a depth remap derived from the
+ * scene's visible bounds into that row, so a tile arriving or being evicted
+ * rewrites those four numbers while the camera stands perfectly still. Every
+ * camera move shows up in the x, y and w rows; the one motion that lives only
+ * in clip z — dollying an orthographic camera along its view axis — shows up
+ * in the eye point instead, which is compared alongside.
+ *
+ * This page hands the projection a fixed z range, so the row never moves here
+ * and excluding it changes nothing on screen. It is here because the example
+ * exists to show a host what to implement, and a host reading its own
+ * composite matrix will have the remap folded in.
+ */
+const MOTION_MATRIX_INDICES = [0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 15];
+
 /** Everything about the camera that changes what LOD selects. */
 const motionScalars = (view: CameraView): number[] => [
-  ...Array.from(view.viewProj, Number),
+  ...MOTION_MATRIX_INDICES.map((index) => Number(view.viewProj[index])),
   ...view.position,
   view.viewportHeightCssPx,
   view.projection === "orthographic" ? view.parallelScale : view.fovY,
@@ -606,7 +631,7 @@ const loadSource = async (
     adapter = createRendererAdapter({
       renderer,
       scheduleRender,
-      devicePixelRatio: window.devicePixelRatio,
+      devicePixelRatio: currentDevicePixelRatio,
     });
     controller = createLodController({
       source,
@@ -725,7 +750,8 @@ for (const input of [movingTargetInput, stationaryTargetInput, maxPointsInput]) 
 projectionSelect.addEventListener("change", syncProjection);
 
 window.addEventListener("resize", () => {
-  adapter?.setDevicePixelRatio(window.devicePixelRatio);
+  currentDevicePixelRatio = window.devicePixelRatio;
+  adapter?.setDevicePixelRatio(currentDevicePixelRatio);
   scheduleRender();
 });
 
@@ -821,6 +847,12 @@ Object.assign(window, {
       read: () => ({
         position: [...camera.getPosition()],
         focalPoint: [...camera.getFocalPoint()],
+        // Included because motion inference reads the whole view-projection
+        // product: view-up moves the view matrix without moving the eye, and
+        // vtk.js's trackball style orthogonalises it on interaction, so a
+        // check that only compared eye and target could not tell a camera
+        // that stood still from one whose basis was rewritten under it.
+        viewUp: [...camera.getViewUp()],
         parallelScale: camera.getParallelScale(),
         viewAngle: camera.getViewAngle(),
         parallelProjection: !!camera.getParallelProjection(),
@@ -880,6 +912,7 @@ Object.assign(window, {
       scheduleRender();
     },
     setDevicePixelRatio: (ratio: number) => {
+      currentDevicePixelRatio = ratio;
       adapter?.setDevicePixelRatio(ratio);
       scheduleRender();
     },

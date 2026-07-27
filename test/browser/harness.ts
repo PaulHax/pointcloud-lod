@@ -523,6 +523,7 @@ export const openExample = async (
 export interface CameraReading {
   position: number[];
   focalPoint: number[];
+  viewUp: number[];
   parallelScale: number;
   viewAngle: number;
   parallelProjection: boolean;
