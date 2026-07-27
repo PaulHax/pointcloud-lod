@@ -2,34 +2,34 @@
   "name": "pointcloud-lod",
   "version": "0.0.0-development",
   "description": "Octree LOD point-cloud streaming for vtk.js",
-  "type": "module",
+  "keywords": [
+    "copc",
+    "lod",
+    "octree",
+    "point-cloud",
+    "streaming",
+    "vtk",
+    "vtk.js",
+    "webgl"
+  ],
+  "homepage": "https://github.com/PaulHax/pointcloud-lod#readme",
+  "bugs": {
+    "url": "https://github.com/PaulHax/pointcloud-lod/issues"
+  },
   "license": "MIT",
   "author": "Paul Elliott",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/PaulHax/pointcloud-lod.git"
   },
-  "homepage": "https://github.com/PaulHax/pointcloud-lod#readme",
-  "bugs": {
-    "url": "https://github.com/PaulHax/pointcloud-lod/issues"
-  },
-  "keywords": [
-    "vtk",
-    "vtk.js",
-    "point-cloud",
-    "lod",
-    "octree",
-    "copc",
-    "streaming",
-    "webgl"
-  ],
-  "sideEffects": false,
   "files": [
     "dist",
     "src",
     "!src/**/*.test.ts",
     "vtkjs-fork.env"
   ],
+  "type": "module",
+  "sideEffects": false,
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -40,11 +40,11 @@
       "import": "./dist/rendererAdapter.js"
     }
   },
-  "engines": {
-    "node": "^20.19.0 || >=22.12.0"
-  },
   "scripts": {
     "test": "vitest run",
+    "lint": "oxlint",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tools.json && tsc --noEmit -p examples/vtk/tsconfig.json",
     "build": "vite build && tsc -p tsconfig.build.json",
     "example": "vite --config examples/vtk/vite.config.ts",
@@ -60,10 +60,15 @@
     "@semantic-release/github": "^11.0.0",
     "@semantic-release/npm": "^13.1.0",
     "@types/node": "^26.1.1",
+    "oxfmt": "^0.61.0",
+    "oxlint": "^1.76.0",
     "playwright": "^1.62.0",
     "semantic-release": "^25.0.0",
     "typescript": "^7.0.2",
     "vite": "^8.1.5",
     "vitest": "^4.1.10"
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
   }
 }
