@@ -371,9 +371,14 @@ export const openExample = async (
         x += dx;
         y += dy;
         await page.mouse.move(x, y);
-        // The interactor paints a frame per move through its own animation
-        // loop; stepping faster than that measures the queue, not the gesture.
+        // Pace to painted frames, not to the clock. The interactor applies a
+        // move on its own animation frame, so on a cloud whose paint takes
+        // seconds a fixed delay delivers the whole gesture inside one frame:
+        // the camera never moves, and a check guarding against a gesture that
+        // missed the interactor fails on a gesture that reached it perfectly
+        // well. The delay stays as a floor so the moves remain distinguishable.
         await page.waitForTimeout(pauseMs);
+        await session.frame();
       }
       await page.mouse.up();
     },
