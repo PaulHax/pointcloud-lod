@@ -17,6 +17,12 @@
 
 import "@kitware/vtk.js/Rendering/Profiles/Geometry";
 import vtkFullScreenRenderWindow from "@kitware/vtk.js/Rendering/Misc/FullScreenRenderWindow";
+import vtkInteractorStyleManipulator from "@kitware/vtk.js/Interaction/Style/InteractorStyleManipulator";
+import vtkMouseCameraTrackballPanManipulator from "@kitware/vtk.js/Interaction/Manipulators/MouseCameraTrackballPanManipulator";
+import vtkMouseCameraTrackballRotateManipulator from "@kitware/vtk.js/Interaction/Manipulators/MouseCameraTrackballRotateManipulator";
+import vtkCompositeMouseManipulator from "@kitware/vtk.js/Interaction/Manipulators/CompositeMouseManipulator";
+import vtkCompositeCameraManipulator from "@kitware/vtk.js/Interaction/Manipulators/CompositeCameraManipulator";
+import macro from "@kitware/vtk.js/macros";
 
 import {
   ROOT_KEY,
@@ -44,6 +50,7 @@ const element = <T extends Element>(selector: string): T => {
 };
 
 const viewer = element<HTMLElement>("#viewer");
+const sceneSelect = element<HTMLSelectElement>("#cloud-preset");
 const fileInput = element<HTMLInputElement>("#cloud-file");
 const urlInput = element<HTMLInputElement>("#cloud-url");
 const loadUrlButton = element<HTMLButtonElement>("#load-url");
@@ -67,6 +74,134 @@ const renderer = fullScreen.getRenderer();
 const renderWindow = fullScreen.getRenderWindow();
 const interactor = renderWindow.getInteractor();
 const camera = renderer.getActiveCamera();
+
+/** The world's up axis. Point clouds here are z-up, and orbiting keeps it. */
+const WORLD_UP: [number, number, number] = [0, 0, 1];
+
+/** Fraction of the eye-to-focus distance a full viewport-height drag covers. */
+const DOLLY_PER_VIEWPORT = 1.6;
+/** Zoom ratio per wheel notch. */
+const DOLLY_PER_NOTCH = 1.12;
+
+/**
+ * The cursor, in the display coordinates vtk.js works in.
+ *
+ * The interactor caches a mouse position only while a button is held, so a
+ * wheel turn with nothing pressed — the ordinary case — reaches a manipulator
+ * with no position at all, and vtk.js's own zoom-to-mouse silently does
+ * nothing. Tracking the pointer here is what makes the wheel able to aim.
+ */
+let pointer: { x: number; y: number } | null = null;
+viewer.addEventListener("pointermove", (event: PointerEvent) => {
+  const canvas = fullScreen.getApiSpecificRenderWindow().getCanvas();
+  if (!canvas) return;
+  const bounds = canvas.getBoundingClientRect();
+  if (bounds.width === 0 || bounds.height === 0) return;
+  pointer = {
+    x: (canvas.width / bounds.width) * (event.clientX - bounds.left),
+    y:
+      (canvas.height / bounds.height) *
+      (bounds.height - event.clientY + bounds.top),
+  };
+});
+
+/**
+ * Drag-to-zoom, toward the point the gesture started on.
+ *
+ * The step is a fraction of the distance to what is being looked at, so it
+ * behaves the same on a village and on a valley. vtk.js's own zoom manipulator
+ * scales its step by the far clipping plane instead, which makes the speed
+ * depend on how deep the scene is rather than on how close the camera is —
+ * measured across two clouds, the same drag moved 45% of the scene radius on
+ * one and 7% on the other.
+ */
+const createDollyManipulator = (initialValues: object): any => {
+  const publicAPI = {};
+  const model = { ...initialValues };
+  macro.obj(publicAPI, model);
+  vtkCompositeMouseManipulator.extend(publicAPI, model, initialValues);
+  vtkCompositeCameraManipulator.extend(publicAPI, model, initialValues);
+
+  // Where the gesture started, and how much of it has been applied. The zoom
+  // is computed from the cursor's total displacement rather than accumulated
+  // per event, so a move the interactor coalesces or drops while it is busy
+  // painting cannot leave the gesture short of where the cursor actually is.
+  let start = { x: 0, y: 0 };
+  let applied = 1;
+
+  const api = publicAPI as {
+    onButtonDown: (i: any, r: any, p: { x: number; y: number }) => void;
+    onMouseMove: (i: any, r: any, p: { x: number; y: number } | null) => void;
+    onScroll: (
+      i: any,
+      r: any,
+      delta: number,
+      p?: { x: number; y: number } | null,
+    ) => void;
+  };
+  api.onButtonDown = (_interactor, _renderer, position) => {
+    start = position;
+    applied = 1;
+  };
+  api.onScroll = (scrollInteractor, renderer, delta, position) => {
+    if (!delta) return;
+    const at = position ?? pointer;
+    if (!at) return;
+    vtkInteractorStyleManipulator.dollyToPosition(
+      DOLLY_PER_NOTCH ** -delta,
+      at,
+      renderer,
+      scrollInteractor,
+    );
+  };
+  api.onMouseMove = (interactor, renderer, position) => {
+    if (!position) return;
+    const height = interactor.getView().getViewportSize(renderer)[1];
+    // Exponential in the drag: equal drags are equal ratios, and dragging
+    // back undoes exactly what dragging out did. Up zooms in.
+    const wanted = Math.exp(
+      ((position.y - start.y) / Math.max(height, 1)) * DOLLY_PER_VIEWPORT,
+    );
+    const step = wanted / applied;
+    applied = wanted;
+    // Toward where the gesture began, so the drag pulls that point in rather
+    // than whatever happens to be at the centre.
+    vtkInteractorStyleManipulator.dollyToPosition(
+      step,
+      start,
+      renderer,
+      interactor,
+    );
+  };
+  return publicAPI;
+};
+
+/**
+ * Left drag pans, right drag orbits, middle drag and the wheel zoom.
+ *
+ * The stock trackball rolls the camera freely, which loses the horizon on the
+ * first diagonal drag over a landscape. Orbiting about the focal point with a
+ * fixed world up keeps the scene the way up the data is.
+ */
+const interactorStyle = vtkInteractorStyleManipulator.newInstance();
+interactorStyle.addMouseManipulator(
+  vtkMouseCameraTrackballPanManipulator.newInstance({ button: 1 }),
+);
+interactorStyle.addMouseManipulator(
+  vtkMouseCameraTrackballRotateManipulator.newInstance({
+    button: 3,
+    useWorldUpVec: true,
+    worldUpVec: WORLD_UP,
+    useFocalPointAsCenterOfRotation: true,
+  }),
+);
+// Middle drag and the wheel both zoom toward the cursor: the camera moves
+// along the ray through whatever is under the pointer, so that point stays
+// roughly put and the view closes in on it rather than on the screen centre.
+interactorStyle.addMouseManipulator(
+  createDollyManipulator({ button: 2, scrollEnabled: true }),
+);
+interactor.setInteractorStyle(interactorStyle);
 
 /** The adaptive floor is stated so an out-of-order maximum is caught here. */
 const ADAPTIVE_MIN_BUDGET = 200_000;
@@ -489,12 +624,27 @@ const updateDiagnostics = (): void => {
  * interactor paints its own animation frames, so a second paint in the same
  * frame would double the cost the budget loop is measuring.
  */
+/**
+ * The scene's extent changed, so the clipping range no longer bounds it.
+ *
+ * Tiles arrive after the camera is framed, so a range computed when the
+ * renderer was empty clips away everything that streams in afterwards — the
+ * view stays black until some gesture makes an interactor style recompute it.
+ * Recomputing costs a pass over the actors, so it is done when the scene
+ * actually changed rather than on every frame.
+ */
+let clippingDirty = true;
+
 const scheduleRender = (): void => {
   if (frameQueued) return;
   frameQueued = true;
   requestAnimationFrame(() => {
     frameQueued = false;
     if (interactor.isAnimating()) return;
+    if (clippingDirty && renderer.getActors().length > 0) {
+      clippingDirty = false;
+      renderer.resetCameraClippingRange();
+    }
     frameStartedAt = performance.now();
     interactor.render();
     // Nothing painted (a render was already in progress): drop the stamp so it
@@ -585,30 +735,76 @@ const disposeCloud = (): void => {
   lastRenderedView = null;
 };
 
+const VIEW_ANGLE = 38;
+/** Degrees above the horizon the opening view looks down from. */
+const START_ELEVATION = 60;
+/** Degrees around the up axis, so the opening view is not axis-aligned. */
+const START_AZIMUTH = -60;
+const RADIANS = Math.PI / 180;
+
+/**
+ * Frame the cloud and put the orbit point in the middle of it.
+ *
+ * The centre comes from the root tile's points rather than from the root
+ * node's bounds, because a COPC root node is a cube spanning the octree, not
+ * the data: for a tile far wider than it is tall, the cube's centre floats
+ * high above the ground and every orbit would swing about a point in the sky.
+ * The root tile is a uniform subsample of the whole cloud, so its extent is a
+ * good estimate of the real one for the price of a tile that is about to be
+ * read anyway.
+ */
 const frameRoot = async (source: TileSource): Promise<void> => {
   const entries = await source.nodes(ROOT_KEY);
   const root = entries.find(
     ({ key }) => key.level === 0 && key.x === 0 && key.y === 0 && key.z === 0,
   );
   if (!root) throw new Error("The COPC hierarchy has no root node");
-  const center = [
-    (root.bounds.min[0] + root.bounds.max[0]) / 2,
-    (root.bounds.min[1] + root.bounds.max[1]) / 2,
-    (root.bounds.min[2] + root.bounds.max[2]) / 2,
-  ] as const;
-  const halfSize = (root.bounds.max[0] - root.bounds.min[0]) / 2;
-  camera.setFocalPoint(...center);
+
+  const { origin, positions, pointCount } = await source.loadTile(ROOT_KEY);
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < pointCount; i += 1) {
+    for (let axis = 0; axis < 3; axis += 1) {
+      const value = origin[axis]! + positions[i * 3 + axis]!;
+      if (value < min[axis]!) min[axis] = value;
+      if (value > max[axis]!) max[axis] = value;
+    }
+  }
+  // An empty or degenerate root leaves the node's bounds as the only estimate.
+  const usable = pointCount > 0 && min.every(Number.isFinite);
+  const low = usable ? min : [...root.bounds.min];
+  const high = usable ? max : [...root.bounds.max];
+
+  const center = low.map((value, axis) => (value + high[axis]!) / 2);
+  const span = high.map((value, axis) => value - low[axis]!);
+  const radius = Math.max(Math.hypot(...span) / 2, 1e-6);
+  // Far enough back that a sphere of that radius fits the vertical field.
+  const distance = radius / Math.tan((VIEW_ANGLE / 2) * RADIANS);
+  const elevation = START_ELEVATION * RADIANS;
+  const azimuth = START_AZIMUTH * RADIANS;
+  const offset = [
+    Math.cos(elevation) * Math.cos(azimuth),
+    Math.cos(elevation) * Math.sin(azimuth),
+    Math.sin(elevation),
+  ];
+
+  camera.setFocalPoint(center[0]!, center[1]!, center[2]!);
   camera.setPosition(
-    center[0] + halfSize * 1.15,
-    center[1] - halfSize * 1.25,
-    center[2] + halfSize * 1.05,
+    center[0]! + offset[0]! * distance,
+    center[1]! + offset[1]! * distance,
+    center[2]! + offset[2]! * distance,
   );
-  camera.setViewUp(0, 0, 1);
-  camera.setViewAngle(38);
+  camera.setViewUp(...WORLD_UP);
+  camera.setViewAngle(VIEW_ANGLE);
+  // Panning reads its depth reference from this point. It defaults to the
+  // world origin, which for data in a projected CRS is tens of kilometres
+  // away, and a pan referenced from there moves the scene by kilometres per
+  // pixel.
+  interactorStyle.setCenterOfRotation(center[0]!, center[1]!, center[2]!);
   // A parallel camera has no eye distance to frame from, so the world height
   // the viewport spans is stated directly.
-  camera.setParallelScale(halfSize * 1.4);
-  renderer.resetCameraClippingRange();
+  camera.setParallelScale(radius);
+  clippingDirty = true;
 };
 
 const loadSource = async (
@@ -647,7 +843,10 @@ const loadSource = async (
         minDiameterCssPx: 1.25,
         maxDiameterCssPx: 4,
       },
-      onTiles: (batch) => adapter?.applyBatch(batch),
+      onTiles: (batch) => {
+        adapter?.applyBatch(batch);
+        clippingDirty = true;
+      },
       onPointDiameterCssPx: (diameter) =>
         adapter?.setPointDiameterCssPx(diameter),
       onError: (error) => {
@@ -763,34 +962,59 @@ syncGovernor();
 updateDiagnostics();
 setInterval(updateDiagnostics, DIAGNOSTICS_INTERVAL_MS);
 
-/**
- * The cloud this page opens with when no `?url=` says otherwise.
- *
- * Dublin City 2015, collected by NYU's Urban Modeling Group and published
- * under CC-BY-4.0; mirrored on the AWS Open Data bucket `open-lidar-data`,
- * which serves `Access-Control-Allow-Origin: *` and honours Range requests.
- * One 250 m tile: 98.4 million points at 394 points/m², six levels deep, and
- * a hierarchy that genuinely spans pages — so opening the page exercises
- * paged hierarchy loading, deep refinement and eviction rather than just
- * proving a file parses.
- *
- * It is PDRF 6, which carries no colour, so it draws in the actor's flat
- * colour. That is the trade: nothing else public that we checked reaches this
- * density, and the coloured alternatives are an order of magnitude sparser.
- * For colour instead of detail, load the Luxembourg Lidar 2019 tiles (CC0) or
- * `https://s3.amazonaws.com/hobu-lidar/autzen-classified.copc.laz` (CC-BY-4.0).
- *
- * Nothing else in the library or the tests depends on this constant: every
- * browser check passes an explicit `?url=`, so this is the interactive
- * default only.
- */
-const DEFAULT_CLOUD_URL =
-  "https://open-lidar-data.s3.eu-central-1.amazonaws.com/data/IE/NYU_EDU/" +
-  "Dublin_City_2015/copc/T_316000_233500.copc.laz";
+const OPEN_LIDAR = "https://open-lidar-data.s3.eu-central-1.amazonaws.com/data";
 
+/** Public COPC clouds, all CORS-enabled and served over HTTP ranges. */
+const HOSTED_SCENES: { label: string; url: string }[] = [
+  {
+    label: "Dublin City — 98M pts, 394/m², no colour (CC-BY-4.0)",
+    url: `${OPEN_LIDAR}/IE/NYU_EDU/Dublin_City_2015/copc/T_316000_233500.copc.laz`,
+  },
+  {
+    label: "SoFi Stadium — 364M pts, no colour (CC-BY-4.0)",
+    url: "https://hobu-lidar.s3.amazonaws.com/sofi.copc.laz",
+  },
+  {
+    label: "Luxembourg — 16M pts, 65/m², colour (CC0)",
+    url: `${OPEN_LIDAR}/LU/Gouvernement_LUX/Lidar_2019/copc/LIDAR2019_NdP_54500_98500_EPSG2169.copc.laz`,
+  },
+  {
+    label: "Autzen Stadium — 11M pts, colour (CC-BY-4.0)",
+    url: "https://s3.amazonaws.com/hobu-lidar/autzen-classified.copc.laz",
+  },
+  {
+    label: "Luxembourg village — 163k pts, colour (CC0)",
+    url: `${OPEN_LIDAR}/LU/Gouvernement_LUX/Lidar_2019/copc/LIDAR2019_NdP_100000_82500_EPSG2169.copc.laz`,
+  },
+];
+
+for (const { label, url } of HOSTED_SCENES) {
+  const option = document.createElement("option");
+  option.value = url;
+  option.textContent = label;
+  sceneSelect.append(option);
+}
+
+sceneSelect.addEventListener("change", () => {
+  if (!sceneSelect.value) return;
+  urlInput.value = sceneSelect.value;
+  loadUrl();
+});
+
+// A URL typed by hand is no longer whichever scene the list is showing.
+urlInput.addEventListener("input", () => {
+  if (urlInput.value !== sceneSelect.value) sceneSelect.value = "";
+});
+
+// Every browser check passes an explicit `?url=`, so the default below is the
+// interactive opening scene only and nothing under test observes it.
 const initialUrl =
-  new URLSearchParams(window.location.search).get("url") ?? DEFAULT_CLOUD_URL;
+  new URLSearchParams(window.location.search).get("url") ??
+  HOSTED_SCENES[0]!.url;
 urlInput.value = initialUrl;
+sceneSelect.value = HOSTED_SCENES.some((scene) => scene.url === initialUrl)
+  ? initialUrl
+  : "";
 loadUrl();
 
 // Driving handles for browser checks. Everything here drives the page the way
