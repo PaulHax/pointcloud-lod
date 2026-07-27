@@ -873,12 +873,25 @@ const localFileSource = (file: File): Promise<TileSource> =>
       new Uint8Array(await file.slice(begin, end).arrayBuffer()),
   });
 
+/**
+ * Keep the address bar showing the cloud on screen, so the page can be
+ * reloaded or the link handed to someone and land on the same scene. A local
+ * file has no URL to share, so it clears the parameter instead.
+ */
+const showInAddressBar = (url: string | null): void => {
+  const target = new URL(window.location.href);
+  if (url === null) target.searchParams.delete("url");
+  else target.searchParams.set("url", url);
+  window.history.replaceState(null, "", target);
+};
+
 const loadUrl = (): void => {
   const url = urlInput.value.trim();
   if (!url) {
     setMessage("Enter a COPC URL.", true);
     return;
   }
+  showInAddressBar(url);
   void loadSource(url, createCopcTileSource({ source: url }));
 };
 
@@ -922,7 +935,11 @@ const syncBudgetControls = (): void => {
 
 fileInput.addEventListener("change", () => {
   const file = fileInput.files?.[0];
-  if (file) void loadSource(file.name, localFileSource(file));
+  if (!file) return;
+  sceneSelect.value = "";
+  urlInput.value = "";
+  showInAddressBar(null);
+  void loadSource(file.name, localFileSource(file));
 });
 
 loadUrlButton.addEventListener("click", loadUrl);

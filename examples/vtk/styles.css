@@ -27,7 +27,11 @@ body,
   width: min(380px, calc(100vw - 32px));
   max-height: calc(100vh - 32px);
   padding: 16px;
+  /* The panel is the only thing that scrolls. Nothing inside it gets its own
+     scrollbar, and nothing is allowed to be wider than it is. */
+  overflow-x: hidden;
   overflow-y: auto;
+  overscroll-behavior: contain;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 12px;
   background: rgba(12, 20, 28, 0.9);
@@ -161,6 +165,9 @@ button:hover {
   display: block;
   min-height: 38px;
   margin-top: 14px;
+  /* A cloud URL is one long unbroken word; without this it sets the panel's
+     width and everything else gets a horizontal scrollbar. */
+  overflow-wrap: anywhere;
   color: #b9c9d5;
   font-size: 13px;
   line-height: 1.45;
@@ -171,10 +178,9 @@ button:hover {
 }
 
 #stats {
-  max-height: min(46vh, 460px);
   margin: 10px 0 0;
-  overflow: auto;
   color: #a9d5ef;
   font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
