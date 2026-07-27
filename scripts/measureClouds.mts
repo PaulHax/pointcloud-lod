@@ -35,6 +35,9 @@ const OUT = resolve(
     "/tmp/claude-1000/-home-paulhax-src-tele/e35fcdef-3c6f-4d2f-a60d-abd251745070/scratchpad/measurements",
 );
 
+/** How long the moving regime is held before the camera stops. */
+const MOVING_MS = 20_000;
+
 /** Wall-clock, from the caller's side of the page boundary. */
 const since = (start: number): number => Date.now() - start;
 
@@ -138,7 +141,10 @@ const measure = async (
     await session.setBudgetMode("adaptive");
 
     // Time to first visible points: the first moment the renderer is actually
-    // drawing something, not the first moment a request was issued.
+    // drawing something, not the first moment a request was issued. Measured
+    // from before the page is opened, so it includes navigation and the
+    // example's own startup — the number a user waits through, not the
+    // library's share of it.
     const firstDrawn = await sampleUntil(
       session,
       load,
@@ -165,11 +171,17 @@ const measure = async (
     });
 
     // Moving: orbit continuously, which is the regime a video-driven camera
-    // and a user drag both land in.
+    // and a user drag both land in. Bounded by time rather than by a step
+    // count, because a step is a painted frame and a painted frame on a real
+    // cloud is seconds — a fixed count would run for a quarter of an hour on
+    // the largest asset and finish in moments on the fixture, measuring two
+    // different things under one name.
     const movingStart = Date.now();
-    for (let step = 0; step < 90; step += 1) {
+    let movingFrames = 0;
+    while (Date.now() - movingStart < MOVING_MS) {
       await session.azimuth(1.5);
       await session.frame();
+      movingFrames += 1;
       observe(moving, await session.stats(), since(start));
     }
     const movingEnd = Date.now();
@@ -203,6 +215,7 @@ const measure = async (
       timeToFirstPointsMs,
       timeToConvergedMs,
       movingDurationMs: movingEnd - movingStart,
+      movingFrames,
       stopToStationaryMs,
       firstDrawnPoints: firstDrawn.adapter?.drawnPoints ?? 0,
       atConvergence: {
