@@ -14,6 +14,7 @@ import {
 } from "./camera";
 import {
   createLodController,
+  type LodController,
   type LodControllerOptions,
   type TileBatch,
 } from "./controller";
@@ -58,7 +59,7 @@ const METADATA: TileSourceMetadata = {
   pointCount: 1000,
 };
 
-interface FakeEntry {
+type FakeNode = {
   pointCount: number;
   bounds?: {
     min: [number, number, number];
@@ -67,26 +68,18 @@ interface FakeEntry {
   spacing?: number;
   children?: string[];
   pageRef?: boolean;
-  /** Entries revealed by loading the page rooted at this key. */
-  pageNodes?: Record<
-    string,
-    {
-      pointCount: number;
-      bounds?: {
-        min: [number, number, number];
-        max: [number, number, number];
-      };
-      spacing?: number;
-      children?: string[];
-    }
-  >;
-}
+};
 
-interface Deferred {
+type FakeEntry = FakeNode & {
+  /** Entries revealed by loading the page rooted at this key. */
+  pageNodes?: Record<string, FakeNode>;
+};
+
+type Deferred = {
   resolve: (tile?: Partial<TileData>) => void;
   reject: (error: Error) => void;
   aborted: boolean;
-}
+};
 
 const makeTile = (
   pointCount: number,
@@ -102,35 +95,19 @@ const makeTile = (
 const makeFakeSource = (tree: Record<string, FakeEntry>) => {
   const deferred = new Map<string, Deferred>();
   const loadCalls: string[] = [];
-  const toInfos = (
-    entries: Record<
-      string,
-      {
-        pointCount: number;
-        bounds?: {
-          min: [number, number, number];
-          max: [number, number, number];
-        };
-        spacing?: number;
-        children?: string[];
-        pageRef?: boolean;
-      }
-    >,
-  ): NodeInfo[] =>
+  const toInfos = (entries: Record<string, FakeNode>): NodeInfo[] =>
     Object.entries(entries).map(([keyString, entry]) => {
-      const [level, x, y, z] = keyString.split("-").map(Number);
+      const key = keyFromString(keyString);
       return {
-        key: { level: level!, x: x!, y: y!, z: z! },
+        key,
         pointCount: entry.pointCount,
         bounds: entry.bounds ?? {
           min: [-0.5, -0.5, -0.5],
           max: [0.5, 0.5, 0.5],
         },
-        spacing: entry.spacing ?? 0.1 / 2 ** level!,
-        children: entry.children?.map((c) => {
-          const [cl, cx, cy, cz] = c.split("-").map(Number);
-          return { level: cl!, x: cx!, y: cy!, z: cz! };
-        }),
+        spacing: entry.spacing ?? 0.1 / 2 ** key.level,
+        // Array.map would hand keyFromString an index as a second argument.
+        children: entry.children?.map((c) => keyFromString(c)),
         pageRef: entry.pageRef,
       };
     });
@@ -172,6 +149,27 @@ const makeFakeSource = (tree: Record<string, FakeEntry>) => {
   };
   return { source, deferred, loadCalls };
 };
+
+/** Source that ignores the abort signal: cancellation is advisory only. */
+const uncancellableSource = (resolvers: Array<(tile: TileData) => void>) => ({
+  metadata: () => METADATA,
+  async nodes() {
+    return [
+      {
+        key: { level: 0, x: 0, y: 0, z: 0 },
+        pointCount: 100,
+        bounds: {
+          min: [-0.5, -0.5, -0.5] as [number, number, number],
+          max: [0.5, 0.5, 0.5] as [number, number, number],
+        },
+        spacing: 0.1,
+        children: [],
+      },
+    ];
+  },
+  // Deliberately ignores opts.signal: models an uncancellable getter.
+  loadTile: () => new Promise<TileData>((r) => resolvers.push(r)),
+});
 
 const collectBatches = () => {
   const batches: TileBatch[] = [];
@@ -245,43 +243,66 @@ const settle = async (): Promise<void> => {
   await Promise.resolve();
 };
 
-const makeController = (
+/**
+ * Bootstrap the root page, look at the cloud, and land every outstanding
+ * fetch. Tests that resolve selectively or count turns drive this by hand.
+ */
+const bootAndLand = async (
+  controller: LodController,
+  deferred: Map<string, Deferred>,
+): Promise<void> => {
+  await settle(); // root hierarchy page
+  controller.setCamera(VIEW);
+  await settle();
+  for (const d of deferred.values()) d.resolve();
+  await settle();
+};
+
+const makeHarness = <
+  S extends { onTiles: (batch: TileBatch) => void; scheduleRender: () => void },
+>(
   tree: Record<string, FakeEntry>,
-  options?: { pointBudget?: number; cacheBytes?: number },
+  sink: S,
+  overrides?: Partial<LodControllerOptions>,
 ) => {
   const fake = makeFakeSource(tree);
-  const sink = collectBatches();
   const controller = createLodController({
     source: fake.source,
     onTiles: sink.onTiles,
     scheduleRender: sink.scheduleRender,
-    pointBudget: options?.pointBudget ?? 1000,
+    pointBudget: 1000,
     selectionDelayMs: 0,
-    cacheBytes: options?.cacheBytes,
+    ...overrides,
   });
   return { controller, ...fake, ...sink };
 };
 
+const makeController = (
+  tree: Record<string, FakeEntry>,
+  overrides?: Partial<LodControllerOptions>,
+) => makeHarness(tree, collectBatches(), overrides);
+
 const makeMirrored = (
   tree: Record<string, FakeEntry>,
-  options?: { pointBudget?: number },
-) => {
-  const fake = makeFakeSource(tree);
-  const sink = mirrorRenderer();
-  const controller = createLodController({
-    source: fake.source,
-    onTiles: sink.onTiles,
-    scheduleRender: sink.scheduleRender,
-    pointBudget: options?.pointBudget ?? 1000,
-    selectionDelayMs: 0,
-  });
-  return { controller, ...fake, ...sink };
-};
+  overrides?: Partial<LodControllerOptions>,
+) => makeHarness(tree, mirrorRenderer(), overrides);
 
 const SMALL_TREE: Record<string, FakeEntry> = {
   "0-0-0-0": { pointCount: 100, children: ["1-0-0-0", "1-1-0-0"] },
   "1-0-0-0": { pointCount: 60 },
   "1-1-0-0": { pointCount: 60 },
+};
+
+/**
+ * One leaf, sized so the density-aware p75 lands at 5 css px: 0.9 world
+ * spacing over +/-1 bounds is what makes the Auto diameter come out at 4.
+ */
+const AUTO_LEAF: Record<string, FakeEntry> = {
+  "0-0-0-0": {
+    pointCount: 100,
+    bounds: { min: [-1, -1, -1], max: [1, 1, 1] },
+    spacing: 0.9,
+  },
 };
 
 describe("createLodController", () => {
@@ -314,11 +335,7 @@ describe("createLodController", () => {
     const { controller, loadCalls, deferred } = makeController(SMALL_TREE, {
       pointBudget: 200,
     });
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
-    for (const d of deferred.values()) d.resolve();
-    await settle();
+    await bootAndLand(controller, deferred);
 
     controller.setPointBudget(1000);
     await settle();
@@ -356,25 +373,9 @@ describe("createLodController", () => {
     // request still resolves. Looking back must adopt that live read rather
     // than start a rival one, and its payload must claim residency.
     const resolvers: Array<(tile: TileData) => void> = [];
-    const source: TileSource = {
-      metadata: () => METADATA,
-      async nodes() {
-        return [
-          {
-            key: { level: 0, x: 0, y: 0, z: 0 },
-            pointCount: 100,
-            bounds: { min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5] },
-            spacing: 0.1,
-            children: [],
-          },
-        ];
-      },
-      // Deliberately ignores opts.signal: models an uncancellable getter.
-      loadTile: () => new Promise<TileData>((r) => resolvers.push(r)),
-    };
     const sink = collectBatches();
     const controller = createLodController({
-      source,
+      source: uncancellableSource(resolvers),
       onTiles: sink.onTiles,
       scheduleRender: sink.scheduleRender,
       pointBudget: 1000,
@@ -416,11 +417,7 @@ describe("createLodController", () => {
 
   it("reuses cached tiles without refetching", async () => {
     const { controller, deferred, loadCalls } = makeController(SMALL_TREE);
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
-    for (const d of deferred.values()) d.resolve();
-    await settle();
+    await bootAndLand(controller, deferred);
     const fetchesBefore = loadCalls.length;
 
     controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
@@ -436,11 +433,7 @@ describe("createLodController", () => {
   it("deactivation releases submitted tiles and reuses bounded decoded payloads", async () => {
     const { controller, deferred, loadCalls, batches } =
       makeController(SMALL_TREE);
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
-    for (const d of deferred.values()) d.resolve();
-    await settle();
+    await bootAndLand(controller, deferred);
 
     expect(controller.stats()).toMatchObject({
       active: true,
@@ -491,11 +484,7 @@ describe("createLodController", () => {
     const { controller, deferred, loadCalls } = makeController(SMALL_TREE, {
       cacheBytes: 1, // nothing survives deselection
     });
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
-    for (const d of deferred.values()) d.resolve();
-    await settle();
+    await bootAndLand(controller, deferred);
 
     controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
     await settle();
@@ -547,6 +536,40 @@ describe("createLodController", () => {
     for (const d of deferred.values()) d.resolve();
     await settle();
     expect(controller.stats().residentPoints).toBe(50);
+    controller.dispose();
+  });
+
+  it("re-measures a node whose page replaced its hierarchy entry", async () => {
+    // A page reference is a stand-in for the subtree it names, and the entry
+    // that replaces it is a different node with its own spacing. Screen-space
+    // error is cached per key against the current view, and the reference's
+    // value is cached the moment its page is queued — so the replacement has
+    // to drop it, or the node is measured for the rest of the view by the
+    // placeholder it superseded.
+    const tree: Record<string, FakeEntry> = {
+      "0-0-0-0": { pointCount: 10, spacing: 0.1, children: ["1-0-0-0"] },
+      "1-0-0-0": {
+        pointCount: 0,
+        pageRef: true,
+        // Deliberately unlike the node behind it: both shipped sources happen
+        // to agree here, and nothing in the contract says they must.
+        spacing: 4,
+        pageNodes: { "1-0-0-0": { pointCount: 40, spacing: 0.03 } },
+      },
+    };
+    const { controller, deferred } = makeController(tree);
+    await settle();
+    // Parallel projection, so a projected spacing is the world spacing times
+    // viewportHeight / (2 * parallelScale) = 50, with no distance in it.
+    controller.setCamera(ORTHOGRAPHIC_VIEW);
+    await settle();
+    await settle();
+    for (const d of deferred.values()) d.resolve();
+    await settle();
+
+    const frontier = controller.stats().selection.readyTerminalFrontier;
+    expect(frontier.leafNodes).toBe(1);
+    expect(frontier.projectedSpacingCssPx.p50).toBeCloseTo(0.03 * 50, 6);
     controller.dispose();
   });
 
@@ -624,14 +647,9 @@ describe("createLodController", () => {
         bounds: { min: [-8, -8, -8], max: [0, 0, 0] },
       },
     };
-    const fake = makeFakeSource(tree);
-    const sink = collectBatches();
-    const controller = createLodController({
-      source: fake.source,
-      onTiles: sink.onTiles,
-      scheduleRender: sink.scheduleRender,
-      selectionDelayMs: 0,
-    });
+    // The whole tree is 50 points against the harness's 1000-point budget, so
+    // the frustum is the only thing that can hold a node back.
+    const { controller, loadCalls } = makeController(tree);
     await settle();
     // Clip space shifted by -5: only world coords in [4,6]^3 are visible.
     // The root cube [-8,8]^3 straddles that region, but the negative octant
@@ -641,8 +659,8 @@ describe("createLodController", () => {
       viewProj: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -5, -5, -5, 1],
     });
     await settle();
-    expect(fake.loadCalls).toContain("0-0-0-0");
-    expect(fake.loadCalls).not.toContain("1-0-0-0");
+    expect(loadCalls).toContain("0-0-0-0");
+    expect(loadCalls).not.toContain("1-0-0-0");
     controller.dispose();
   });
 });
@@ -658,32 +676,20 @@ describe("createLodController — ready frontier and presentation", () => {
 
   const makePresented = (
     tree: Record<string, FakeEntry>,
-    options: {
-      pointBudget?: number;
-      presentation:
-        | { mode: "fixed"; diameterCssPx: number }
-        | {
-            mode: "auto";
-            userScale: number;
-            minDiameterCssPx?: number;
-            maxDiameterCssPx?: number;
-          };
-    },
+    overrides: Partial<LodControllerOptions> &
+      Required<Pick<LodControllerOptions, "presentation">>,
   ) => {
-    const fake = makeFakeSource(tree);
-    const sink = collectBatches();
+    // Declared before construction: the constructor reports the first diameter
+    // synchronously, and that first value is what the Auto tests read.
     const diameters: number[] = [];
-    const controller = createLodController({
-      source: fake.source,
-      onTiles: sink.onTiles,
-      scheduleRender: sink.scheduleRender,
-      pointBudget: options.pointBudget ?? 1000,
-      selectionDelayMs: 0,
-      interactionSettleMs: 300,
-      presentation: options.presentation,
-      onPointDiameterCssPx: (value) => diameters.push(value),
-    });
-    return { controller, diameters, ...fake, ...sink };
+    return {
+      diameters,
+      ...makeController(tree, {
+        interactionSettleMs: 300,
+        onPointDiameterCssPx: (value) => diameters.push(value),
+        ...overrides,
+      }),
+    };
   };
 
   it("reports leaf, tile-readiness, and budget terminal coverage", async () => {
@@ -773,15 +779,7 @@ describe("createLodController — ready frontier and presentation", () => {
   });
 
   /** Projected spacing of the whole ready frontier, the diagnostic hosts read. */
-  const projectedSpacingP75 = (controller: {
-    stats: () => {
-      selection: {
-        readyTerminalFrontier: {
-          projectedSpacingCssPx: { p75: number | null };
-        };
-      };
-    };
-  }): number | null =>
+  const projectedSpacingP75 = (controller: LodController): number | null =>
     controller.stats().selection.readyTerminalFrontier.projectedSpacingCssPx
       .p75;
 
@@ -919,14 +917,7 @@ describe("createLodController — ready frontier and presentation", () => {
   });
 
   it("uses the density-aware p75 with clamps throughout interaction", async () => {
-    const leaf: Record<string, FakeEntry> = {
-      "0-0-0-0": {
-        pointCount: 100,
-        bounds: { min: [-1, -1, -1], max: [1, 1, 1] },
-        spacing: 0.9,
-      },
-    };
-    const { controller, deferred, diameters } = makePresented(leaf, {
+    const { controller, deferred, diameters } = makePresented(AUTO_LEAF, {
       presentation: { mode: "auto", userScale: 1 },
     });
     expect(diameters).toEqual([2]);
@@ -964,14 +955,7 @@ describe("createLodController — ready frontier and presentation", () => {
   });
 
   it("applies Auto size changes during interaction without a release phase", async () => {
-    const leaf: Record<string, FakeEntry> = {
-      "0-0-0-0": {
-        pointCount: 100,
-        bounds: { min: [-1, -1, -1], max: [1, 1, 1] },
-        spacing: 0.9,
-      },
-    };
-    const { controller, deferred } = makePresented(leaf, {
+    const { controller, deferred } = makePresented(AUTO_LEAF, {
       presentation: { mode: "auto", userScale: 1 },
     });
     await settle();
@@ -998,14 +982,7 @@ describe("createLodController — ready frontier and presentation", () => {
   });
 
   it("applies repeated settled Auto scale changes immediately", async () => {
-    const leaf: Record<string, FakeEntry> = {
-      "0-0-0-0": {
-        pointCount: 100,
-        bounds: { min: [-1, -1, -1], max: [1, 1, 1] },
-        spacing: 0.9,
-      },
-    };
-    const { controller, deferred, diameters } = makePresented(leaf, {
+    const { controller, deferred, diameters } = makePresented(AUTO_LEAF, {
       presentation: { mode: "auto", userScale: 1 },
     });
     await settle();
@@ -1033,23 +1010,16 @@ describe("createLodController — ready frontier and presentation", () => {
 describe("createLodController — failing sources", () => {
   it("stops re-requesting a tile whose fetch keeps failing", async () => {
     const errors: unknown[] = [];
-    const fake = makeFakeSource(SMALL_TREE);
-    const sink = collectBatches();
-    const controller = createLodController({
-      source: fake.source,
-      onTiles: sink.onTiles,
-      scheduleRender: sink.scheduleRender,
-      pointBudget: 1000,
-      selectionDelayMs: 0,
+    const { controller, loadCalls, deferred } = makeController(SMALL_TREE, {
       onError: (error) => errors.push(error),
     });
     await settle();
     controller.setCamera(VIEW);
     await settle();
-    expect(fake.loadCalls).toHaveLength(3);
+    expect(loadCalls).toHaveLength(3);
 
     const failEveryFetch = async (): Promise<void> => {
-      for (const d of fake.deferred.values()) d.reject(new Error("500"));
+      for (const d of deferred.values()) d.reject(new Error("500"));
       await settle();
     };
     await failEveryFetch();
@@ -1061,7 +1031,7 @@ describe("createLodController — failing sources", () => {
       await settle();
       await failEveryFetch();
     }
-    expect(fake.loadCalls).toHaveLength(9); // 3 tiles x 3 attempts
+    expect(loadCalls).toHaveLength(9); // 3 tiles x 3 attempts
     expect(errors).toHaveLength(9);
     controller.dispose();
   });
@@ -1069,14 +1039,7 @@ describe("createLodController — failing sources", () => {
   it("refetches a rested tile once the outage ends", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
-    const fake = makeFakeSource(SMALL_TREE);
-    const sink = collectBatches();
-    const controller = createLodController({
-      source: fake.source,
-      onTiles: sink.onTiles,
-      scheduleRender: sink.scheduleRender,
-      pointBudget: 1000,
-      selectionDelayMs: 0,
+    const { controller, loadCalls, deferred } = makeController(SMALL_TREE, {
       onError: () => {},
     });
     await settle();
@@ -1085,12 +1048,12 @@ describe("createLodController — failing sources", () => {
 
     // A brief outage burns the whole allowance for every tile.
     for (let round = 0; round < 4; round += 1) {
-      for (const d of fake.deferred.values()) d.reject(new Error("500"));
+      for (const d of deferred.values()) d.reject(new Error("500"));
       await settle();
       controller.refresh();
       await settle();
     }
-    expect(fake.loadCalls).toHaveLength(9);
+    expect(loadCalls).toHaveLength(9);
 
     // The server recovers. Resting is a backoff, not an eviction: once the
     // keys have been quiet long enough they are fetchable again, and this
@@ -1098,9 +1061,9 @@ describe("createLodController — failing sources", () => {
     vi.setSystemTime(31_000);
     controller.refresh();
     await settle();
-    expect(fake.loadCalls).toHaveLength(12);
+    expect(loadCalls).toHaveLength(12);
 
-    for (const d of fake.deferred.values()) d.resolve();
+    for (const d of deferred.values()) d.resolve();
     await settle();
     expect(controller.stats().residentTiles).toBe(3);
 
@@ -1228,26 +1191,19 @@ describe("createLodController — failing sources", () => {
 
   it("a new source clears the failure memory", async () => {
     const errors: unknown[] = [];
-    const fake = makeFakeSource(SMALL_TREE);
-    const sink = collectBatches();
-    const controller = createLodController({
-      source: fake.source,
-      onTiles: sink.onTiles,
-      scheduleRender: sink.scheduleRender,
-      pointBudget: 1000,
-      selectionDelayMs: 0,
+    const { controller, loadCalls, deferred } = makeController(SMALL_TREE, {
       onError: (error) => errors.push(error),
     });
     await settle();
     controller.setCamera(VIEW);
     await settle();
     for (let round = 0; round < 4; round += 1) {
-      for (const d of fake.deferred.values()) d.reject(new Error("500"));
+      for (const d of deferred.values()) d.reject(new Error("500"));
       await settle();
       controller.refresh();
       await settle();
     }
-    expect(fake.loadCalls).toHaveLength(9);
+    expect(loadCalls).toHaveLength(9);
 
     const replacement = makeFakeSource(SMALL_TREE);
     controller.setSource(replacement.source);
@@ -1272,28 +1228,12 @@ describe("createLodController — budget and memory ceiling", () => {
     tree: Record<string, FakeEntry>,
     pointBudget: number,
     memory?: number,
-  ) => {
-    const fake = makeFakeSource(tree);
-    const sink = collectBatches();
-    const controller = createLodController({
-      source: fake.source,
-      onTiles: sink.onTiles,
-      scheduleRender: sink.scheduleRender,
-      pointBudget,
-      selectionDelayMs: 0,
-      interactionSettleMs: 300,
-      ...(memory !== undefined ? { memory } : {}),
-    });
-    return { controller, ...fake, ...sink };
-  };
+  ) => makeController(tree, { pointBudget, interactionSettleMs: 300, memory });
 
   it("applies a budget drop immediately during interaction", async () => {
     const { controller, deferred } = makeBudgeted(SMALL_TREE, 1000);
-    await settle();
-    controller.setCamera(VIEW); // t=0: interacting
-    await settle();
-    for (const d of deferred.values()) d.resolve();
-    await settle();
+    // t=0: interacting
+    await bootAndLand(controller, deferred);
     expect(controller.stats().residentTiles).toBe(3);
 
     // Lower the budget mid-gesture: both children (60 points each) fall out of
@@ -1339,11 +1279,7 @@ describe("createLodController — budget and memory ceiling", () => {
       1000,
       150 * BYTES_PER_POINT,
     );
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
-    for (const d of deferred.values()) d.resolve();
-    await settle();
+    await bootAndLand(controller, deferred);
     // Root (100 points) fits the 150-point ceiling; the 60-point children
     // would overshoot and stay out.
     expect(controller.stats().pointBudget).toBe(150);
@@ -1460,11 +1396,7 @@ describe("createLodController — batch coalescing", () => {
   it("emits no actor for a cached tile selected and dropped in one task", async () => {
     const { controller, deferred, batches, visible, violations } =
       makeMirrored(SMALL_TREE);
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
-    for (const d of deferred.values()) d.resolve();
-    await settle();
+    await bootAndLand(controller, deferred);
     controller.setCamera(AWAY);
     await settle();
     expect(visible.size).toBe(0);
@@ -1511,11 +1443,7 @@ describe("createLodController — batch coalescing", () => {
   it("leaves the renderer untouched when a tile is dropped and reselected", async () => {
     const { controller, deferred, batches, visible, violations } =
       makeMirrored(SMALL_TREE);
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
-    for (const d of deferred.values()) d.resolve();
-    await settle();
+    await bootAndLand(controller, deferred);
     expect(visible.size).toBe(3);
 
     batches.length = 0;
@@ -1596,11 +1524,7 @@ describe("createLodController — batch coalescing", () => {
     };
     const { controller, deferred, visible, touchedKeys, violations } =
       makeMirrored(structural);
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
-    for (const d of deferred.values()) d.resolve();
-    await settle();
+    await bootAndLand(controller, deferred);
     expect([...visible.keys()]).toEqual(["1-0-0-0"]);
 
     controller.setCamera(AWAY);
@@ -1638,26 +1562,6 @@ describe("createLodController — batch coalescing", () => {
 describe("createLodController — decoded single ownership", () => {
   /** What `tileBytes` charges for a position-only tile of this size. */
   const decodedBytes = (pointCount: number): number => pointCount * 12 + 64;
-
-  /** Source that ignores the abort signal: cancellation is advisory only. */
-  const uncancellableSource = (resolvers: Array<(tile: TileData) => void>) => ({
-    metadata: () => METADATA,
-    async nodes() {
-      return [
-        {
-          key: { level: 0, x: 0, y: 0, z: 0 },
-          pointCount: 100,
-          bounds: {
-            min: [-0.5, -0.5, -0.5] as [number, number, number],
-            max: [0.5, 0.5, 0.5] as [number, number, number],
-          },
-          spacing: 0.1,
-          children: [],
-        },
-      ];
-    },
-    loadTile: () => new Promise<TileData>((r) => resolvers.push(r)),
-  });
 
   it("reuses a canceled request's payload instead of reading the key again", async () => {
     const resolvers: Array<(tile: TileData) => void> = [];
@@ -1750,11 +1654,7 @@ describe("createLodController — decoded single ownership", () => {
 
   it("hands the cached payload to residency instead of copying it", async () => {
     const { controller, deferred } = makeController(SMALL_TREE);
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
-    for (const d of deferred.values()) d.resolve();
-    await settle();
+    await bootAndLand(controller, deferred);
     const residentBytes = controller.stats().residentBytes;
     expect(controller.stats().decodedTiles).toBe(3);
 
@@ -2274,11 +2174,7 @@ describe("createLodController — numeric configuration", () => {
 
   it("ignores live setter values outside their range", async () => {
     const { controller, deferred } = makeController(SMALL_TREE);
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
-    for (const d of deferred.values()) d.resolve();
-    await settle();
+    await bootAndLand(controller, deferred);
     const before = controller.stats();
     expect(before.residentTiles).toBe(3);
 
@@ -2317,11 +2213,7 @@ describe("createLodController — numeric configuration", () => {
 
   it("ignores a camera view carrying any non-finite number", async () => {
     const { controller, deferred } = makeController(SMALL_TREE);
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
-    for (const d of deferred.values()) d.resolve();
-    await settle();
+    await bootAndLand(controller, deferred);
     const before = controller.stats();
 
     const broken: CameraView[] = [
@@ -2353,17 +2245,9 @@ describe("createLodController — numeric configuration", () => {
   it("treats a memory pool that answers nonsense as no memory", async () => {
     const brokenPool: MemoryPool = {
       register: () => ({ budgetBytes: () => Number.NaN, release: () => {} }),
-      totalBytes: () => Number.NaN,
-      setTotalBytes: () => {},
       memberCount: () => 1,
     };
-    const fake = makeFakeSource(SMALL_TREE);
-    const sink = collectBatches();
-    const controller = createLodController({
-      source: fake.source,
-      onTiles: sink.onTiles,
-      scheduleRender: sink.scheduleRender,
-      selectionDelayMs: 0,
+    const { controller, loadCalls } = makeController(SMALL_TREE, {
       memory: brokenPool,
     });
     await settle();
@@ -2375,7 +2259,7 @@ describe("createLodController — numeric configuration", () => {
     expect(stats.pointBudget).toBe(0);
     expect(stats.memoryCeilingPoints).toBe(0);
     expect(stats.memoryBudgetBytes).toBe(0);
-    expect(fake.loadCalls).toEqual([]);
+    expect(loadCalls).toEqual([]);
     controller.dispose();
   });
 });

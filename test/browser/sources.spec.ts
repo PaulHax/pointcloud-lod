@@ -41,20 +41,20 @@ const CONVERGE_MS = 120_000;
  * trip is longer than a range read of the fixture, so the "still loading" a
  * check acted on could already have converged.
  */
-interface ExampleHandles {
+type ExampleHandles = {
   pointCloudExample: {
     stats(): ExampleStats;
     load(url: string): Promise<void>;
     dispose(): void;
   };
-}
+};
 
 /** Physical work the controller had outstanding at the instant of the act. */
-interface WorkInFlight {
+type WorkInFlight = {
   readonly tileReads: number;
   readonly pageReads: number;
   readonly residentTiles: number;
-}
+};
 
 /**
  * Act at the first instant the controller has a physical read outstanding.
@@ -105,7 +105,10 @@ const actWhileReading = (
   );
 
 /** Fail the scenario, rather than pass it, when the act missed its window. */
-const caughtLoading = (seen: WorkInFlight | null, when: string): WorkInFlight => {
+const caughtLoading = (
+  seen: WorkInFlight | null,
+  when: string,
+): WorkInFlight => {
   expect(
     seen,
     `${when}: the load drained before the act could land on it, so nothing was tested`,
@@ -142,7 +145,10 @@ const staysTornDown = async (
   while (Date.now() < deadline) {
     last = await session.stats();
     expect(last.controller, "the cloud came back after dispose").toBeNull();
-    expect(last.adapter, "the renderer adapter came back after dispose").toBeNull();
+    expect(
+      last.adapter,
+      "the renderer adapter came back after dispose",
+    ).toBeNull();
     expect(
       (await session.scene()).actors,
       "the renderer still holds actors a disposed adapter abandoned there",
@@ -193,14 +199,24 @@ const assertRendererMatchesController = (
   const cloud = stats.controller;
   const gpu = stats.adapter;
   expect(cloud, "the cloud is gone at the end of a switch").not.toBeNull();
-  expect(gpu, "the renderer adapter is gone at the end of a switch").not.toBeNull();
+  expect(
+    gpu,
+    "the renderer adapter is gone at the end of a switch",
+  ).not.toBeNull();
   // An empty cloud would satisfy every comparison below without holding
   // anything, so state that there is something to compare.
-  expect(stats.sourcePoints, "no asset behind the settled source").toBeGreaterThan(0);
-  expect(cloud!.residentTiles, "converged holding no tiles at all").toBeGreaterThan(0);
-  expect(gpu!.submittedTiles, "the renderer holds a different number of tiles").toBe(
+  expect(
+    stats.sourcePoints,
+    "no asset behind the settled source",
+  ).toBeGreaterThan(0);
+  expect(
     cloud!.residentTiles,
-  );
+    "converged holding no tiles at all",
+  ).toBeGreaterThan(0);
+  expect(
+    gpu!.submittedTiles,
+    "the renderer holds a different number of tiles",
+  ).toBe(cloud!.residentTiles);
   expect(gpu!.submittedPoints, "the two sides disagree on points held").toBe(
     cloud!.residentPoints,
   );
@@ -241,45 +257,57 @@ describe("switching sources faster than they load", () => {
     const session = await openExample({ cloud: first.urlPath });
     try {
       await session.setBudgetMode("fixed");
-      const alone = new Map([[first.urlPath, (await settledShape(session)).shape]]);
+      const alone = new Map([
+        [first.urlPath, (await settledShape(session)).shape],
+      ]);
       await session.load(second.urlPath);
       alone.set(second.urlPath, (await settledShape(session)).shape);
 
-      const { result: settled, samples } = await watching(session, SAMPLE_MS, async () => {
-        // Each switch is fired at an instant the cloud it replaces is provably
-        // still reading, so the controller being torn down always has work to
-        // abandon rather than merely usually having some.
-        const switches: readonly (readonly [CloudUnderTest, CloudUnderTest])[] = [
-          [first, second],
-          [second, first],
-          [first, second],
-        ];
-        for (const [from, to] of switches) {
-          caughtLoading(
-            await actWhileReading(session, {
-              begin: from.urlPath,
-              act: "load",
-              url: to.urlPath,
-            }),
-            `switching from ${from.name} to ${to.name}`,
-          );
-        }
-        // And once with no gap at all: the second call lands while the first
-        // has not even finished opening its source.
-        const opening = session.load(first.urlPath);
-        const overlapping = session.load(second.urlPath);
-        await Promise.all([opening, overlapping]);
-        return settleAndAssert(session, CONVERGE_MS);
-      });
-      expect(samples, "the live invariants were never sampled").toBeGreaterThan(0);
+      const { result: settled, samples } = await watching(
+        session,
+        SAMPLE_MS,
+        async () => {
+          // Each switch is fired at an instant the cloud it replaces is provably
+          // still reading, so the controller being torn down always has work to
+          // abandon rather than merely usually having some.
+          const switches: readonly (readonly [
+            CloudUnderTest,
+            CloudUnderTest,
+          ])[] = [
+            [first, second],
+            [second, first],
+            [first, second],
+          ];
+          for (const [from, to] of switches) {
+            caughtLoading(
+              await actWhileReading(session, {
+                begin: from.urlPath,
+                act: "load",
+                url: to.urlPath,
+              }),
+              `switching from ${from.name} to ${to.name}`,
+            );
+          }
+          // And once with no gap at all: the second call lands while the first
+          // has not even finished opening its source.
+          const opening = session.load(first.urlPath);
+          const overlapping = session.load(second.urlPath);
+          await Promise.all([opening, overlapping]);
+          return settleAndAssert(session, CONVERGE_MS);
+        },
+      );
+      expect(samples, "the live invariants were never sampled").toBeGreaterThan(
+        0,
+      );
 
       const keys = await session.keys();
       expect(settled.source, "settled on a source nobody asked for last").toBe(
         second.urlPath,
       );
-      expect(settled.sourcePoints, "the asset behind the last URL is not the one loaded").toBe(
-        alone.get(second.urlPath)!.sourcePoints,
-      );
+      expect(
+        settled.sourcePoints,
+        "the asset behind the last URL is not the one loaded",
+      ).toBe(alone.get(second.urlPath)!.sourcePoints);
       assertRendererMatchesController(settled, keys, await session.scene());
       // Loading that cloud alone is the whole answer; anything the storm added
       // or dropped shows as a different tile set for the same camera.
@@ -343,7 +371,9 @@ describe("switching sources faster than they load", () => {
         // The renderer holds what the live adapter holds — nothing from the
         // adapters this switch and every switch before it disposed.
         assertRendererMatchesController(stats, keys, scene);
-        expect(stats.source, `${when}: settled on the wrong source`).toBe(to.urlPath);
+        expect(stats.source, `${when}: settled on the wrong source`).toBe(
+          to.urlPath,
+        );
         expect(
           stats.adapter!.submittedTiles,
           `${when}: converged on a different tile count than loading it alone`,
@@ -360,6 +390,66 @@ describe("switching sources faster than they load", () => {
       await session.close();
     }
   });
+});
+
+describe("removing the anchor before its load has built anything", () => {
+  for (const cloud of cloudsUnderTest()) {
+    it(`stays torn down rather than being rebuilt by the load it cancelled: ${cloud.name}`, async () => {
+      // The other teardown check acts once the controller exists and has reads
+      // running. This is the window before that: between the source opening
+      // and the controller being wired, a dispose has nothing to dispose, so
+      // unless the teardown also supersedes the load in flight, that load
+      // simply carries on and installs a cloud into a page that asked for
+      // nothing — and no later dispose is coming to take it away again.
+      const session = await openExample({ cloud: cloud.urlPath });
+      try {
+        await session.setBudgetMode("fixed");
+        await settleAndAssert(session, CONVERGE_MS);
+
+        const seen = await session.page.evaluate(async (url) => {
+          const api = (window as unknown as ExampleHandles).pointCloudExample;
+          // Clear the loaded cloud first, so a controller afterwards can only
+          // have come from the load below.
+          api.dispose();
+          const before = api.stats().controller;
+          const started = api.load(url);
+          // Synchronous with the call, so this lands while the source is still
+          // opening — before `frameRoot`, the adapter, or the controller.
+          api.dispose();
+          const duringLoad = api.stats().controller;
+          await started;
+          return {
+            hadControllerBefore: before !== null,
+            hadControllerDuring: duringLoad !== null,
+          };
+        }, cloud.urlPath);
+
+        expect(
+          seen,
+          "the dispose did not land inside the window it was aimed at",
+        ).toEqual({ hadControllerBefore: false, hadControllerDuring: false });
+
+        const down = await staysTornDown(session, AFTER_DISPOSE_MS);
+        assertSettled(down, await session.keys());
+        expect(
+          (await session.scene()).actors,
+          "the cancelled load left actors in the renderer",
+        ).toBe(0);
+        expect(session.failures).toEqual([]);
+
+        // And the page is not wedged: asking for the cloud again works.
+        await session.load(cloud.urlPath);
+        const back = await settleAndAssert(session, CONVERGE_MS);
+        expect(
+          back.controller,
+          "the page never loaded another cloud",
+        ).not.toBeNull();
+        expect(session.failures).toEqual([]);
+      } finally {
+        await session.close();
+      }
+    });
+  }
 });
 
 describe("removing and recreating the anchor mid-load", () => {
@@ -409,8 +499,10 @@ describe("removing and recreating the anchor mid-load", () => {
               return settleAndAssert(session, CONVERGE_MS);
             },
           );
-          expect(samples, `cycle ${cycle}: the live invariants were never sampled`)
-            .toBeGreaterThan(0);
+          expect(
+            samples,
+            `cycle ${cycle}: the live invariants were never sampled`,
+          ).toBeGreaterThan(0);
 
           const keys = await session.keys();
           const scene = await session.scene();

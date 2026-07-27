@@ -5,25 +5,25 @@
  * `2^level` grid cells along each axis at that level.
  */
 
-export interface VoxelKey {
+export type VoxelKey = {
   readonly level: number;
   readonly x: number;
   readonly y: number;
   readonly z: number;
-}
+};
 
 export type Vec3 = readonly [number, number, number];
 
 /** Axis-aligned cube, the COPC root-node shape. */
-export interface Cube {
+export type Cube = {
   readonly center: Vec3;
   readonly halfSize: number;
-}
+};
 
-export interface Bounds {
+export type Bounds = {
   readonly min: Vec3;
   readonly max: Vec3;
-}
+};
 
 export const ROOT_KEY: VoxelKey = { level: 0, x: 0, y: 0, z: 0 };
 
@@ -53,16 +53,20 @@ export const keyFromString = (s: string): VoxelKey => {
   return key;
 };
 
-/** Parent key, or null for the root. */
-export const parentKey = (key: VoxelKey): VoxelKey | null =>
-  key.level === 0
-    ? null
-    : {
-        level: key.level - 1,
-        x: key.x >> 1,
-        y: key.y >> 1,
-        z: key.z >> 1,
-      };
+/**
+ * The level of an encoded key, without decoding the rest of it.
+ *
+ * Request order is by level first, and both queues sort on every selection
+ * pass, so this runs a few times per key per pass — enough that building a
+ * whole key object and running a regex to read one number off it is worth
+ * avoiding. Malformed input reads as `NaN`, which sorts as equal rather than
+ * throwing: an ordering is not the place to reject a key `keyFromString`
+ * refuses anyway.
+ */
+export const levelFromString = (s: string): number => {
+  const end = s.indexOf("-");
+  return end === -1 ? Number.NaN : Number(s.slice(0, end));
+};
 
 /** The 8 children of a node, in z-major bit order (dx fastest). */
 export const childKeys = (key: VoxelKey): VoxelKey[] => {
@@ -106,14 +110,11 @@ export const nodeBounds = (root: Cube, key: VoxelKey): Bounds => {
 
 /** Node bounds expressed as a cube (center + half size). */
 export const nodeCube = (root: Cube, key: VoxelKey): Cube => {
-  const { min, max } = nodeBounds(root, key);
+  const halfSize = root.halfSize / (1 << key.level);
+  const { min } = nodeBounds(root, key);
   return {
-    center: [
-      (min[0] + max[0]) / 2,
-      (min[1] + max[1]) / 2,
-      (min[2] + max[2]) / 2,
-    ],
-    halfSize: (max[0] - min[0]) / 2,
+    center: [min[0] + halfSize, min[1] + halfSize, min[2] + halfSize],
+    halfSize,
   };
 };
 

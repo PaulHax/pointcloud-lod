@@ -1,5 +1,5 @@
-import { fileURLToPath } from 'node:url';
-import { defineConfig } from 'vitest/config';
+import { fileURLToPath } from "node:url";
+import { defineConfig } from "vitest/config";
 
 const stub = (name: string): string =>
   fileURLToPath(new URL(`./test/stubs/${name}.ts`, import.meta.url));
@@ -11,14 +11,14 @@ export default defineConfig({
       // module scope. Keeping them separate lets core-only consumers install
       // without the peer.
       entry: {
-        index: 'src/index.ts',
-        rendererAdapter: 'src/rendererAdapter.ts',
+        index: "src/index.ts",
+        rendererAdapter: "src/rendererAdapter.ts",
       },
-      formats: ['es'],
+      formats: ["es"],
     },
     rollupOptions: {
       // Never bundle the vtk.js peer or the copc reader; consumers resolve them.
-      external: [/^@kitware\/vtk\.js/, 'copc'],
+      external: [/^@kitware\/vtk\.js/, "copc"],
     },
     sourcemap: true,
   },
@@ -26,17 +26,17 @@ export default defineConfig({
     // The browser checks need a built example, a served fixture, and Chromium.
     // They have their own config and command so this suite stays a fast,
     // dependency-free unit run.
-    exclude: ['**/node_modules/**', '**/dist/**', 'test/browser/**'],
+    exclude: ["**/node_modules/**", "**/dist/**", "test/browser/**"],
     // The adapter's vtk.js deep imports resolve to recording stubs so the
     // suite runs without the peer installed; real-GL behavior is covered by
     // downstream integration tests.
     alias: {
-      '@kitware/vtk.js/Rendering/Core/Actor': stub('vtkActor'),
-      '@kitware/vtk.js/Rendering/Core/PointGaussianMapper': stub(
-        'vtkPointGaussianMapper',
+      "@kitware/vtk.js/Rendering/Core/Actor": stub("vtkActor"),
+      "@kitware/vtk.js/Rendering/Core/PointGaussianMapper": stub(
+        "vtkPointGaussianMapper",
       ),
-      '@kitware/vtk.js/Common/DataModel/PolyData': stub('vtkPolyData'),
-      '@kitware/vtk.js/Common/Core/DataArray': stub('vtkDataArray'),
+      "@kitware/vtk.js/Common/DataModel/PolyData": stub("vtkPolyData"),
+      "@kitware/vtk.js/Common/Core/DataArray": stub("vtkDataArray"),
     },
   },
 });

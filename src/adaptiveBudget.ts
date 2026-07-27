@@ -38,6 +38,8 @@ import {
   finiteAbove,
   finiteAtLeast,
   finiteWithin,
+  percentile,
+  percentileOrNull,
   wholeAtLeast,
 } from "./numeric";
 
@@ -64,7 +66,7 @@ export type BudgetAdjustmentReason =
   | "seeded";
 
 /** The most recent decision a track made, whether or not it moved anything. */
-export interface BudgetAdjustment {
+export type BudgetAdjustment = {
   readonly atMs: number;
   readonly direction: BudgetAdjustmentDirection;
   readonly reason: BudgetAdjustmentReason;
@@ -72,9 +74,9 @@ export interface BudgetAdjustment {
   readonly toBudget: number;
   /** Percentile estimate the decision used; null when it had none. */
   readonly estimateMs: number | null;
-}
+};
 
-export interface AdaptiveBudgetOptions {
+export type AdaptiveBudgetOptions = {
   /**
    * Starting budget for both tracks, points, clamped into
    * [`minBudget`, `maxBudget`]. Default 1,000,000 — the moving regime's
@@ -115,9 +117,9 @@ export interface AdaptiveBudgetOptions {
   cooldownMs?: number;
   /** Samples a track needs before it will adjust at all. Default 8. */
   minSamples?: number;
-}
+};
 
-export interface AdaptiveBudgetTrackStats {
+export type AdaptiveBudgetTrackStats = {
   readonly budget: number;
   readonly samples: number;
   /** Percentile estimate of the current window, or null if empty. */
@@ -125,24 +127,26 @@ export interface AdaptiveBudgetTrackStats {
   readonly targetMs: number;
   /** Null until the track has made its first decision. */
   readonly lastAdjustment: BudgetAdjustment | null;
-}
+};
 
-export interface AdaptiveBudgetStats {
+export type AdaptiveBudgetStats = {
   readonly minBudget: number;
   /** Configured maximum, or null when none was configured. */
   readonly maxBudget: number | null;
+  /** Resolved minimum time between adjustments on a track, ms. */
+  readonly cooldownMs: number;
   readonly stationary: AdaptiveBudgetTrackStats;
   readonly interaction: AdaptiveBudgetTrackStats;
-}
+};
 
-export interface RecordFrameOptions {
+export type RecordFrameOptions = {
   /** Whether the camera was moving when this frame was rendered. */
   readonly interacting: boolean;
   /** Monotonic-ish timestamp in ms (the caller passes `Date.now()`). */
   readonly now: number;
-}
+};
 
-export interface AdaptiveBudget {
+export type AdaptiveBudget = {
   /**
    * Record one rendered frame's duration and return the (possibly updated)
    * budget for that frame's regime. Non-finite or negative durations, and a
@@ -160,7 +164,7 @@ export interface AdaptiveBudget {
    */
   restartAt(interacting: boolean, points: number, now: number): number;
   /** Immediately reduce one track, bypassing sample and cooldown thresholds. */
-  reduceNow(interacting: boolean, now: number, factor?: number): number;
+  reduceNow(interacting: boolean, now: number): number;
   /**
    * Bound both tracks by a ceiling the loop must not integrate past — the
    * memory-derived one, which moves as clouds come and go. `null` clears it;
@@ -171,7 +175,7 @@ export interface AdaptiveBudget {
    */
   setCeiling(points: number | null): void;
   stats(): AdaptiveBudgetStats;
-}
+};
 
 /** Shared so the governor's thresholds cannot drift from the loop's. */
 export const DEFAULTS = {
@@ -200,86 +204,54 @@ export const DEFAULTS = {
 const MAX_POINTS = Number.MAX_SAFE_INTEGER;
 
 /**
- * Nearest-rank percentile of `values` (0..1). Does not mutate the input.
- * `percentile(xs, 0.9)` of ten values returns the 9th-smallest.
+ * The emergency response is a halving: one step big enough to catch up with a
+ * gesture that is already missing frames.
  */
-export const percentile = (values: readonly number[], p: number): number => {
-  if (values.length === 0) return Number.NaN;
-  const sorted = [...values].sort((a, b) => a - b);
-  const clampedP = Math.min(Math.max(p, 0), 1);
-  const rank = Math.ceil(clampedP * sorted.length);
-  const index = Math.min(Math.max(rank - 1, 0), sorted.length - 1);
-  return sorted[index]!;
-};
+const EMERGENCY_CUT = 0.5;
 
-interface Track {
+/**
+ * How far a ceiling must rise past a pinned budget before the stale "clamped"
+ * verdict is cleared. Bytes-per-point jitter nudges the ceiling on every tile;
+ * only a rise with real room behind it is worth re-arming the loop for.
+ */
+const CEILING_RISE_MARGIN = 0.2;
+
+type Track = {
   budget: number;
   readonly samples: number[];
   readonly targetMs: number;
   lastAdjust: number;
   lastAdjustment: BudgetAdjustment | null;
-}
+};
 
 export const createAdaptiveBudget = (
   options: AdaptiveBudgetOptions = {},
 ): AdaptiveBudget => {
-  const minBudget = wholeAtLeast(
-    "minBudget",
-    options.minBudget ?? DEFAULTS.minBudget,
-    1,
-  );
+  // Each option is its own name, its own default, and its own guard. Spelling
+  // the key once keeps the thrown message, the default, and the bound from
+  // drifting apart the way three separate mentions of the name can.
+  type Guard = (name: string, value: number, ...bounds: number[]) => number;
+  const opt = (
+    key: keyof typeof DEFAULTS,
+    guard: Guard,
+    ...bounds: number[]
+  ): number => guard(key, options[key] ?? DEFAULTS[key], ...bounds);
+
+  const minBudget = opt("minBudget", wholeAtLeast, 1);
+  // No DEFAULTS entry: absent means unbounded, and the floor is its lower bound.
   const maxBudget =
     options.maxBudget === undefined
       ? Number.POSITIVE_INFINITY
       : wholeAtLeast("maxBudget", options.maxBudget, minBudget);
-  const stationaryTargetMs = finiteAbove(
-    "stationaryTargetMs",
-    options.stationaryTargetMs ?? DEFAULTS.stationaryTargetMs,
-    0,
-  );
-  const interactionTargetMs = finiteAbove(
-    "interactionTargetMs",
-    options.interactionTargetMs ?? DEFAULTS.interactionTargetMs,
-    0,
-  );
-  const windowSize = wholeAtLeast(
-    "windowSize",
-    options.windowSize ?? DEFAULTS.windowSize,
-    1,
-  );
-  const percentileP = finiteWithin(
-    "percentile",
-    options.percentile ?? DEFAULTS.percentile,
-    0,
-    1,
-  );
-  const hysteresis = finiteWithin(
-    "hysteresis",
-    options.hysteresis ?? DEFAULTS.hysteresis,
-    0,
-    1,
-  );
-  const maxIncreaseStep = finiteAtLeast(
-    "maxIncreaseStep",
-    options.maxIncreaseStep ?? DEFAULTS.maxIncreaseStep,
-    0,
-  );
-  const maxDecreaseStep = finiteWithin(
-    "maxDecreaseStep",
-    options.maxDecreaseStep ?? DEFAULTS.maxDecreaseStep,
-    0,
-    1,
-  );
-  const cooldownMs = finiteAtLeast(
-    "cooldownMs",
-    options.cooldownMs ?? DEFAULTS.cooldownMs,
-    0,
-  );
-  const minSamples = wholeAtLeast(
-    "minSamples",
-    options.minSamples ?? DEFAULTS.minSamples,
-    1,
-  );
+  const stationaryTargetMs = opt("stationaryTargetMs", finiteAbove, 0);
+  const interactionTargetMs = opt("interactionTargetMs", finiteAbove, 0);
+  const windowSize = opt("windowSize", wholeAtLeast, 1);
+  const percentileP = opt("percentile", finiteWithin, 0, 1);
+  const hysteresis = opt("hysteresis", finiteWithin, 0, 1);
+  const maxIncreaseStep = opt("maxIncreaseStep", finiteAtLeast, 0);
+  const maxDecreaseStep = opt("maxDecreaseStep", finiteWithin, 0, 1);
+  const cooldownMs = opt("cooldownMs", finiteAtLeast, 0);
+  const minSamples = opt("minSamples", wholeAtLeast, 1);
   // A window smaller than minSamples could never reach the threshold, which
   // would silently freeze the loop; cap the requirement at the window size.
   const effectiveMinSamples = Math.min(minSamples, windowSize);
@@ -294,9 +266,7 @@ export const createAdaptiveBudget = (
       Math.max(minBudget, Math.min(points, maxBudget, ceiling, MAX_POINTS)),
     );
 
-  const initialBudget = clamp(
-    wholeAtLeast("initialBudget", options.initialBudget ?? DEFAULTS.initialBudget, 1),
-  );
+  const initialBudget = clamp(opt("initialBudget", wholeAtLeast, 1));
 
   const newTrack = (targetMs: number): Track => ({
     budget: initialBudget,
@@ -389,7 +359,11 @@ export const createAdaptiveBudget = (
   return {
     recordFrame(durationMs, { interacting, now }) {
       const track = trackFor(interacting);
-      if (Number.isFinite(durationMs) && durationMs >= 0 && Number.isFinite(now)) {
+      if (
+        Number.isFinite(durationMs) &&
+        durationMs >= 0 &&
+        Number.isFinite(now)
+      ) {
         track.samples.push(durationMs);
         if (track.samples.length > windowSize) track.samples.shift();
         adjust(track, now);
@@ -407,7 +381,8 @@ export const createAdaptiveBudget = (
 
     restartAt(interacting, points, now) {
       const track = trackFor(interacting);
-      if (!Number.isFinite(points) || !Number.isFinite(now)) return track.budget;
+      if (!Number.isFinite(points) || !Number.isFinite(now))
+        return track.budget;
       const from = track.budget;
       track.budget = clamp(points);
       track.samples.length = 0;
@@ -421,13 +396,10 @@ export const createAdaptiveBudget = (
       return track.budget;
     },
 
-    reduceNow(interacting, now, factor = 0.5) {
+    reduceNow(interacting, now) {
       const track = trackFor(interacting);
-      const safeFactor = Number.isFinite(factor)
-        ? Math.min(Math.max(factor, 0), 1)
-        : 0.5;
       const from = track.budget;
-      const next = clamp(track.budget * safeFactor);
+      const next = clamp(track.budget * EMERGENCY_CUT);
       if (next !== from) {
         track.budget = next;
         track.samples.length = 0;
@@ -474,7 +446,7 @@ export const createAdaptiveBudget = (
         for (const track of [stationary, interaction]) {
           if (
             track.lastAdjustment?.reason === "clamped" &&
-            ceiling > track.budget * (1 + hysteresis)
+            ceiling > track.budget * (1 + CEILING_RISE_MARGIN)
           ) {
             track.lastAdjustment = null;
           }
@@ -486,14 +458,14 @@ export const createAdaptiveBudget = (
       const trackStats = (track: Track): AdaptiveBudgetTrackStats => ({
         budget: track.budget,
         samples: track.samples.length,
-        estimateMs:
-          track.samples.length > 0 ? percentile(track.samples, percentileP) : null,
+        estimateMs: percentileOrNull(track.samples, percentileP),
         targetMs: track.targetMs,
         lastAdjustment: track.lastAdjustment,
       });
       return {
         minBudget,
         maxBudget: Number.isFinite(maxBudget) ? maxBudget : null,
+        cooldownMs,
         stationary: trackStats(stationary),
         interaction: trackStats(interaction),
       };

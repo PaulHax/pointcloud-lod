@@ -16,9 +16,25 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { chromium, type Browser, type ConsoleMessage, type Page } from "playwright";
+import {
+  chromium,
+  type Browser,
+  type ConsoleMessage,
+  type Page,
+} from "playwright";
 
+// The example hands these three back verbatim, so the harness names the
+// library's own types rather than a copy that can drift lossy. `import type`
+// is erased under `verbatimModuleSyntax`, so nothing here loads vtk.js in Node.
+// `RendererAdapterStats` comes from its own module: index.ts deliberately does
+// not re-export it.
+import type { LodControllerStats } from "../../src/controller";
+import type { RendererAdapterStats } from "../../src/rendererAdapter";
+import type { ViewGovernorStats } from "../../src/viewGovernor";
 import { startStaticServer, type StaticServer } from "./server";
+
+/** Failure messages in this suite carry the whole sample, pretty-printed. */
+export const shown = (value: unknown): string => JSON.stringify(value, null, 2);
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "../..");
@@ -56,7 +72,7 @@ export const extraClouds = (): string[] =>
  * label and the URL are positional on purpose: a run's output should not
  * disclose which datasets a deployment pointed it at.
  */
-export interface CloudUnderTest {
+export type CloudUnderTest = {
   readonly name: string;
   readonly urlPath: string;
   readonly files: Record<string, string>;
@@ -67,7 +83,7 @@ export interface CloudUnderTest {
   readonly deep: boolean;
   /** Its hierarchy spans more than one page, so pages must be fetched to select. */
   readonly multipage: boolean;
-}
+};
 
 export const FIXTURE_CLOUD: CloudUnderTest = {
   name: "the fixture",
@@ -112,91 +128,34 @@ export const cloudPair = (): [CloudUnderTest, CloudUnderTest] => {
   return [FIXTURE_CLOUD, MULTIPAGE_CLOUD];
 };
 
-export interface ExampleStats {
-  controller: {
-    residentTiles: number;
-    residentPoints: number;
-    residentBytes: number;
-    decodedTiles: number;
-    decodedBytes: number;
-    cachedTiles: number;
-    cachedBytes: number;
-    cacheBytes: number;
-    inFlight: number;
-    hierarchyInFlight: number;
-    queuedTiles: number;
-    physicalTileOperations: number;
-    queuedPages: number;
-    physicalHierarchyOperations: number;
-    fetchConcurrency: number;
-    hierarchyConcurrency: number;
-    pointBudget: number;
-    memoryCeilingPoints: number;
-    memoryBudgetBytes: number;
-    active: boolean;
-    selection: {
-      generation: number;
-      targetRevision: number;
-      targetTiles: number;
-      targetPoints: number;
-      /** Selected tiles decoded nowhere — neither resident nor cached. */
-      targetUndecodedTiles: number;
-      readyTerminalFrontier: {
-        count: number;
-        projectedSpacingCssPx: { p50: number | null; p75: number | null };
-      };
-    };
-  } | null;
-  adapter: {
-    submittedTiles: number;
-    submittedPoints: number;
-    submittedBytes: number;
-    pooledTiles: number;
-    pooledBytes: number;
-    pooledPoints: number;
-    gpuResidentTiles: number;
-    gpuResidentPoints: number;
-    gpuResidentBytes: number;
-    resourceCeilingBytes: number;
-    drawnTiles: number;
-    drawnPoints: number;
-    visible: boolean;
-  } | null;
-  governor: {
-    regime: "interaction" | "stationary";
-    targetFrameTimeMs: number;
-    trackBudget: number;
-    aggregateBudget: number;
-    activeConstraint: string;
-    memoryCeilingPoints: number | null;
-    needsFrame: boolean;
-    motion: { source: string | null; settling: boolean };
-    lastAdjustment: { reason: string; direction: string } | null;
-  } | null;
+export type ExampleStats = {
+  controller: LodControllerStats | null;
+  adapter: RendererAdapterStats | null;
+  governor: ViewGovernorStats | null;
   lastFrameMs: number;
   source: string | null;
   /** Points the loaded asset holds in total, per its COPC header. */
   sourcePoints: number;
-}
+};
 
-export interface ExampleKeys {
+export type ExampleKeys = {
   controller: { resident: string[]; submitted: string[] } | null;
   adapter: { submitted: string[]; pooled: string[] } | null;
-}
+};
 
-export interface Viewport {
+export type Viewport = {
   width: number;
   height: number;
-}
+};
 
 /** What the renderer holds, read from the scene rather than from the adapter. */
-export interface SceneReading {
+export type SceneReading = {
   actors: number;
   pointSizeDevicePx: number | null;
   mapperScaleFactor: number | null;
-}
+};
 
-export interface ExampleSession {
+export type ExampleSession = {
   readonly page: Page;
   readonly origin: string;
   /** Every uncaught error and rejected promise the page produced. */
@@ -246,7 +205,7 @@ export interface ExampleSession {
   /** Wait for selection and loading to converge and the view to stop asking. */
   settle(timeoutMs?: number): Promise<ExampleStats>;
   close(): Promise<void>;
-}
+};
 
 let sharedBrowser: Browser | null = null;
 
@@ -302,37 +261,27 @@ export const DEFAULT_VIEWPORT: Viewport = { width: 1280, height: 720 };
 const POLL_INTERVAL_MS = 50;
 /** Selection is debounced, so convergence needs a quiet window, not an
  * instant. Comfortably over the controller's 150 ms selection delay. */
-const SETTLE_QUIET_MS = 400;
+export const SETTLE_QUIET_MS = 400;
 
 /**
  * Open the built example with a cloud loaded.
  *
- * `cloud` is a URL path this harness serves (the fixture) or an absolute
- * `file:`-free path already exposed by `roots`.
+ * `cloud` is a URL path this harness serves: a committed fixture, or the
+ * positional path `cloudsUnderTest()` gives a supplied cloud.
  */
 export const openExample = async (
-  options: {
-    cloud?: string;
-    roots?: Record<string, string>;
-    files?: Record<string, string>;
-    query?: Record<string, string>;
-  } = {},
+  options: { cloud?: string } = {},
 ): Promise<ExampleSession> => {
   const cloud = options.cloud ?? FIXTURE_URL_PATH;
   const server: StaticServer = await startStaticServer(
     {
       "/fixtures": FIXTURES,
-      ...options.roots,
       // The example is the fallback root, so it must be matched last.
       "/": EXAMPLE_DIST,
     },
     // Every cloud is reachable from every session, so a scenario can switch
     // sources without standing up a second server.
-    Object.assign(
-      {},
-      ...cloudsUnderTest().map((entry) => entry.files),
-      options.files ?? {},
-    ),
+    Object.assign({}, ...cloudsUnderTest().map((entry) => entry.files)),
   );
   const page = await (await browser()).newPage();
   const failures: string[] = [];
@@ -341,15 +290,15 @@ export const openExample = async (
     if (message.type() === "error") failures.push(`console: ${message.text()}`);
   });
 
-  const query = new URLSearchParams({ url: cloud, ...options.query });
+  const query = new URLSearchParams({ url: cloud });
   await page.goto(`${server.origin}/?${query}`, { waitUntil: "load" });
   await page.waitForFunction(
     () => (window as never as ExampleWindow).pointCloudExample !== undefined,
   );
 
   const stats = (): Promise<ExampleStats> =>
-    page.evaluate(
-      () => (window as never as ExampleWindow).pointCloudExample.stats(),
+    page.evaluate(() =>
+      (window as never as ExampleWindow).pointCloudExample.stats(),
     ) as Promise<ExampleStats>;
 
   const until = async (
@@ -365,7 +314,7 @@ export const openExample = async (
       await page.waitForTimeout(POLL_INTERVAL_MS);
     }
     throw new Error(
-      `timed out waiting for ${describe}\nlast stats: ${JSON.stringify(last, null, 2)}`,
+      `timed out waiting for ${describe}\nlast stats: ${shown(last)}`,
     );
   };
 
@@ -375,16 +324,16 @@ export const openExample = async (
     failures,
     stats,
     keys: () =>
-      page.evaluate(
-        () => (window as never as ExampleWindow).pointCloudExample.keys(),
+      page.evaluate(() =>
+        (window as never as ExampleWindow).pointCloudExample.keys(),
       ) as Promise<ExampleKeys>,
     viewport: () =>
-      page.evaluate(
-        () => (window as never as ExampleWindow).pointCloudExample.viewport(),
+      page.evaluate(() =>
+        (window as never as ExampleWindow).pointCloudExample.viewport(),
       ) as Promise<Viewport>,
     scene: () =>
-      page.evaluate(
-        () => (window as never as ExampleWindow).pointCloudExample.scene(),
+      page.evaluate(() =>
+        (window as never as ExampleWindow).pointCloudExample.scene(),
       ) as Promise<SceneReading>,
     drag: async (steps, pauseMs = 16) => {
       const box = await page.locator("#viewer").boundingBox();
@@ -456,47 +405,60 @@ export const openExample = async (
     },
     load: (url) =>
       page.evaluate(
-        (target) => (window as never as ExampleWindow).pointCloudExample.load(target),
+        (target) =>
+          (window as never as ExampleWindow).pointCloudExample.load(target),
         url,
       ),
     readCamera: () =>
-      page.evaluate(
-        () => (window as never as ExampleWindow).pointCloudExample.camera.read(),
+      page.evaluate(() =>
+        (window as never as ExampleWindow).pointCloudExample.camera.read(),
       ),
     place: (next) =>
       page.evaluate(
         (value) =>
-          (window as never as ExampleWindow).pointCloudExample.camera.place(value),
+          (window as never as ExampleWindow).pointCloudExample.camera.place(
+            value,
+          ),
         next as Record<string, unknown>,
       ),
     azimuth: (degrees) =>
       page.evaluate(
         (value) =>
-          (window as never as ExampleWindow).pointCloudExample.camera.azimuth(value),
+          (window as never as ExampleWindow).pointCloudExample.camera.azimuth(
+            value,
+          ),
         degrees,
       ),
     dolly: (factor) =>
       page.evaluate(
         (value) =>
-          (window as never as ExampleWindow).pointCloudExample.camera.dolly(value),
+          (window as never as ExampleWindow).pointCloudExample.camera.dolly(
+            value,
+          ),
         factor,
       ),
     setProjection: (projection) =>
       page.evaluate(
         (value) =>
-          (window as never as ExampleWindow).pointCloudExample.setProjection(value),
+          (window as never as ExampleWindow).pointCloudExample.setProjection(
+            value,
+          ),
         projection,
       ),
     setBudgetMode: (mode) =>
       page.evaluate(
         (value) =>
-          (window as never as ExampleWindow).pointCloudExample.setBudgetMode(value),
+          (window as never as ExampleWindow).pointCloudExample.setBudgetMode(
+            value,
+          ),
         mode,
       ),
     setVisible: (visible) =>
       page.evaluate(
         (value) =>
-          (window as never as ExampleWindow).pointCloudExample.setVisible(value),
+          (window as never as ExampleWindow).pointCloudExample.setVisible(
+            value,
+          ),
         visible,
       ),
     setActive: (active) =>
@@ -508,17 +470,17 @@ export const openExample = async (
     setDevicePixelRatio: (ratio) =>
       page.evaluate(
         (value) =>
-          (window as never as ExampleWindow).pointCloudExample.setDevicePixelRatio(
-            value,
-          ),
+          (
+            window as never as ExampleWindow
+          ).pointCloudExample.setDevicePixelRatio(value),
         ratio,
       ),
     setSyntheticFrameMs: (ms) =>
       page.evaluate(
         (value) =>
-          (window as never as ExampleWindow).pointCloudExample.setSyntheticFrameMs(
-            value,
-          ),
+          (
+            window as never as ExampleWindow
+          ).pointCloudExample.setSyntheticFrameMs(value),
         ms,
       ),
     render: () =>
@@ -571,7 +533,7 @@ export const openExample = async (
         await page.waitForTimeout(POLL_INTERVAL_MS);
       }
       throw new Error(
-        `timed out waiting for convergence\nlast stats: ${JSON.stringify(last, null, 2)}`,
+        `timed out waiting for convergence\nlast stats: ${shown(last)}`,
       );
     },
     close: async () => {
@@ -596,16 +558,16 @@ export const openExample = async (
   return session;
 };
 
-export interface CameraReading {
+export type CameraReading = {
   position: number[];
   focalPoint: number[];
   viewUp: number[];
   parallelScale: number;
   viewAngle: number;
   parallelProjection: boolean;
-}
+};
 
-interface ExampleWindow {
+export type ExampleWindow = {
   pointCloudExample: {
     stats(): ExampleStats;
     keys(): ExampleKeys;
@@ -628,4 +590,4 @@ interface ExampleWindow {
     render(): void;
     dispose(): void;
   };
-}
+};

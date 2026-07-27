@@ -44,7 +44,10 @@ const readPin = () => {
 
 const gitOutput = (cwd, ...args) => {
   try {
-    return execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "ignore"] })
+    return execFileSync("git", args, {
+      cwd,
+      stdio: ["ignore", "pipe", "ignore"],
+    })
       .toString()
       .trim();
   } catch {
@@ -115,14 +118,18 @@ const checkExampleBundle = () => {
     // The mapper the renderer adapter instantiates.
     vtkPointGaussianMapper: registers(text, "vtkPointGaussianMapper"),
     // Without the OpenGL override the mapper draws nothing.
-    vtkOpenGLPointGaussianMapper: registers(text, "vtkOpenGLPointGaussianMapper"),
+    vtkOpenGLPointGaussianMapper: registers(
+      text,
+      "vtkOpenGLPointGaussianMapper",
+    ),
     // Both arrive with the Geometry profile the example must import.
     vtkOpenGLPolyDataMapper: registers(text, "vtkOpenGLPolyDataMapper"),
     vtkOpenGLActor: registers(text, "vtkOpenGLActor"),
     // World-space point sizing is the fork feature the pinned commit adds.
-    worldSize: /["'`]scaleFactor["'`]\s*,\s*["'`]circle["'`]\s*,\s*["'`]worldSize["'`]/.test(
-      text,
-    ),
+    worldSize:
+      /["'`]scaleFactor["'`]\s*,\s*["'`]circle["'`]\s*,\s*["'`]worldSize["'`]/.test(
+        text,
+      ),
   };
   const missing = Object.entries(required)
     .filter(([, present]) => !present)

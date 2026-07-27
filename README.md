@@ -59,7 +59,15 @@ import { createRendererAdapter } from "pointcloud-lod/vtk";
 
 // A coalescing render request the host owns (must not render synchronously
 // more than once per event-loop turn).
-const scheduleRender = () => renderWindow.render();
+let frameQueued = false;
+const scheduleRender = () => {
+  if (frameQueued) return;
+  frameQueued = true;
+  requestAnimationFrame(() => {
+    frameQueued = false;
+    renderWindow.render();
+  });
+};
 
 // 1. A tile source. COPC reads a static .copc.laz over HTTP Range requests,
 //    so any static file host works with no tile server:
@@ -92,7 +100,10 @@ controller.setCamera({
 });
 adapter.setDevicePixelRatio(window.devicePixelRatio);
 
-// Tear down when done (both are idempotent):
+// Tear down when done. Both are idempotent, and BOTH are required: the
+// controller's teardown hands its tiles back as removals, which the adapter
+// answers by pooling those actors for reuse, so disposing only the controller
+// leaves GPU resources alive with nothing left to reclaim them.
 controller.dispose();
 adapter.dispose();
 ```
@@ -269,7 +280,7 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
   Tiles and hierarchy pages get separate ceilings (`fetchConcurrency`,
   default 6, and `hierarchyConcurrency`, default 4) because a page unblocks
   selection for a whole subtree and must not queue behind tile fetches that
-  cannot be chosen correctly until it lands. Both ceilings count *physical*
+  cannot be chosen correctly until it lands. Both ceilings count _physical_
   operations: cancellation is advisory wherever the underlying reader takes
   no signal, so an abandoned read keeps its slot until its promise settles
   and a look-away/look-back storm cannot multiply real I/O.
@@ -298,7 +309,7 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
   rest. Controllers have no adaptive loop of their own; this is the only route
   to adaptive quality.
 
-Camera math (`frustumPlanes`, `screenSpaceError`) is pure and
+Camera math (`frustumPlanes`, `nodeScreenSpaceError`) is pure and
 renderer-agnostic: the controller takes a view-projection matrix and camera
 parameters as plain arrays, and requests renders only through an injected
 coalescing `scheduleRender` callback — the host owns render pacing. Both

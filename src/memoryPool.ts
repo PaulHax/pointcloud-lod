@@ -10,8 +10,8 @@
  *
  * One pool per GPU (in practice: per page). Every controller registers as a
  * member and receives an even share of the total, so N clouds never multiply
- * the memory footprint by N. Membership changes and total changes notify the
- * remaining members so they can re-derive their ceilings and reselect.
+ * the memory footprint by N. Membership changes notify the remaining members
+ * so they can re-derive their ceilings and reselect.
  */
 
 const MiB = 1024 * 1024;
@@ -33,47 +33,55 @@ export const defaultMemoryBudgetBytes = (): number => {
   const nav = (globalThis as { navigator?: { deviceMemory?: unknown } })
     .navigator;
   const deviceGb = nav?.deviceMemory;
-  if (typeof deviceGb === 'number' && Number.isFinite(deviceGb) && deviceGb > 0) {
-    return Math.min(Math.max((deviceGb * 1024 * MiB) / 8, 256 * MiB), 1024 * MiB);
+  if (
+    typeof deviceGb === "number" &&
+    Number.isFinite(deviceGb) &&
+    deviceGb > 0
+  ) {
+    return Math.min(
+      Math.max((deviceGb * 1024 * MiB) / 8, 256 * MiB),
+      1024 * MiB,
+    );
   }
   return DEFAULT_MEMORY_BUDGET_BYTES;
 };
 
-export interface MemoryPoolMember {
+export type MemoryPoolMember = {
   /** This member's current byte allowance (an even share of the total). */
   budgetBytes(): number;
   /** Leave the pool; the remaining members' shares grow. Idempotent. */
   release(): void;
-}
+};
 
-export interface MemoryPoolOptions {
+export type MemoryPoolOptions = {
   /** Total byte budget to divide. Default `defaultMemoryBudgetBytes()`. */
   totalBytes?: number;
-}
+};
 
-export interface MemoryPool {
+export type MemoryPool = {
   /**
    * Join the pool. `onChange` fires whenever this member's share moves —
    * another member joined or left, or the total changed — but never during
    * this `register` call itself.
    */
   register(onChange?: () => void): MemoryPoolMember;
-  totalBytes(): number;
-  /** Change the total; every member is notified. */
-  setTotalBytes(bytes: number): void;
   memberCount(): number;
-}
+};
 
 export const createMemoryPool = (
   options: MemoryPoolOptions = {},
 ): MemoryPool => {
-  let totalBytes = Math.max(
+  const totalBytes = Math.max(
     1,
     Math.floor(options.totalBytes ?? defaultMemoryBudgetBytes()),
   );
   const members = new Set<{ onChange?: () => void }>();
 
   const notify = (except?: object): void => {
+    // Snapshot deliberately: an `onChange` may release ANOTHER member, and a
+    // Set drops a not-yet-visited entry deleted mid-iteration. Every member
+    // registered when the change happened is entitled to hear about it.
+    // oxlint-disable-next-line unicorn/no-useless-spread
     for (const member of [...members]) {
       if (member !== except) member.onChange?.();
     }
@@ -86,26 +94,14 @@ export const createMemoryPool = (
       // The new member reads its share lazily via budgetBytes(); only the
       // existing members need to hear that their shares shrank.
       notify(entry);
-      let released = false;
       return {
         budgetBytes: () =>
-          released ? 0 : Math.floor(totalBytes / Math.max(1, members.size)),
+          members.has(entry) ? Math.floor(totalBytes / members.size) : 0,
         release: () => {
-          if (released) return;
-          released = true;
-          members.delete(entry);
-          notify();
+          // Set.delete answers false on the second call — idempotence for free.
+          if (members.delete(entry)) notify();
         },
       };
-    },
-
-    totalBytes: () => totalBytes,
-
-    setTotalBytes(bytes) {
-      const next = Math.max(1, Math.floor(bytes));
-      if (next === totalBytes) return;
-      totalBytes = next;
-      notify();
     },
 
     memberCount: () => members.size,

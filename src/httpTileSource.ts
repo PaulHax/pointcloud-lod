@@ -12,8 +12,7 @@
 
 import { keyFromString, keyToString, type VoxelKey } from "./octree";
 import type {
-  LoadNodesOptions,
-  LoadTileOptions,
+  LoadOptions,
   NodeInfo,
   TileData,
   TileSource,
@@ -69,7 +68,7 @@ export const parsePct1 = (buffer: ArrayBuffer): TileData => {
   return { origin, positions, rgb, pointCount };
 };
 
-interface HierarchyEntryJson {
+type HierarchyEntryJson = {
   readonly pointCount: number;
   readonly bounds: {
     readonly min: readonly [number, number, number];
@@ -78,9 +77,9 @@ interface HierarchyEntryJson {
   readonly spacing: number;
   readonly children: readonly string[];
   readonly page: string | null;
-}
+};
 
-export interface HttpTileSourceOptions {
+export type HttpTileSourceOptions = {
   /**
    * Base URL of one asset revision, absolute or page-relative, without a
    * trailing slash — e.g. `/pointcloud/<asset>/<revision>`.
@@ -90,7 +89,7 @@ export interface HttpTileSourceOptions {
   metadata: TileSourceMetadata;
   /** Injectable fetch for tests; defaults to the global. */
   fetchImpl?: typeof fetch;
-}
+};
 
 export const createHttpTileSource = (
   options: HttpTileSourceOptions,
@@ -113,7 +112,7 @@ export const createHttpTileSource = (
   return {
     metadata: () => metadata,
 
-    async nodes(key: VoxelKey, opts?: LoadNodesOptions): Promise<NodeInfo[]> {
+    async nodes(key: VoxelKey, opts?: LoadOptions): Promise<NodeInfo[]> {
       const response = await request(
         `${endpoint}/hierarchy/${keyToString(key)}.json`,
         opts?.signal,
@@ -127,11 +126,11 @@ export const createHttpTileSource = (
         bounds: entry.bounds,
         spacing: entry.spacing,
         children: entry.children.map(keyFromString),
-        pageRef: entry.page !== null && entry.page === keyString,
+        pageRef: entry.page === keyString,
       }));
     },
 
-    async loadTile(key: VoxelKey, opts?: LoadTileOptions): Promise<TileData> {
+    async loadTile(key: VoxelKey, opts?: LoadOptions): Promise<TileData> {
       const response = await request(
         `${endpoint}/tile/${keyToString(key)}.bin`,
         opts?.signal,

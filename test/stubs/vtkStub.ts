@@ -5,7 +5,7 @@
  * state for assertions.
  */
 
-export interface StubActor {
+export type StubActor = {
   setMapper: (mapper: unknown) => void;
   setUserMatrix: (matrix: number[]) => void;
   setVisibility: (visible: boolean) => void;
@@ -17,7 +17,7 @@ export interface StubActor {
   visibility: boolean;
   pointSize: number;
   deleted: boolean;
-}
+};
 
 export const actorInstances: StubActor[] = [];
 
@@ -52,7 +52,7 @@ export const makeActor = (): StubActor => {
   return actor;
 };
 
-export interface StubMapper {
+export type StubMapper = {
   setInputData: (data: unknown) => void;
   setStatic: (value: boolean) => void;
   setScaleFactor: (scale: number) => void;
@@ -61,7 +61,7 @@ export interface StubMapper {
   static: boolean;
   scaleFactor: number;
   deleted: boolean;
-}
+};
 
 export const mapperInstances: StubMapper[] = [];
 
@@ -88,14 +88,14 @@ export const makeMapper = (): StubMapper => {
   return mapper;
 };
 
-export interface StubPolyData {
+export type StubPolyData = {
   getPoints: () => { setData: (values: unknown, components: number) => void };
   getPointData: () => { setScalars: (array: unknown) => void };
   delete: () => void;
   points: unknown;
   scalars: unknown;
   deleted: boolean;
-}
+};
 
 export const polyDataInstances: StubPolyData[] = [];
 

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PerspectiveCameraView } from "./camera";
 import { createLodController } from "./controller";
 import { keyToString, type VoxelKey } from "./octree";
-import { createRendererAdapter } from "./rendererAdapter";
+import { createRendererAdapter, type RendererAdapter } from "./rendererAdapter";
 import type { NodeInfo, TileData, TileSource } from "./tileSource";
 import {
   actorInstances,
@@ -43,6 +43,15 @@ const makeAdapter = (options?: {
   return { adapter, renderer, scheduleRender };
 };
 
+/** The two half-empty batch shapes every test but the live-controller one sends. */
+const add = (
+  adapter: RendererAdapter,
+  ...entries: { key: VoxelKey; tile: TileData }[]
+): void => adapter.applyBatch({ added: entries, removed: [] });
+
+const drop = (adapter: RendererAdapter, ...keys: VoxelKey[]): void =>
+  adapter.applyBatch({ added: [], removed: keys });
+
 /** Live actors, keyed by the payload they draw — the adapter's visible truth. */
 const drawnPositions = (): Set<Float32Array> => {
   const positions = new Set<Float32Array>();
@@ -65,7 +74,7 @@ describe("createRendererAdapter", () => {
       devicePixelRatio: 2,
     });
     const data = tile([10, 20, 30]);
-    adapter.applyBatch({ added: [{ key: KEY_A, tile: data }], removed: [] });
+    add(adapter, { key: KEY_A, tile: data });
 
     expect(adapter.stats()).toEqual({
       submittedTiles: 1,
@@ -101,19 +110,13 @@ describe("createRendererAdapter", () => {
 
   it("skips scalars for tiles without RGB", () => {
     const { adapter } = makeAdapter();
-    adapter.applyBatch({
-      added: [{ key: KEY_A, tile: tile([0, 0, 0], 2, false) }],
-      removed: [],
-    });
+    add(adapter, { key: KEY_A, tile: tile([0, 0, 0], 2, false) });
     expect(polyDataInstances[0]!.scalars).toBeNull();
   });
 
   it("composes the base matrix with each tile origin", () => {
     const { adapter } = makeAdapter();
-    adapter.applyBatch({
-      added: [{ key: KEY_A, tile: tile([1, 2, 3]) }],
-      removed: [],
-    });
+    add(adapter, { key: KEY_A, tile: tile([1, 2, 3]) });
 
     // base = translation by (10, 20, 30): composed translation adds up.
     adapter.setBaseMatrix([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 10, 20, 30, 1]);
@@ -127,10 +130,7 @@ describe("createRendererAdapter", () => {
 
   it("does not repaint for an unchanged base matrix", () => {
     const { adapter, scheduleRender } = makeAdapter();
-    adapter.applyBatch({
-      added: [{ key: KEY_A, tile: tile([1, 2, 3]) }],
-      removed: [],
-    });
+    add(adapter, { key: KEY_A, tile: tile([1, 2, 3]) });
     const matrix = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 10, 20, 30, 1];
     adapter.setBaseMatrix(matrix);
 
@@ -146,13 +146,11 @@ describe("createRendererAdapter", () => {
 
   it("fans out CSS diameter and DPR to every tile actor", () => {
     const { adapter, scheduleRender } = makeAdapter();
-    adapter.applyBatch({
-      added: [
-        { key: KEY_A, tile: tile([0, 0, 0]) },
-        { key: KEY_B, tile: tile([1, 0, 0]) },
-      ],
-      removed: [],
-    });
+    add(
+      adapter,
+      { key: KEY_A, tile: tile([0, 0, 0]) },
+      { key: KEY_B, tile: tile([1, 0, 0]) },
+    );
 
     scheduleRender.mockClear();
     adapter.setPointDiameterCssPx(7);
@@ -173,10 +171,7 @@ describe("createRendererAdapter", () => {
       diameterCssPx: 2.5,
       devicePixelRatio: 1,
     });
-    adapter.applyBatch({
-      added: [{ key: KEY_A, tile: tile([0, 0, 0]) }],
-      removed: [],
-    });
+    add(adapter, { key: KEY_A, tile: tile([0, 0, 0]) });
     expect(actorInstances[0]!.pointSize).toBe(2.5);
     expect(mapperInstances[0]!.scaleFactor).toBe(1);
 
@@ -189,13 +184,11 @@ describe("createRendererAdapter", () => {
 
   it("dispose releases everything and is idempotent", () => {
     const { adapter, renderer } = makeAdapter();
-    adapter.applyBatch({
-      added: [
-        { key: KEY_A, tile: tile([0, 0, 0]) },
-        { key: KEY_B, tile: tile([1, 0, 0]) },
-      ],
-      removed: [],
-    });
+    add(
+      adapter,
+      { key: KEY_A, tile: tile([0, 0, 0]) },
+      { key: KEY_B, tile: tile([1, 0, 0]) },
+    );
     adapter.dispose();
     adapter.dispose();
 
@@ -204,10 +197,7 @@ describe("createRendererAdapter", () => {
     expect(actorInstances.every((a) => a.deleted)).toBe(true);
 
     // Batches after dispose are ignored.
-    adapter.applyBatch({
-      added: [{ key: KEY_A, tile: tile([0, 0, 0]) }],
-      removed: [],
-    });
+    add(adapter, { key: KEY_A, tile: tile([0, 0, 0]) });
     expect(adapter.stats().gpuResidentTiles).toBe(0);
   });
 });
@@ -223,23 +213,18 @@ describe("adapter visibility", () => {
     expect(scheduleRender).toHaveBeenCalledTimes(2);
 
     // Loading afterwards behaves exactly as it would have before the toggle.
-    adapter.applyBatch({
-      added: [{ key: KEY_A, tile: tile([0, 0, 0]) }],
-      removed: [],
-    });
+    add(adapter, { key: KEY_A, tile: tile([0, 0, 0]) });
     expect(adapter.stats()).toMatchObject({ submittedTiles: 1, drawnTiles: 1 });
     expect(actorInstances[0]!.visibility).toBe(true);
   });
 
   it("keeps submitted actors and their resources across a hide/show", () => {
     const { adapter, renderer, scheduleRender } = makeAdapter();
-    adapter.applyBatch({
-      added: [
-        { key: KEY_A, tile: tile([0, 0, 0]) },
-        { key: KEY_B, tile: tile([1, 0, 0]) },
-      ],
-      removed: [],
-    });
+    add(
+      adapter,
+      { key: KEY_A, tile: tile([0, 0, 0]) },
+      { key: KEY_B, tile: tile([1, 0, 0]) },
+    );
 
     scheduleRender.mockClear();
     adapter.setVisible(false);
@@ -280,10 +265,7 @@ describe("adapter visibility", () => {
     adapter.setVisible(false);
 
     // Loading continues while hidden: batches must not be dropped.
-    adapter.applyBatch({
-      added: [{ key: KEY_A, tile: tile([0, 0, 0]) }],
-      removed: [],
-    });
+    add(adapter, { key: KEY_A, tile: tile([0, 0, 0]) });
     expect(renderer.addActor).toHaveBeenCalledTimes(1);
     expect(actorInstances[0]!.visibility).toBe(false);
     expect(adapter.stats()).toMatchObject({
@@ -302,11 +284,11 @@ describe("adapter visibility", () => {
   it("restores tiles resubmitted after a controller reactivation", () => {
     const { adapter, renderer } = makeAdapter();
     const data = tile([0, 0, 0]);
-    adapter.applyBatch({ added: [{ key: KEY_A, tile: data }], removed: [] });
+    add(adapter, { key: KEY_A, tile: data });
     adapter.setVisible(false);
 
     // Deactivation drops residency: the removal is what frees the cloud.
-    adapter.applyBatch({ added: [], removed: [KEY_A] });
+    drop(adapter, KEY_A);
     expect(adapter.stats()).toMatchObject({
       submittedTiles: 0,
       pooledTiles: 1,
@@ -314,7 +296,7 @@ describe("adapter visibility", () => {
     });
 
     // Reactivation resubmits the cached payload while still hidden.
-    adapter.applyBatch({ added: [{ key: KEY_A, tile: data }], removed: [] });
+    add(adapter, { key: KEY_A, tile: data });
     expect(actorInstances).toHaveLength(1);
     expect(renderer.addActor).toHaveBeenCalledTimes(1);
     expect(actorInstances[0]!.visibility).toBe(false);
@@ -330,10 +312,7 @@ describe("adapter visibility", () => {
 
   it("starts hidden when constructed hidden", () => {
     const { adapter } = makeAdapter({ visible: false });
-    adapter.applyBatch({
-      added: [{ key: KEY_A, tile: tile([0, 0, 0]) }],
-      removed: [],
-    });
+    add(adapter, { key: KEY_A, tile: tile([0, 0, 0]) });
     expect(actorInstances[0]!.visibility).toBe(false);
     expect(adapter.stats()).toMatchObject({
       submittedTiles: 1,
@@ -346,11 +325,8 @@ describe("adapter visibility", () => {
 describe("adapter resource pool", () => {
   it("hides a removed actor synchronously and pools it", () => {
     const { adapter, renderer } = makeAdapter();
-    adapter.applyBatch({
-      added: [{ key: KEY_A, tile: tile([0, 0, 0]) }],
-      removed: [],
-    });
-    adapter.applyBatch({ added: [], removed: [KEY_A] });
+    add(adapter, { key: KEY_A, tile: tile([0, 0, 0]) });
+    drop(adapter, KEY_A);
 
     expect(actorInstances[0]!.visibility).toBe(false);
     expect(adapter.stats()).toMatchObject({
@@ -376,21 +352,22 @@ describe("adapter resource pool", () => {
 
   it("brings the pool back under its ceiling on a batch of pure removals", () => {
     const { adapter, renderer } = makeAdapter();
-    adapter.applyBatch({
-      added: [
-        { key: KEY_A, tile: tile([0, 0, 0]) },
-        { key: KEY_B, tile: tile([1, 0, 0]) },
-      ],
-      removed: [],
-    });
+    add(
+      adapter,
+      { key: KEY_A, tile: tile([0, 0, 0]) },
+      { key: KEY_B, tile: tile([1, 0, 0]) },
+    );
     // Below one tile, so nothing may stay pooled once it is off screen.
     adapter.setResourceCeilingBytes(50);
-    expect(adapter.stats()).toMatchObject({ submittedTiles: 2, pooledTiles: 0 });
+    expect(adapter.stats()).toMatchObject({
+      submittedTiles: 2,
+      pooledTiles: 0,
+    });
 
     // Deactivating a cloud sends exactly this: removals and nothing else. The
     // pool used to be trimmed only while adding, so these actors stayed on the
     // GPU until some other cloud happened to add a tile.
-    adapter.applyBatch({ added: [], removed: [KEY_A, KEY_B] });
+    drop(adapter, KEY_A, KEY_B);
 
     expect(adapter.stats()).toMatchObject({
       submittedTiles: 0,
@@ -404,9 +381,9 @@ describe("adapter resource pool", () => {
   it("reuses a pooled actor when the same payload returns", () => {
     const { adapter, renderer } = makeAdapter();
     const data = tile([0, 0, 0]);
-    adapter.applyBatch({ added: [{ key: KEY_A, tile: data }], removed: [] });
-    adapter.applyBatch({ added: [], removed: [KEY_A] });
-    adapter.applyBatch({ added: [{ key: KEY_A, tile: data }], removed: [] });
+    add(adapter, { key: KEY_A, tile: data });
+    drop(adapter, KEY_A);
+    add(adapter, { key: KEY_A, tile: data });
 
     expect(renderer.addActor).toHaveBeenCalledTimes(1);
     expect(renderer.removeActor).not.toHaveBeenCalled();
@@ -420,17 +397,11 @@ describe("adapter resource pool", () => {
 
   it("releases a pooled actor rather than resurrect an obsolete payload", () => {
     const { adapter, renderer } = makeAdapter();
-    adapter.applyBatch({
-      added: [{ key: KEY_A, tile: tile([0, 0, 0]) }],
-      removed: [],
-    });
-    adapter.applyBatch({ added: [], removed: [KEY_A] });
+    add(adapter, { key: KEY_A, tile: tile([0, 0, 0]) });
+    drop(adapter, KEY_A);
 
     const refreshed = tile([5, 0, 0], 3);
-    adapter.applyBatch({
-      added: [{ key: KEY_A, tile: refreshed }],
-      removed: [],
-    });
+    add(adapter, { key: KEY_A, tile: refreshed });
 
     expect(actorInstances).toHaveLength(2);
     expect(actorInstances[0]!.deleted).toBe(true);
@@ -448,16 +419,13 @@ describe("adapter resource pool", () => {
   it("replaces a submitted tile whose payload changed", () => {
     const { adapter, renderer, scheduleRender } = makeAdapter();
     const data = tile([0, 0, 0]);
-    adapter.applyBatch({ added: [{ key: KEY_A, tile: data }], removed: [] });
+    add(adapter, { key: KEY_A, tile: data });
 
     // A re-addition without a paired removal is the controller reporting a
     // new payload for a key already on screen.
     const refreshed = tile([0, 0, 0], 4);
     scheduleRender.mockClear();
-    adapter.applyBatch({
-      added: [{ key: KEY_A, tile: refreshed }],
-      removed: [],
-    });
+    add(adapter, { key: KEY_A, tile: refreshed });
 
     expect(actorInstances).toHaveLength(2);
     expect(actorInstances[0]!.deleted).toBe(true);
@@ -477,10 +445,10 @@ describe("adapter resource pool", () => {
   it("ignores a repeated addition of the payload already on screen", () => {
     const { adapter, renderer, scheduleRender } = makeAdapter();
     const data = tile([0, 0, 0]);
-    adapter.applyBatch({ added: [{ key: KEY_A, tile: data }], removed: [] });
+    add(adapter, { key: KEY_A, tile: data });
 
     scheduleRender.mockClear();
-    adapter.applyBatch({ added: [{ key: KEY_A, tile: data }], removed: [] });
+    add(adapter, { key: KEY_A, tile: data });
     expect(actorInstances).toHaveLength(1);
     expect(renderer.addActor).toHaveBeenCalledTimes(1);
     expect(renderer.removeActor).not.toHaveBeenCalled();
@@ -490,15 +458,9 @@ describe("adapter resource pool", () => {
   it("evicts pooled resources at the shared-memory ceiling", () => {
     const { adapter, renderer } = makeAdapter();
     adapter.setResourceCeilingBytes(94);
-    adapter.applyBatch({
-      added: [{ key: KEY_A, tile: tile([0, 0, 0]) }],
-      removed: [],
-    });
-    adapter.applyBatch({ added: [], removed: [KEY_A] });
-    adapter.applyBatch({
-      added: [{ key: KEY_B, tile: tile([1, 0, 0]) }],
-      removed: [],
-    });
+    add(adapter, { key: KEY_A, tile: tile([0, 0, 0]) });
+    drop(adapter, KEY_A);
+    add(adapter, { key: KEY_B, tile: tile([1, 0, 0]) });
 
     expect(renderer.removeActor).toHaveBeenCalledTimes(1);
     expect(actorInstances[0]!.deleted).toBe(true);
@@ -512,16 +474,63 @@ describe("adapter resource pool", () => {
     });
   });
 
+  it("keeps its byte accounting exact while a whole pool is shed", () => {
+    // The trim loop and every stats() answer read running totals rather than
+    // walking both maps, so a mutation path that forgot to keep them means an
+    // adapter that trims to the wrong number for the rest of the session. A
+    // deactivated cloud — nothing but removals, then a ceiling of zero — is
+    // both the longest eviction and the one where drift would show up as
+    // actors left on the GPU.
+    const { adapter, renderer } = makeAdapter();
+    const keys = Array.from({ length: 64 }, (_, index) => ({
+      level: 3,
+      x: index % 8,
+      y: Math.floor(index / 8),
+      z: 0,
+    }));
+    add(
+      adapter,
+      ...keys.map((key) => ({ key, tile: tile([key.x, key.y, 0]) })),
+    );
+    expect(adapter.stats()).toMatchObject({
+      submittedTiles: 64,
+      submittedBytes: 64 * 94,
+      pooledTiles: 0,
+      pooledBytes: 0,
+    });
+
+    drop(adapter, ...keys);
+    expect(adapter.stats()).toMatchObject({
+      submittedTiles: 0,
+      submittedBytes: 0,
+      pooledTiles: 64,
+      pooledBytes: 64 * 94,
+      gpuResidentBytes: 64 * 94,
+    });
+
+    adapter.setResourceCeilingBytes(0);
+    expect(renderer.removeActor).toHaveBeenCalledTimes(64);
+    expect(adapter.stats()).toMatchObject({
+      submittedTiles: 0,
+      submittedBytes: 0,
+      submittedPoints: 0,
+      pooledTiles: 0,
+      pooledBytes: 0,
+      pooledPoints: 0,
+      gpuResidentBytes: 0,
+      gpuResidentPoints: 0,
+    });
+    expect(adapter.activeKeys()).toEqual({ submitted: [], pooled: [] });
+  });
+
   it("never trims a submitted actor, however tight the ceiling", () => {
     const { adapter, renderer } = makeAdapter();
-    adapter.applyBatch({
-      added: [
-        { key: KEY_A, tile: tile([0, 0, 0]) },
-        { key: KEY_B, tile: tile([1, 0, 0]) },
-      ],
-      removed: [],
-    });
-    adapter.applyBatch({ added: [], removed: [KEY_B] });
+    add(
+      adapter,
+      { key: KEY_A, tile: tile([0, 0, 0]) },
+      { key: KEY_B, tile: tile([1, 0, 0]) },
+    );
+    drop(adapter, KEY_B);
 
     adapter.setResourceCeilingBytes(0);
     expect(renderer.removeActor).toHaveBeenCalledTimes(1);
@@ -535,10 +544,7 @@ describe("adapter resource pool", () => {
     });
 
     // Still tight: the next addition trims nothing it is not allowed to.
-    adapter.applyBatch({
-      added: [{ key: KEY_B, tile: tile([2, 0, 0]) }],
-      removed: [],
-    });
+    add(adapter, { key: KEY_B, tile: tile([2, 0, 0]) });
     expect(adapter.stats()).toMatchObject({
       submittedTiles: 2,
       pooledTiles: 0,
@@ -548,14 +554,12 @@ describe("adapter resource pool", () => {
 
   it("dispose releases submitted and pooled actors exactly once", () => {
     const { adapter, renderer } = makeAdapter();
-    adapter.applyBatch({
-      added: [
-        { key: KEY_A, tile: tile([0, 0, 0]) },
-        { key: KEY_B, tile: tile([1, 0, 0]) },
-      ],
-      removed: [],
-    });
-    adapter.applyBatch({ added: [], removed: [KEY_B] });
+    add(
+      adapter,
+      { key: KEY_A, tile: tile([0, 0, 0]) },
+      { key: KEY_B, tile: tile([1, 0, 0]) },
+    );
+    drop(adapter, KEY_B);
 
     adapter.dispose();
     const released = renderer.removeActor.mock.calls.map(([actor]) => actor);
@@ -571,9 +575,7 @@ describe("adapter resource pool", () => {
 
 const IDENTITY_VIEW_PROJ = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 /** Pushes everything 10 units off in clip x: nothing is visible. */
-const LOOK_AWAY_VIEW_PROJ = [
-  1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -10, 0, 0, 1,
-];
+const LOOK_AWAY_VIEW_PROJ = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -10, 0, 0, 1];
 
 const cameraView = (viewProj: number[]): PerspectiveCameraView => ({
   projection: "perspective",

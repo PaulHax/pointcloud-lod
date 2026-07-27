@@ -31,14 +31,22 @@ const moveAndSettle = (governor: ViewGovernor, settleMs: number): void => {
   vi.advanceTimersByTime(settleMs);
 };
 
-describe("createViewGovernor", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-    clock = 0;
-  });
-  afterEach(() => vi.useRealTimers());
+/** Settles in 100 ms, adjusts on every 8-frame window, no recovery cooldown. */
+const FAST_ADAPT = {
+  initialBudget: 1_000_000,
+  interactionSettleMs: 100,
+  minSamples: 8,
+  cooldownMs: 0,
+} as const;
 
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(0);
+  clock = 0;
+});
+afterEach(() => vi.useRealTimers());
+
+describe("createViewGovernor", () => {
   it("distributes one aggregate budget by projected importance", () => {
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
     const a = vi.fn();
@@ -100,13 +108,6 @@ describe("createViewGovernor", () => {
 });
 
 describe("createViewGovernor motion references", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-    clock = 0;
-  });
-  afterEach(() => vi.useRealTimers());
-
   it("holds the moving regime until the last source releases", () => {
     const governor = createViewGovernor({ interactionSettleMs: 100 });
     governor.register({ setPointBudget: vi.fn() });
@@ -164,13 +165,6 @@ describe("createViewGovernor motion references", () => {
 });
 
 describe("createViewGovernor stationary refinement", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-    clock = 0;
-  });
-  afterEach(() => vi.useRealTimers());
-
   it("starts stationary at the last moving budget without a jump", () => {
     const governor = createViewGovernor({
       initialBudget: 1_000_000,
@@ -238,13 +232,53 @@ describe("createViewGovernor stationary refinement", () => {
     governor.dispose();
   });
 
-  it("raises quality gradually while stationary frames are fast", () => {
+  it("keeps adapting when the host stops stamping its frames", () => {
+    // A host that reports `now` on some frames and not others — a metric
+    // collected on a sampling interval, a frame assembled by a path that lost
+    // it — hands the governor its epoch once and then goes quiet. Holding the
+    // last stamp as the current time freezes the clock there: the emergency
+    // cooldown armed by the slow frame below can never elapse, so no later
+    // frame is ever measured and the budget stays halved for the session.
+    vi.setSystemTime(1_700_000_000_000);
     const governor = createViewGovernor({
       initialBudget: 1_000_000,
-      interactionSettleMs: 100,
-      minSamples: 8,
-      cooldownMs: 0,
+      interactionSettleMs: 750,
     });
+    governor.register({ setPointBudget: vi.fn() }).update({
+      projectedImportance: 1,
+    });
+
+    // The one stamped frame, and it is slow enough to force an emergency cut
+    // while the camera moves: that is what arms the cooldown.
+    const gesture = governor.beginMotion("explicit");
+    governor.recordHostFrame({ hostFrameMs: 400, now: 0 });
+    const cut = governor.stats().trackBudget;
+    expect(cut).toBeLessThan(1_000_000);
+
+    // Every frame from here carries no stamp at all, and each takes 16 ms of
+    // real time, so the cooldown is long past by the end of the first burst.
+    const unstampedFrames = (count: number): void => {
+      for (let index = 0; index < count; index += 1) {
+        governor.recordHostFrame({ hostFrameMs: 2 });
+        vi.advanceTimersByTime(16);
+      }
+    };
+
+    unstampedFrames(400);
+    expect(governor.stats().trackBudget).toBeGreaterThan(cut);
+
+    gesture.release();
+    vi.advanceTimersByTime(750);
+    const seeded = governor.stats().trackBudget;
+    unstampedFrames(600);
+    const stats = governor.stats();
+    expect(stats.regime).toBe("stationary");
+    expect(stats.trackBudget).toBeGreaterThan(seeded);
+    governor.dispose();
+  });
+
+  it("raises quality gradually while stationary frames are fast", () => {
+    const governor = createViewGovernor(FAST_ADAPT);
     const setBudget = vi.fn();
     governor.register({ setPointBudget: setBudget });
     moveAndSettle(governor, 100);
@@ -261,12 +295,7 @@ describe("createViewGovernor stationary refinement", () => {
   });
 
   it("lowers quality while stationary frames are slow", () => {
-    const governor = createViewGovernor({
-      initialBudget: 1_000_000,
-      interactionSettleMs: 100,
-      minSamples: 8,
-      cooldownMs: 0,
-    });
+    const governor = createViewGovernor(FAST_ADAPT);
     governor.register({ setPointBudget: vi.fn() });
     moveAndSettle(governor, 100);
 
@@ -283,12 +312,7 @@ describe("createViewGovernor stationary refinement", () => {
 
   it("converges inside hysteresis and then stops asking for frames", () => {
     // A device where cost is ~ budget: 33ms at 2M points.
-    const governor = createViewGovernor({
-      initialBudget: 1_000_000,
-      interactionSettleMs: 100,
-      minSamples: 8,
-      cooldownMs: 0,
-    });
+    const governor = createViewGovernor(FAST_ADAPT);
     governor.register({ setPointBudget: vi.fn() });
     moveAndSettle(governor, 100);
     const frameMsFor = (points: number): number => points / 60_606;
@@ -319,12 +343,7 @@ describe("createViewGovernor stationary refinement", () => {
   });
 
   it("keeps asking for frames while tiles and pages are still landing", () => {
-    const governor = createViewGovernor({
-      initialBudget: 1_000_000,
-      interactionSettleMs: 100,
-      minSamples: 8,
-      cooldownMs: 0,
-    });
+    const governor = createViewGovernor(FAST_ADAPT);
     const member = governor.register({ setPointBudget: vi.fn() });
     moveAndSettle(governor, 100);
     frames(governor, 33, 8); // straight into the dead-band
@@ -332,19 +351,17 @@ describe("createViewGovernor stationary refinement", () => {
 
     member.update({ physicalTileOperations: 2 });
     expect(governor.needsFrame()).toBe(true);
-    member.update({ physicalTileOperations: 0, physicalHierarchyOperations: 1 });
+    member.update({
+      physicalTileOperations: 0,
+      physicalHierarchyOperations: 1,
+    });
     expect(governor.needsFrame()).toBe(true);
     member.update({ physicalHierarchyOperations: 0 });
     expect(governor.needsFrame()).toBe(false);
   });
 
   it("returns to the moving track the moment motion resumes", () => {
-    const governor = createViewGovernor({
-      initialBudget: 1_000_000,
-      interactionSettleMs: 100,
-      minSamples: 8,
-      cooldownMs: 0,
-    });
+    const governor = createViewGovernor(FAST_ADAPT);
     const setBudget = vi.fn();
     governor.register({ setPointBudget: setBudget });
     moveAndSettle(governor, 100);
@@ -363,12 +380,7 @@ describe("createViewGovernor stationary refinement", () => {
   });
 
   it("decides each regime only from frames measured in that regime", () => {
-    const governor = createViewGovernor({
-      initialBudget: 1_000_000,
-      interactionSettleMs: 100,
-      minSamples: 8,
-      cooldownMs: 0,
-    });
+    const governor = createViewGovernor(FAST_ADAPT);
     governor.register({ setPointBudget: vi.fn() });
 
     const gesture = governor.beginMotion("explicit");
@@ -391,13 +403,6 @@ describe("createViewGovernor stationary refinement", () => {
 });
 
 describe("createViewGovernor emergency response", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-    clock = 0;
-  });
-  afterEach(() => vi.useRealTimers());
-
   it("reduces immediately on a severely missed frame while moving", () => {
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
     const setBudget = vi.fn();
@@ -496,12 +501,7 @@ describe("createViewGovernor emergency response", () => {
   });
 
   it("keeps the moving window across bursts inside the settle window", () => {
-    const governor = createViewGovernor({
-      initialBudget: 1_000_000,
-      interactionSettleMs: 100,
-      minSamples: 8,
-      cooldownMs: 0,
-    });
+    const governor = createViewGovernor(FAST_ADAPT);
     const setBudget = vi.fn();
     governor.register({ setPointBudget: setBudget });
     // Eight begin/release pairs with one fast frame each — the shape wheel
@@ -580,13 +580,6 @@ describe("createViewGovernor emergency response", () => {
 });
 
 describe("createViewGovernor ceilings", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-    clock = 0;
-  });
-  afterEach(() => vi.useRealTimers());
-
   it("caps the budget at a configured maximum below the memory ceiling", () => {
     const governor = createViewGovernor({
       initialBudget: 1_000_000,
@@ -766,13 +759,6 @@ describe("createViewGovernor ceilings", () => {
 });
 
 describe("createViewGovernor diagnostics", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-    clock = 0;
-  });
-  afterEach(() => vi.useRealTimers());
-
   it("reports the constraint the arithmetic actually produced", () => {
     const cases = [
       { maxBudget: undefined, memory: 5_000_000, expect: "adaptive" },
@@ -815,7 +801,10 @@ describe("createViewGovernor diagnostics", () => {
       minSamples: 8,
       cooldownMs: 0,
     });
-    const member = governor.register({ setPointBudget: vi.fn(), id: "cloud-1" });
+    const member = governor.register({
+      setPointBudget: vi.fn(),
+      id: "cloud-1",
+    });
     member.update({
       projectedImportance: 2.5,
       memoryCeilingPoints: 9_000_000,
@@ -866,13 +855,6 @@ describe("createViewGovernor diagnostics", () => {
 });
 
 describe("createViewGovernor numeric configuration", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-    clock = 0;
-  });
-  afterEach(() => vi.useRealTimers());
-
   const NON_FINITE = [
     Number.NaN,
     Number.POSITIVE_INFINITY,

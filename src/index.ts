@@ -12,28 +12,18 @@ export {
   type Bounds,
 } from "./octree";
 
-export { createLruCache, type LruCache, type LruCacheOptions } from "./lru";
-
-export {
-  selectNodes,
-  type HierarchyNode,
-  type SelectNodesOptions,
-  type NodeSelection,
-} from "./budget";
-
 export type {
   TileSource,
   TileSourceMetadata,
   NodeInfo,
   TileData,
-  LoadTileOptions,
+  LoadOptions,
 } from "./tileSource";
 
 export {
   frustumPlanes,
   boundsIntersectsFrustum,
   distanceToBounds,
-  screenSpaceError,
   perspectiveScreenSpaceError,
   orthographicScreenSpaceError,
   nodeScreenSpaceError,
@@ -74,8 +64,6 @@ export {
   // policy moves.
   DEFAULTS,
   type AdaptiveBudgetOptions,
-  type AdaptiveBudgetStats,
-  type AdaptiveBudgetTrackStats,
   type BudgetAdjustment,
   type BudgetAdjustmentDirection,
   type BudgetAdjustmentReason,

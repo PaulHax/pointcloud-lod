@@ -6,14 +6,15 @@ import {
   createHttpTileSource,
   parsePct1,
 } from "./httpTileSource";
+import { ROOT_KEY } from "./octree";
 import type { TileSourceMetadata } from "./tileSource";
 
-interface Pct1Spec {
+type Pct1Spec = {
   origin: [number, number, number];
   positions: number[];
   rgb?: number[];
   magic?: string;
-}
+};
 
 const makePct1 = ({
   origin,
@@ -47,6 +48,14 @@ const makePct1 = ({
 const METADATA: TileSourceMetadata = {
   pointCount: 12,
 };
+
+/** Builds a source on a stub fetch, keeping the mock-to-`fetch` cast in one place. */
+const sourceOn = (endpoint: string, fetchImpl: ReturnType<typeof vi.fn>) =>
+  createHttpTileSource({
+    endpoint,
+    metadata: METADATA,
+    fetchImpl: fetchImpl as typeof fetch,
+  });
 
 describe("parsePct1", () => {
   it("parses a golden payload", () => {
@@ -116,13 +125,9 @@ describe("createHttpTileSource", () => {
           { status: 200 },
         ),
     );
-    const source = createHttpTileSource({
-      endpoint: "/pointcloud/a/rev1",
-      metadata: METADATA,
-      fetchImpl: fetchImpl as unknown as typeof fetch,
-    });
+    const source = sourceOn("/pointcloud/a/rev1", fetchImpl);
 
-    const nodes = await source.nodes({ level: 0, x: 0, y: 0, z: 0 });
+    const nodes = await source.nodes(ROOT_KEY);
     expect(fetchImpl).toHaveBeenCalledWith(
       "/pointcloud/a/rev1/hierarchy/0-0-0-0.json",
       undefined,
@@ -144,17 +149,10 @@ describe("createHttpTileSource", () => {
     const fetchImpl = vi.fn(
       async () => new Response(JSON.stringify({ nodes: {} }), { status: 200 }),
     );
-    const source = createHttpTileSource({
-      endpoint: "/pc/a/rev1",
-      metadata: METADATA,
-      fetchImpl: fetchImpl as unknown as typeof fetch,
-    });
+    const source = sourceOn("/pc/a/rev1", fetchImpl);
 
     const controller = new AbortController();
-    await source.nodes(
-      { level: 0, x: 0, y: 0, z: 0 },
-      { signal: controller.signal },
-    );
+    await source.nodes(ROOT_KEY, { signal: controller.signal });
     expect(fetchImpl).toHaveBeenCalledWith(
       "/pc/a/rev1/hierarchy/0-0-0-0.json",
       { signal: controller.signal },
@@ -168,11 +166,7 @@ describe("createHttpTileSource", () => {
       rgb: [200, 5, 255],
     });
     const fetchImpl = vi.fn(async () => new Response(payload, { status: 200 }));
-    const source = createHttpTileSource({
-      endpoint: "http://host/pc/a/rev1",
-      metadata: METADATA,
-      fetchImpl: fetchImpl as unknown as typeof fetch,
-    });
+    const source = sourceOn("http://host/pc/a/rev1", fetchImpl);
 
     const controller = new AbortController();
     const tile = await source.loadTile(
@@ -191,25 +185,15 @@ describe("createHttpTileSource", () => {
 
   it("maps HTTP 410 to RevisionGoneError", async () => {
     const fetchImpl = vi.fn(async () => new Response(null, { status: 410 }));
-    const source = createHttpTileSource({
-      endpoint: "/pc/a/dead",
-      metadata: METADATA,
-      fetchImpl: fetchImpl as unknown as typeof fetch,
-    });
-    await expect(
-      source.loadTile({ level: 0, x: 0, y: 0, z: 0 }),
-    ).rejects.toBeInstanceOf(RevisionGoneError);
+    const source = sourceOn("/pc/a/dead", fetchImpl);
+    await expect(source.loadTile(ROOT_KEY)).rejects.toBeInstanceOf(
+      RevisionGoneError,
+    );
   });
 
   it("rejects other HTTP errors with the status", async () => {
     const fetchImpl = vi.fn(async () => new Response(null, { status: 404 }));
-    const source = createHttpTileSource({
-      endpoint: "/pc/a/rev1",
-      metadata: METADATA,
-      fetchImpl: fetchImpl as unknown as typeof fetch,
-    });
-    await expect(source.nodes({ level: 0, x: 0, y: 0, z: 0 })).rejects.toThrow(
-      /404/,
-    );
+    const source = sourceOn("/pc/a/rev1", fetchImpl);
+    await expect(source.nodes(ROOT_KEY)).rejects.toThrow(/404/);
   });
 });

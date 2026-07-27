@@ -12,7 +12,9 @@
       <header class="title-row">
         <h1>pointcloud-lod</h1>
         <div class="title-actions">
-          <button id="reset-view" type="button" class="ghost">Reset view</button>
+          <button id="reset-view" type="button" class="ghost">
+            Reset view
+          </button>
           <span id="regime" class="regime" data-regime="idle">no cloud</span>
         </div>
       </header>
@@ -70,7 +72,13 @@
         <div class="field-grid">
           <div>
             <label for="moving-target">Moving target (ms)</label>
-            <input id="moving-target" type="number" min="1" step="1" value="16" />
+            <input
+              id="moving-target"
+              type="number"
+              min="1"
+              step="1"
+              value="16"
+            />
           </div>
           <div>
             <label for="stationary-target">Settled target (ms)</label>
@@ -83,7 +91,9 @@
             />
           </div>
         </div>
-        <label for="max-points">Maximum budget (points, blank = memory only)</label>
+        <label for="max-points"
+          >Maximum budget (points, blank = memory only)</label
+        >
         <input
           id="max-points"
           type="number"
@@ -93,7 +103,9 @@
         />
       </div>
 
-      <output id="message" role="status">Choose a local COPC file or URL.</output>
+      <output id="message" role="status"
+        >Choose a local COPC file or URL.</output
+      >
       <div id="stats" aria-label="Streaming diagnostics"></div>
     </section>
     <main id="viewer"></main>

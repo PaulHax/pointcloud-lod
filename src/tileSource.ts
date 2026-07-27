@@ -9,13 +9,23 @@
 
 import type { Bounds, Vec3, VoxelKey } from "./octree";
 
-export interface TileSourceMetadata {
+export type TileSourceMetadata = {
   /** Total points in the dataset. */
   readonly pointCount: number;
-}
+  /**
+   * The data's own extent, when the source knows it.
+   *
+   * Deliberately not the octree's root cube: that cube encloses the data, so
+   * for a survey far wider than it is tall its centre sits high in empty air —
+   * a host framing the scene from it orbits about a point in the sky. A source
+   * that cannot state the real extent omits this, and a host then has nothing
+   * to frame from but the root node's bounds.
+   */
+  readonly bounds?: Bounds;
+};
 
 /** One hierarchy entry, as delivered by a hierarchy page. */
-export interface NodeInfo {
+export type NodeInfo = {
   readonly key: VoxelKey;
   /** Points stored in this node (0 is legal: structural node). */
   readonly pointCount: number;
@@ -33,10 +43,10 @@ export interface NodeInfo {
    * `key`: call `nodes(key)` to materialize the subtree before using it.
    */
   readonly pageRef?: boolean;
-}
+};
 
 /** Decoded payload of one octree node. */
-export interface TileData {
+export type TileData = {
   /** World-space origin the tile-local positions are relative to. */
   readonly origin: Vec3;
   /** Tile-local xyz triplets, `3 * pointCount` floats. */
@@ -44,37 +54,34 @@ export interface TileData {
   /** Optional per-point color, `3 * pointCount` bytes (RGB). */
   readonly rgb?: Uint8Array;
   readonly pointCount: number;
-}
-
-export interface LoadTileOptions {
-  /** Abort in-flight I/O and decoding; the promise rejects on abort. */
-  readonly signal?: AbortSignal;
-}
-
-export interface LoadNodesOptions {
-  /**
-   * Abort in-flight hierarchy I/O; the promise rejects on abort. Hierarchy
-   * requests are scheduled and cancelled exactly like tile requests, so they
-   * carry the same contract.
-   */
-  readonly signal?: AbortSignal;
-}
+};
 
 /**
- * A source of octree point-cloud tiles.
- *
- * The reference implementation reads COPC files over HTTP Range requests;
- * anything exposing the same hierarchy shape (Potree-style stores, in-memory
- * fixtures for tests) can implement it too.
+ * Decoded bytes a tile occupies, plus a per-tile object estimate. Lives here
+ * so the controller's `decodedBytes` and the adapter's `gpuResidentBytes`
+ * cannot disagree about what a tile costs — their docs promise they agree.
  */
-export interface TileSource {
+export const tileBytes = (tile: TileData): number =>
+  tile.positions.byteLength + (tile.rgb?.byteLength ?? 0) + 64;
+
+export type LoadOptions = {
+  /**
+   * Abort in-flight I/O and decoding; the promise rejects on abort. Hierarchy
+   * requests are scheduled and cancelled exactly like tile requests, so both
+   * take the same options.
+   */
+  readonly signal?: AbortSignal;
+};
+
+/** A source of octree point-cloud tiles. */
+export type TileSource = {
   /** Dataset metadata, resolved when the source was created. */
   metadata(): TileSourceMetadata;
   /**
    * Hierarchy entries for the page rooted at `key` (the root page for the
    * root key). May return entries for several levels at once.
    */
-  nodes(key: VoxelKey, opts?: LoadNodesOptions): Promise<NodeInfo[]>;
+  nodes(key: VoxelKey, opts?: LoadOptions): Promise<NodeInfo[]>;
   /** Fetch and decode one node's points. */
-  loadTile(key: VoxelKey, opts?: LoadTileOptions): Promise<TileData>;
-}
+  loadTile(key: VoxelKey, opts?: LoadOptions): Promise<TileData>;
+};

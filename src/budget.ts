@@ -9,16 +9,16 @@
  * every ancestor available to cover the gaps around it).
  */
 
-import { childKeys, keyToString, type VoxelKey } from "./octree";
+import { keyToString, type VoxelKey } from "./octree";
 
-export interface HierarchyNode {
+export type HierarchyNode = {
   /** Points stored in this node (not cumulative over the subtree). */
   readonly pointCount: number;
   /** Children known to exist in the hierarchy. */
   readonly children: readonly VoxelKey[];
-}
+};
 
-export interface SelectNodesOptions {
+export type SelectNodesOptions = {
   /** Root of the traversal (usually the octree root). */
   root: VoxelKey;
   /**
@@ -33,9 +33,9 @@ export interface SelectNodesOptions {
   priority: (key: VoxelKey) => number;
   /** Maximum total points across all selected nodes. */
   pointBudget: number;
-}
+};
 
-export interface NodeSelection {
+export type NodeSelection = {
   /** Selected node keys, as `keyToString` strings. */
   readonly selected: ReadonlySet<string>;
   /** Sum of `pointCount` over the selection; never exceeds the budget. */
@@ -52,7 +52,7 @@ export interface NodeSelection {
   readonly budgetSkippedPoints: number;
   /** Keys rejected only because their points did not fit. */
   readonly budgetSkipped: ReadonlySet<string>;
-}
+};
 
 export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
   const { root, getNode, priority, pointBudget } = options;
@@ -62,19 +62,19 @@ export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
   let totalPoints = 0;
   let consideredNodes = 0;
   let availableNodes = 0;
-  let budgetSkippedNodes = 0;
   let budgetSkippedPoints = 0;
   let candidates: VoxelKey[] = [root];
 
   while (candidates.length > 0) {
     consideredNodes += candidates.length;
-    const ranked = candidates
-      .map((key) => ({ key, node: getNode(key), priority: priority(key) }))
-      .filter(
-        (c): c is { key: VoxelKey; node: HierarchyNode; priority: number } =>
-          c.node !== undefined,
-      )
-      .sort((a, b) => b.priority - a.priority);
+    const ranked: { key: VoxelKey; node: HierarchyNode; priority: number }[] =
+      [];
+    for (const key of candidates) {
+      const node = getNode(key);
+      if (node === undefined) continue;
+      ranked.push({ key, node, priority: priority(key) });
+    }
+    ranked.sort((a, b) => b.priority - a.priority);
     availableNodes += ranked.length;
 
     const nextCandidates: VoxelKey[] = [];
@@ -82,7 +82,6 @@ export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
       if (totalPoints + node.pointCount > pointBudget) {
         // Skipped: its subtree stays out (parent invariant), but cheaper
         // siblings later in the ranking may still fit.
-        budgetSkippedNodes += 1;
         budgetSkippedPoints += node.pointCount;
         budgetSkipped.add(keyToString(key));
         continue;
@@ -100,9 +99,8 @@ export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
     consideredNodes,
     availableNodes,
     selectedNodes: selected.size,
-    budgetSkippedNodes,
+    budgetSkippedNodes: budgetSkipped.size,
     budgetSkippedPoints,
     budgetSkipped,
   };
 };
-

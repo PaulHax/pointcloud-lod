@@ -27,13 +27,20 @@ import {
   closeBrowser,
   cloudsUnderTest,
   openExample,
+  SETTLE_QUIET_MS,
+  shown,
   type CloudUnderTest,
   type ExampleSession,
   type ExampleStats,
   type SceneReading,
   type Viewport,
 } from "./harness";
-import { settleAndAssert, watching } from "./invariants";
+import {
+  assertRendererHoldsOnlyItsOwn,
+  settleAndAssert,
+  watching,
+  withSession,
+} from "./invariants";
 
 /** How often the live invariants are read while a gesture runs. */
 const SAMPLE_INTERVAL_MS = 25;
@@ -44,29 +51,16 @@ const SETTLE_MS = 60_000;
  * The root node's projected spacing. It is the one selection number fixed by
  * the camera and the viewport alone — no node the traversal chose enters it —
  * so it states the viewport-height law without the octree's shape in the way.
- * The harness's shape does not name it; the example reports the controller's
- * stats whole.
  */
-type SelectionReport = NonNullable<ExampleStats["controller"]>["selection"] & {
-  readonly projectedImportance: number;
-};
-
 const rootProjectedSpacing = (stats: ExampleStats): number =>
-  (stats.controller!.selection as SelectionReport).projectedImportance;
-
-type AdapterReport = NonNullable<ExampleStats["adapter"]> & {
-  readonly devicePixelRatio: number;
-  /** The uniform diameter the controller's presentation policy asked for. */
-  readonly diameterCssPx: number;
-};
+  stats.controller!.selection.projectedImportance;
 
 const drawingRatio = (stats: ExampleStats): number =>
-  (stats.adapter! as AdapterReport).devicePixelRatio;
+  stats.adapter!.devicePixelRatio;
 
+/** The uniform diameter the controller's presentation policy asked for. */
 const drawingDiameterCssPx = (stats: ExampleStats): number =>
-  (stats.adapter! as AdapterReport).diameterCssPx;
-
-const shown = (stats: ExampleStats): string => JSON.stringify(stats, null, 2);
+  stats.adapter!.diameterCssPx;
 
 /**
  * What one point will be drawn at, in framebuffer pixels, read off the actor
@@ -99,12 +93,7 @@ const assertSceneDrawsAtRatio = async (
   ratio: number,
 ): Promise<number> => {
   const scene = await session.scene();
-  // The renderer's count, not the adapter's: a leaked actor is subtracted from
-  // every number the adapter reports and from none of the ones here.
-  expect(
-    scene.actors,
-    `the renderer and the adapter disagree about how many actors exist\n${shown(stats)}`,
-  ).toBe(stats.adapter!.gpuResidentTiles);
+  assertRendererHoldsOnlyItsOwn(scene, stats, "at the ratio reading");
   expect(
     scene.actors,
     `nothing is on screen to be drawn at a ratio\n${shown(stats)}`,
@@ -263,13 +252,6 @@ const compareHeights = async (session: ExampleSession): Promise<void> => {
   ).toBeLessThanOrEqual(tall.controller!.selection.targetTiles);
 };
 
-/**
- * How long a load has to hold still, with tiles on screen and no read of any
- * kind outstanding, before it counts as finished arriving. The harness uses the
- * same window to call a run converged, and for the same reason: selection is
- * debounced, so an idle instant is not the end of the stream.
- */
-const ARRIVAL_QUIET_MS = 400;
 /** Loads to spend looking for the window before calling it unreachable. */
 const MID_STREAM_ATTEMPTS = 4;
 
@@ -311,8 +293,10 @@ const loadUntilMidStream = async (
       quietSince ??= Date.now();
       // Tiles on screen and nothing outstanding for a whole quiet window: this
       // load has finished arriving, and the moment it never showed will not
-      // turn up now.
-      if (onScreen > 0 && Date.now() - quietSince >= ARRIVAL_QUIET_MS) break;
+      // turn up now. The window is the harness's own, borrowed rather than
+      // restated: selection is debounced there for the same reason it is
+      // debounced here, so an idle instant is not the end of the stream.
+      if (onScreen > 0 && Date.now() - quietSince >= SETTLE_QUIET_MS) break;
     }
   }
   throw new Error(
@@ -338,115 +322,113 @@ afterAll(async () => {
 describe("a viewport that changes under a running selection", () => {
   for (const cloud of cloudsUnderTest()) {
     it(`reports every size it was resized to and converges: ${cloud.name}`, async () => {
-      const session = await openFixedBudget(cloud);
-      try {
-        // The sweep starts before the first convergence on purpose: a resize
-        // landing while the hierarchy is still being read is where a stale
-        // height survives, because the selection it should invalidate has not
-        // finished producing the tiles it asked for.
-        const { samples } = await watching(
-          session,
-          SAMPLE_INTERVAL_MS,
-          async () => {
-            for (const size of RESIZE_SWEEP) {
-              await session.resize(size);
-              expect(
-                await session.viewport(),
-                `the viewport did not follow a resize to ${size.width}x${size.height}`,
-              ).toEqual(size);
-            }
-          },
-        );
-        expect(
-          samples,
-          "the sampler never read the run it was watching",
-        ).toBeGreaterThan(0);
+      await withSession(
+        () => openFixedBudget(cloud),
+        async (session) => {
+          // The sweep starts before the first convergence on purpose: a resize
+          // landing while the hierarchy is still being read is where a stale
+          // height survives, because the selection it should invalidate has not
+          // finished producing the tiles it asked for.
+          const { samples } = await watching(
+            session,
+            SAMPLE_INTERVAL_MS,
+            async () => {
+              for (const size of RESIZE_SWEEP) {
+                await session.resize(size);
+                expect(
+                  await session.viewport(),
+                  `the viewport did not follow a resize to ${size.width}x${size.height}`,
+                ).toEqual(size);
+              }
+            },
+          );
+          expect(
+            samples,
+            "the sampler never read the run it was watching",
+          ).toBeGreaterThan(0);
 
-        await settleAndAssert(session, SETTLE_MS);
-        expect(session.failures).toEqual([]);
-      } finally {
-        await session.close();
-      }
+          await settleAndAssert(session, SETTLE_MS);
+        },
+      );
     });
 
     it(`never selects more detail from a shorter viewport than a taller one: ${cloud.name}`, async () => {
-      const session = await openFixedBudget(cloud);
-      try {
-        // As framed, with the whole cloud in view.
-        await compareHeights(session);
+      await withSession(
+        () => openFixedBudget(cloud),
+        async (session) => {
+          // As framed, with the whole cloud in view.
+          await compareHeights(session);
 
-        // And again from far enough out that projected size, not the depth of
-        // the octree, is what stops refinement. That is where a height which
-        // reached the reported numbers but not the traversal shows up: as a
-        // different count of tiles, rather than only as a different spacing.
-        await resizeAndSettle(session, TALL);
-        await zoomToRootSpacing(session, REFINEMENT_PROBE_CSS_PX);
-        await compareHeights(session);
+          // And again from far enough out that projected size, not the depth of
+          // the octree, is what stops refinement. That is where a height which
+          // reached the reported numbers but not the traversal shows up: as a
+          // different count of tiles, rather than only as a different spacing.
+          await resizeAndSettle(session, TALL);
+          await zoomToRootSpacing(session, REFINEMENT_PROBE_CSS_PX);
+          await compareHeights(session);
 
-        await settleAndAssert(session, SETTLE_MS);
-        expect(session.failures).toEqual([]);
-      } finally {
-        await session.close();
-      }
+          await settleAndAssert(session, SETTLE_MS);
+        },
+      );
     });
 
     it(`draws at each device pixel ratio it is given without growing GPU residency: ${cloud.name}`, async () => {
-      const session = await openFixedBudget(cloud);
-      try {
-        const baseline = await settleAndAssert(session, SETTLE_MS);
-        const baselineKeys = await session.keys();
-        const held = baseline.adapter!;
+      await withSession(
+        () => openFixedBudget(cloud),
+        async (session) => {
+          const baseline = await settleAndAssert(session, SETTLE_MS);
+          const baselineKeys = await session.keys();
+          const held = baseline.adapter!;
 
-        // The ratio changes how large a point is drawn, never which points are
-        // held, so a sweep across it must not cost the GPU a byte. A ratio
-        // applied by rebuilding actors instead of restating a scale factor
-        // shows up here as residency climbing with each step.
-        const { samples } = await watching(
-          session,
-          SAMPLE_INTERVAL_MS,
-          async () => {
-            for (const ratio of RATIO_SWEEP) {
-              await session.setDevicePixelRatio(ratio);
-              await session.frame();
-              const stats = await session.stats();
-              expect(
-                drawingRatio(stats),
-                `the adapter is not drawing at the ratio it was given\n${shown(stats)}`,
-              ).toBe(ratio);
-              expect(
-                stats.adapter!.gpuResidentBytes,
-                `GPU bytes grew at device pixel ratio ${ratio}\n${shown(stats)}`,
-              ).toBeLessThanOrEqual(held.gpuResidentBytes);
-              expect(
-                stats.adapter!.gpuResidentTiles,
-                `GPU tiles grew at device pixel ratio ${ratio}\n${shown(stats)}`,
-              ).toBeLessThanOrEqual(held.gpuResidentTiles);
-              // The adapter's own numbers cannot see an actor it stopped
-              // tracking, and a rebuilt-actor implementation of the ratio is
-              // exactly how one gets abandoned in the renderer. The renderer's
-              // count can.
-              expect(
-                (await session.scene()).actors,
-                `the renderer holds actors the adapter has lost at device pixel ratio ${ratio}\n${shown(stats)}`,
-              ).toBe(stats.adapter!.gpuResidentTiles);
-            }
-          },
-        );
-        expect(
-          samples,
-          "the sampler never read the run it was watching",
-        ).toBeGreaterThan(0);
+          // The ratio changes how large a point is drawn, never which points are
+          // held, so a sweep across it must not cost the GPU a byte. A ratio
+          // applied by rebuilding actors instead of restating a scale factor
+          // shows up here as residency climbing with each step.
+          const { samples } = await watching(
+            session,
+            SAMPLE_INTERVAL_MS,
+            async () => {
+              for (const ratio of RATIO_SWEEP) {
+                await session.setDevicePixelRatio(ratio);
+                await session.frame();
+                const stats = await session.stats();
+                expect(
+                  drawingRatio(stats),
+                  `the adapter is not drawing at the ratio it was given\n${shown(stats)}`,
+                ).toBe(ratio);
+                expect(
+                  stats.adapter!.gpuResidentBytes,
+                  `GPU bytes grew at device pixel ratio ${ratio}\n${shown(stats)}`,
+                ).toBeLessThanOrEqual(held.gpuResidentBytes);
+                expect(
+                  stats.adapter!.gpuResidentTiles,
+                  `GPU tiles grew at device pixel ratio ${ratio}\n${shown(stats)}`,
+                ).toBeLessThanOrEqual(held.gpuResidentTiles);
+                // The adapter's own numbers cannot see an actor it stopped
+                // tracking, and a rebuilt-actor implementation of the ratio is
+                // exactly how one gets abandoned in the renderer. The renderer's
+                // count can.
+                assertRendererHoldsOnlyItsOwn(
+                  await session.scene(),
+                  stats,
+                  `at device pixel ratio ${ratio}`,
+                );
+              }
+            },
+          );
+          expect(
+            samples,
+            "the sampler never read the run it was watching",
+          ).toBeGreaterThan(0);
 
-        const settled = await settleAndAssert(session, SETTLE_MS);
-        expect(drawingRatio(settled)).toBe(1);
-        expect(
-          (await session.keys()).adapter?.submitted,
-          `the ratio sweep changed which tiles are held\n${shown(settled)}`,
-        ).toEqual(baselineKeys.adapter?.submitted);
-        expect(session.failures).toEqual([]);
-      } finally {
-        await session.close();
-      }
+          const settled = await settleAndAssert(session, SETTLE_MS);
+          expect(drawingRatio(settled)).toBe(1);
+          expect(
+            (await session.keys()).adapter?.submitted,
+            `the ratio sweep changed which tiles are held\n${shown(settled)}`,
+          ).toEqual(baselineKeys.adapter?.submitted);
+        },
+      );
     });
   }
 });
@@ -454,133 +436,131 @@ describe("a viewport that changes under a running selection", () => {
 describe("a device pixel ratio that changes under a drawn scene", () => {
   for (const cloud of cloudsUnderTest()) {
     it(`scales what the renderer draws by the ratio and the CSS diameter by nothing: ${cloud.name}`, async () => {
-      const session = await openFixedBudget(cloud);
-      try {
-        const baseline = await settleAndAssert(session, SETTLE_MS);
-        const baselineCssPx = drawingDiameterCssPx(baseline);
-        const baselineRatio = drawingRatio(baseline);
-        const baselineDrawn = await assertSceneDrawsAtRatio(
-          session,
-          baseline,
-          baselineRatio,
-        );
+      await withSession(
+        () => openFixedBudget(cloud),
+        async (session) => {
+          const baseline = await settleAndAssert(session, SETTLE_MS);
+          const baselineCssPx = drawingDiameterCssPx(baseline);
+          const baselineRatio = drawingRatio(baseline);
+          const baselineDrawn = await assertSceneDrawsAtRatio(
+            session,
+            baseline,
+            baselineRatio,
+          );
 
-        const { samples } = await watching(
-          session,
-          SAMPLE_INTERVAL_MS,
-          async () => {
-            for (const ratio of DRAWN_RATIO_SWEEP) {
-              await session.setDevicePixelRatio(ratio);
-              await session.frame();
-              const stats = await session.stats();
-              const drawn = await assertSceneDrawsAtRatio(
-                session,
-                stats,
-                ratio,
-              );
+          const { samples } = await watching(
+            session,
+            SAMPLE_INTERVAL_MS,
+            async () => {
+              for (const ratio of DRAWN_RATIO_SWEEP) {
+                await session.setDevicePixelRatio(ratio);
+                await session.frame();
+                const stats = await session.stats();
+                const drawn = await assertSceneDrawsAtRatio(
+                  session,
+                  stats,
+                  ratio,
+                );
 
-              // The camera never moves here, so the diameter the presentation
-              // policy asked for is fixed for the whole sweep. The ratio is
-              // only allowed to multiply it: a ratio that fed back into the
-              // CSS diameter would change how large a point looks on a display
-              // that did not change.
-              expect(
-                drawingDiameterCssPx(stats),
-                `the device pixel ratio moved the CSS point diameter\n${shown(stats)}`,
-              ).toBe(baselineCssPx);
+                // The camera never moves here, so the diameter the presentation
+                // policy asked for is fixed for the whole sweep. The ratio is
+                // only allowed to multiply it: a ratio that fed back into the
+                // CSS diameter would change how large a point looks on a display
+                // that did not change.
+                expect(
+                  drawingDiameterCssPx(stats),
+                  `the device pixel ratio moved the CSS point diameter\n${shown(stats)}`,
+                ).toBe(baselineCssPx);
 
-              // The law itself, stated against the scene rather than against
-              // the field the ratio was stored in: what reaches the shader is
-              // proportional to the ratio, exactly.
-              expect(
-                drawn / baselineDrawn,
-                `the drawn point size did not follow the ratio to ${ratio}\n${shown(stats)}`,
-              ).toBeCloseTo(ratio / baselineRatio, 10);
-            }
-          },
-        );
-        expect(
-          samples,
-          "the sampler never read the run it was watching",
-        ).toBeGreaterThan(0);
+                // The law itself, stated against the scene rather than against
+                // the field the ratio was stored in: what reaches the shader is
+                // proportional to the ratio, exactly.
+                expect(
+                  drawn / baselineDrawn,
+                  `the drawn point size did not follow the ratio to ${ratio}\n${shown(stats)}`,
+                ).toBeCloseTo(ratio / baselineRatio, 10);
+              }
+            },
+          );
+          expect(
+            samples,
+            "the sampler never read the run it was watching",
+          ).toBeGreaterThan(0);
 
-        // The sweep ends where it started, so the scene has to have undone
-        // every step as well as applied it.
-        const settled = await settleAndAssert(session, SETTLE_MS);
-        expect(
-          await assertSceneDrawsAtRatio(session, settled, 1),
-          `the scene did not come back to the diameter it started at\n${shown(settled)}`,
-        ).toBeCloseTo(baselineCssPx, 10);
-        expect(session.failures).toEqual([]);
-      } finally {
-        await session.close();
-      }
+          // The sweep ends where it started, so the scene has to have undone
+          // every step as well as applied it.
+          const settled = await settleAndAssert(session, SETTLE_MS);
+          expect(
+            await assertSceneDrawsAtRatio(session, settled, 1),
+            `the scene did not come back to the diameter it started at\n${shown(settled)}`,
+          ).toBeCloseTo(baselineCssPx, 10);
+        },
+      );
     });
 
     it(`draws actors it already had and actors that arrive later at one ratio: ${cloud.name}`, async () => {
-      const session = await openFixedBudget(cloud);
-      try {
-        await settleAndAssert(session, SETTLE_MS);
+      await withSession(
+        () => openFixedBudget(cloud),
+        async (session) => {
+          await settleAndAssert(session, SETTLE_MS);
 
-        // First the ordering with nothing to update: deactivating hands this
-        // cloud's share of the GPU pool back, which releases the reuse pool as
-        // well as the drawn set, so the ratio is stated against an empty
-        // renderer and every actor that comes back is built under it. A ratio
-        // the adapter only ever applied to the actors it had at the time never
-        // reaches these.
-        await session.setActive(false);
-        await session.until(
-          "the renderer to hold nothing",
-          (stats) => (stats.adapter?.gpuResidentTiles ?? 1) === 0,
-          SETTLE_MS,
-        );
-        expect(
-          (await session.scene()).actors,
-          "an actor outlived the residency that owned it",
-        ).toBe(0);
-        await session.setDevicePixelRatio(FRESH_ACTOR_RATIO);
-        await session.setActive(true);
-        const rebuilt = await settleAndAssert(session, SETTLE_MS);
-        expect(
-          rebuilt.adapter!.submittedTiles,
-          `the cloud never came back to be drawn\n${shown(rebuilt)}`,
-        ).toBeGreaterThan(0);
-        await assertSceneDrawsAtRatio(session, rebuilt, FRESH_ACTOR_RATIO);
+          // First the ordering with nothing to update: deactivating hands this
+          // cloud's share of the GPU pool back, which releases the reuse pool as
+          // well as the drawn set, so the ratio is stated against an empty
+          // renderer and every actor that comes back is built under it. A ratio
+          // the adapter only ever applied to the actors it had at the time never
+          // reaches these.
+          await session.setActive(false);
+          await session.until(
+            "the renderer to hold nothing",
+            (stats) => (stats.adapter?.gpuResidentTiles ?? 1) === 0,
+            SETTLE_MS,
+          );
+          expect(
+            (await session.scene()).actors,
+            "an actor outlived the residency that owned it",
+          ).toBe(0);
+          await session.setDevicePixelRatio(FRESH_ACTOR_RATIO);
+          await session.setActive(true);
+          const rebuilt = await settleAndAssert(session, SETTLE_MS);
+          expect(
+            rebuilt.adapter!.submittedTiles,
+            `the cloud never came back to be drawn\n${shown(rebuilt)}`,
+          ).toBeGreaterThan(0);
+          await assertSceneDrawsAtRatio(session, rebuilt, FRESH_ACTOR_RATIO);
 
-        // Then the ordering that mixes both populations: a ratio changed while
-        // tiles are still arriving has to reach the actors already on screen
-        // and the actors the outstanding reads have yet to create. A fresh load
-        // is what makes tiles physically arrive again — reactivation restores
-        // them from the decoded cache in a single batch, with no window to land
-        // in — and it builds a new adapter at the page's own ratio, so the
-        // change below is a change for every actor either way.
-        const { result: arrived } = await watching(
-          session,
-          SAMPLE_INTERVAL_MS,
-          async () => {
-            const midflight = await loadUntilMidStream(session, cloud);
-            await session.setDevicePixelRatio(ARRIVING_ACTOR_RATIO);
-            const settled = await settleAndAssert(session, SETTLE_MS);
-            // Says the staging happened: tiles genuinely landed after the
-            // change, so the settled scene is a mixture and not one population
-            // asserted twice.
-            expect(
-              settled.adapter!.submittedTiles,
-              `no tile arrived after the ratio changed, so nothing here was created under it\n${shown(settled)}`,
-            ).toBeGreaterThan(midflight.adapter!.submittedTiles);
-            return settled;
-          },
-        );
+          // Then the ordering that mixes both populations: a ratio changed while
+          // tiles are still arriving has to reach the actors already on screen
+          // and the actors the outstanding reads have yet to create. A fresh load
+          // is what makes tiles physically arrive again — reactivation restores
+          // them from the decoded cache in a single batch, with no window to land
+          // in — and it builds a new adapter at the page's own ratio, so the
+          // change below is a change for every actor either way.
+          const { result: arrived } = await watching(
+            session,
+            SAMPLE_INTERVAL_MS,
+            async () => {
+              const midflight = await loadUntilMidStream(session, cloud);
+              await session.setDevicePixelRatio(ARRIVING_ACTOR_RATIO);
+              const settled = await settleAndAssert(session, SETTLE_MS);
+              // Says the staging happened: tiles genuinely landed after the
+              // change, so the settled scene is a mixture and not one population
+              // asserted twice.
+              expect(
+                settled.adapter!.submittedTiles,
+                `no tile arrived after the ratio changed, so nothing here was created under it\n${shown(settled)}`,
+              ).toBeGreaterThan(midflight.adapter!.submittedTiles);
+              return settled;
+            },
+          );
 
-        // The renderer reports its oldest surviving actor, which is one that
-        // predated the change; the count above says the rest were created after
-        // it. Both populations answer with the same ratio, so neither the
-        // update loop nor the actor the adapter builds has been left behind.
-        await assertSceneDrawsAtRatio(session, arrived, ARRIVING_ACTOR_RATIO);
-        expect(session.failures).toEqual([]);
-      } finally {
-        await session.close();
-      }
+          // The renderer reports its oldest surviving actor, which is one that
+          // predated the change; the count above says the rest were created after
+          // it. Both populations answer with the same ratio, so neither the
+          // update loop nor the actor the adapter builds has been left behind.
+          await assertSceneDrawsAtRatio(session, arrived, ARRIVING_ACTOR_RATIO);
+        },
+      );
     });
   }
 });
@@ -588,110 +568,108 @@ describe("a device pixel ratio that changes under a drawn scene", () => {
 describe("a projection toggled under a moving camera", () => {
   for (const cloud of cloudsUnderTest()) {
     it(`reselects on every flip and converges in whichever mode it lands: ${cloud.name}`, async () => {
-      const session = await openFixedBudget(cloud);
-      try {
-        let generation = (await settleAndAssert(session, SETTLE_MS)).controller!
-          .selection.generation;
+      await withSession(
+        () => openFixedBudget(cloud),
+        async (session) => {
+          let generation = (await settleAndAssert(session, SETTLE_MS))
+            .controller!.selection.generation;
 
-        // Orbit and zoom on the same frame as the flip, so the mode changes
-        // under a selection that is already outstanding rather than between
-        // two quiet ones.
-        const { samples } = await watching(
-          session,
-          SAMPLE_INTERVAL_MS,
-          async () => {
-            for (const [step, mode] of MODE_CHURN.entries()) {
-              await session.azimuth(11);
-              await session.dolly(step % 2 === 0 ? 1.15 : 1 / 1.15);
-              await session.setProjection(mode);
-              const seen = await session.until(
-                `selection to rerun after switching to ${mode}`,
-                (stats) =>
-                  (stats.controller?.selection.generation ?? 0) > generation,
-                SETTLE_MS,
-              );
-              generation = seen.controller!.selection.generation;
-              expect(
-                (await session.readCamera()).parallelProjection,
-                `the camera did not take the ${mode} mode`,
-              ).toBe(mode === "orthographic");
-            }
-          },
-        );
-        expect(
-          samples,
-          "the sampler never read the run it was watching",
-        ).toBeGreaterThan(0);
+          // Orbit and zoom on the same frame as the flip, so the mode changes
+          // under a selection that is already outstanding rather than between
+          // two quiet ones.
+          const { samples } = await watching(
+            session,
+            SAMPLE_INTERVAL_MS,
+            async () => {
+              for (const [step, mode] of MODE_CHURN.entries()) {
+                await session.azimuth(11);
+                await session.dolly(step % 2 === 0 ? 1.15 : 1 / 1.15);
+                await session.setProjection(mode);
+                const seen = await session.until(
+                  `selection to rerun after switching to ${mode}`,
+                  (stats) =>
+                    (stats.controller?.selection.generation ?? 0) > generation,
+                  SETTLE_MS,
+                );
+                generation = seen.controller!.selection.generation;
+                expect(
+                  (await session.readCamera()).parallelProjection,
+                  `the camera did not take the ${mode} mode`,
+                ).toBe(mode === "orthographic");
+              }
+            },
+          );
+          expect(
+            samples,
+            "the sampler never read the run it was watching",
+          ).toBeGreaterThan(0);
 
-        // Both landings, because the two modes converge by different laws.
-        const orthographic = await settleAndAssert(session, SETTLE_MS);
-        expect(
-          orthographic.controller!.selection.generation,
-          "the settled generation fell behind what the churn already saw",
-        ).toBeGreaterThanOrEqual(generation);
-        await session.setProjection("perspective");
-        const perspective = await settleAndAssert(session, SETTLE_MS);
-        expect(perspective.controller!.selection.generation).toBeGreaterThan(
-          orthographic.controller!.selection.generation,
-        );
-        expect(session.failures).toEqual([]);
-      } finally {
-        await session.close();
-      }
+          // Both landings, because the two modes converge by different laws.
+          const orthographic = await settleAndAssert(session, SETTLE_MS);
+          expect(
+            orthographic.controller!.selection.generation,
+            "the settled generation fell behind what the churn already saw",
+          ).toBeGreaterThanOrEqual(generation);
+          await session.setProjection("perspective");
+          const perspective = await settleAndAssert(session, SETTLE_MS);
+          expect(perspective.controller!.selection.generation).toBeGreaterThan(
+            orthographic.controller!.selection.generation,
+          );
+        },
+      );
     });
 
     it(`returns to the same tiles after a round trip through orthographic: ${cloud.name}`, async () => {
-      const session = await openFixedBudget(cloud);
-      try {
-        await session.setProjection("perspective");
-        const before = await settleAndAssert(session, SETTLE_MS);
-        const beforeKeys = (await session.keys()).controller!.submitted;
-        const beforeCamera = await session.readCamera();
-        expect(
-          beforeKeys.length,
-          `nothing was selected to round-trip\n${shown(before)}`,
-        ).toBeGreaterThan(0);
-
-        // Switching preserves the world height the viewport covers, so the
-        // camera that comes back is the camera that left. A selection that
-        // does not come back with it is holding something the round trip
-        // should have undone.
-        const { result: middle } = await watching(
-          session,
-          SAMPLE_INTERVAL_MS,
-          async () => {
-            await session.setProjection("orthographic");
-            const settled = await settleAndAssert(session, SETTLE_MS);
-            await session.setProjection("perspective");
-            return settled;
-          },
-        );
-        expect(middle.controller!.selection.generation).toBeGreaterThan(
-          before.controller!.selection.generation,
-        );
-
-        const after = await settleAndAssert(session, SETTLE_MS);
-        const afterCamera = await session.readCamera();
-        expect(afterCamera.parallelProjection).toBe(false);
-        for (const [axis, value] of beforeCamera.position.entries()) {
+      await withSession(
+        () => openFixedBudget(cloud),
+        async (session) => {
+          await session.setProjection("perspective");
+          const before = await settleAndAssert(session, SETTLE_MS);
+          const beforeKeys = (await session.keys()).controller!.submitted;
+          const beforeCamera = await session.readCamera();
           expect(
-            relativeGap(afterCamera.position[axis]!, value),
-            "the camera did not round-trip, so its selection cannot be asked to",
-          ).toBeLessThan(1e-9);
-        }
+            beforeKeys.length,
+            `nothing was selected to round-trip\n${shown(before)}`,
+          ).toBeGreaterThan(0);
 
-        // The committed fixture is small enough that every framing selects it
-        // whole, so here this proves the churn lost, duplicated and stranded
-        // nothing; a cloud supplied through POINTCLOUD_LOD_BROWSER_CLOUDS has
-        // a frontier that can come back different, and proves the law.
-        expect(
-          (await session.keys()).controller!.submitted,
-          `the same camera selected different tiles after a round trip\n${shown(after)}`,
-        ).toEqual(beforeKeys);
-        expect(session.failures).toEqual([]);
-      } finally {
-        await session.close();
-      }
+          // Switching preserves the world height the viewport covers, so the
+          // camera that comes back is the camera that left. A selection that
+          // does not come back with it is holding something the round trip
+          // should have undone.
+          const { result: middle } = await watching(
+            session,
+            SAMPLE_INTERVAL_MS,
+            async () => {
+              await session.setProjection("orthographic");
+              const settled = await settleAndAssert(session, SETTLE_MS);
+              await session.setProjection("perspective");
+              return settled;
+            },
+          );
+          expect(middle.controller!.selection.generation).toBeGreaterThan(
+            before.controller!.selection.generation,
+          );
+
+          const after = await settleAndAssert(session, SETTLE_MS);
+          const afterCamera = await session.readCamera();
+          expect(afterCamera.parallelProjection).toBe(false);
+          for (const [axis, value] of beforeCamera.position.entries()) {
+            expect(
+              relativeGap(afterCamera.position[axis]!, value),
+              "the camera did not round-trip, so its selection cannot be asked to",
+            ).toBeLessThan(1e-9);
+          }
+
+          // The committed fixture is small enough that every framing selects it
+          // whole, so here this proves the churn lost, duplicated and stranded
+          // nothing; a cloud supplied through POINTCLOUD_LOD_BROWSER_CLOUDS has
+          // a frontier that can come back different, and proves the law.
+          expect(
+            (await session.keys()).controller!.submitted,
+            `the same camera selected different tiles after a round trip\n${shown(after)}`,
+          ).toEqual(beforeKeys);
+        },
+      );
     });
   }
 });

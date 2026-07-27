@@ -7,7 +7,6 @@ import {
   nodeScreenSpaceError,
   orthographicScreenSpaceError,
   perspectiveScreenSpaceError,
-  screenSpaceError,
   type OrthographicCameraView,
   type PerspectiveCameraView,
 } from "./camera";
@@ -262,18 +261,6 @@ const orthographicView: OrthographicCameraView = {
   parallelScale: 10,
   viewportHeightCssPx: 1000,
 };
-
-describe("screenSpaceError dispatches on the view's projection", () => {
-  it("reads fovY and distance for a perspective view", () => {
-    expect(screenSpaceError(1, 10, perspectiveView)).toBeCloseTo(50);
-    expect(screenSpaceError(1, 20, perspectiveView)).toBeCloseTo(25);
-  });
-
-  it("reads parallelScale and ignores distance for an orthographic view", () => {
-    expect(screenSpaceError(0.5, 10, orthographicView)).toBeCloseTo(25);
-    expect(screenSpaceError(0.5, 1e6, orthographicView)).toBeCloseTo(25);
-  });
-});
 
 describe("nodeScreenSpaceError", () => {
   const cube = bounds([0, 0, 0], [0.5, 0.25, 0.5]);

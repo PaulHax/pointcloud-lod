@@ -15,10 +15,15 @@
 
 import { expect } from "vitest";
 
-import type { ExampleKeys, ExampleSession, ExampleStats } from "./harness";
-
-/** Both tiers report the whole sample, so a failure names the state it saw. */
-const shown = (stats: ExampleStats): string => JSON.stringify(stats, null, 2);
+// Both tiers report the whole sample, so a failure names the state it saw;
+// `shown` is the suite's one pretty-printer.
+import {
+  shown,
+  type ExampleKeys,
+  type ExampleSession,
+  type ExampleStats,
+  type SceneReading,
+} from "./harness";
 
 /**
  * True at every instant, mid-gesture included.
@@ -73,13 +78,25 @@ export const assertLive = (stats: ExampleStats): boolean => {
     ["physicalTileOperations", cloud.physicalTileOperations],
     ["physicalHierarchyOperations", cloud.physicalHierarchyOperations],
   ] as const) {
-    expect(value, `${label} went negative\n${shown(stats)}`).toBeGreaterThanOrEqual(0);
+    expect(
+      value,
+      `${label} went negative\n${shown(stats)}`,
+    ).toBeGreaterThanOrEqual(0);
   }
 
   const gpu = stats.adapter;
   if (gpu !== null) {
     // Only the pool is trimmed to the ceiling, so submitted tiles may carry it
     // over — but then there is nothing left to trim.
+    //
+    // No live bound on the submitted bytes themselves. The adapter cannot
+    // impose one: refusing a submitted tile would punch a hole in the cloud
+    // that nothing would refill, because the controller sees no change. What
+    // bounds them is the controller's memory ceiling one step upstream, and
+    // that bound is only true at rest — a share that has just been cut leaves
+    // tiles on screen until the next selection pass replaces them, and any
+    // slack a live check allowed for that would be a guess, not a bound. The
+    // settled tier owns it, below.
     if (gpu.gpuResidentBytes > gpu.resourceCeilingBytes) {
       expect(
         gpu.pooledTiles,
@@ -121,8 +138,12 @@ export const assertSettled = (stats: ExampleStats, keys: ExampleKeys): void => {
     return;
   }
 
-  expect(cloud.queuedTiles, `tiles still queued at rest\n${shown(stats)}`).toBe(0);
-  expect(cloud.queuedPages, `pages still queued at rest\n${shown(stats)}`).toBe(0);
+  expect(cloud.queuedTiles, `tiles still queued at rest\n${shown(stats)}`).toBe(
+    0,
+  );
+  expect(cloud.queuedPages, `pages still queued at rest\n${shown(stats)}`).toBe(
+    0,
+  );
   expect(
     cloud.physicalTileOperations,
     `a tile read outlived convergence\n${shown(stats)}`,
@@ -157,6 +178,28 @@ export const assertSettled = (stats: ExampleStats, keys: ExampleKeys): void => {
     `more points on screen than selection asked for\n${shown(stats)}`,
   ).toBeLessThanOrEqual(cloud.selection.targetPoints);
 
+  // The GPU byte bound, which only holds here. `residentBytes` is what the
+  // submitted tiles actually occupy, and `memoryBudgetBytes` is the share this
+  // controller was given: selection converts that share into a point ceiling
+  // through the measured bytes-per-point of the very tiles being counted, so
+  // at rest the arithmetic closes and this is a real bound rather than a
+  // tolerance. It is also the only check that would catch a bytes-per-point
+  // estimate drifting below the truth — the point-count checks above cannot,
+  // because they are counted in the same wrong unit.
+  expect(
+    cloud.residentBytes,
+    `tile bytes on screen exceeded the controller's memory share\n${shown(stats)}`,
+  ).toBeLessThanOrEqual(cloud.memoryBudgetBytes);
+
+  // And the adapter holding what that share bought, plus a pool trimmed to its
+  // own ceiling, must be inside that ceiling once nothing is in flight.
+  if (stats.adapter !== null) {
+    expect(
+      stats.adapter.gpuResidentBytes,
+      `renderer resources outlived the ceiling they are held under\n${shown(stats)}`,
+    ).toBeLessThanOrEqual(stats.adapter.resourceCeilingBytes);
+  }
+
   // Not `pointBudget <= memoryCeilingPoints`: the controller reports
   // min(budget, ceiling), so that comparison is min(a,b) <= b and cannot fail.
   // What can fail is the number the governor arrived at independently — the
@@ -174,6 +217,28 @@ export const assertSettled = (stats: ExampleStats, keys: ExampleKeys): void => {
       `converged but still asking for frames\n${shown(stats)}`,
     ).toBe(false);
   }
+};
+
+/**
+ * What the renderer holds is the adapter's submitted set plus its reuse pool,
+ * which is exactly `gpuResidentTiles`: a retired actor stays in the renderer,
+ * hidden, until the pool is trimmed to `resourceCeilingBytes`. The example puts
+ * nothing else in the scene, so this is an exact equality — anything above it is
+ * an actor no live adapter accounts for, and so one nothing would remove again.
+ *
+ * The scene reading is what nothing else can stand in for: every number in
+ * `stats()` comes from the adapter, so an actor the adapter has lost is missing
+ * from all of them and present only here.
+ */
+export const assertRendererHoldsOnlyItsOwn = (
+  scene: SceneReading,
+  stats: ExampleStats,
+  when: string,
+): void => {
+  expect(
+    scene.actors,
+    `${when}: the renderer holds actors the adapter does not account for\n${shown({ scene, adapter: stats.adapter })}`,
+  ).toBe(stats.adapter!.gpuResidentTiles);
 };
 
 /**
@@ -211,7 +276,8 @@ export const watching = async <T>(
         const cloud = stats.controller;
         if (
           cloud !== null &&
-          (peak === null || cloud.residentPoints > peak.controller!.residentPoints)
+          (peak === null ||
+            cloud.residentPoints > peak.controller!.residentPoints)
         ) {
           peak = stats;
         }
@@ -246,4 +312,31 @@ export const settleAndAssert = async (
   const stats = await session.settle(timeoutMs);
   assertSettled(stats, await session.keys());
   return stats;
+};
+
+/**
+ * Open, run, and close — with the page's own uncaught errors asserted on the
+ * way out.
+ *
+ * The check belongs here rather than in each scenario because it is the one
+ * assertion that is about the page rather than about the thing under test, and
+ * a scenario that forgets it still passes. Assert before closing, so a body
+ * failure is the one that surfaces and is never masked by teardown.
+ *
+ * It takes an opener rather than an options bag so every per-file wrapper —
+ * `openFixedBudget`, `openCloud`, `openSlowly`, and bare `openExample` — passes
+ * through unchanged.
+ */
+export const withSession = async <T>(
+  open: () => Promise<ExampleSession>,
+  body: (session: ExampleSession) => Promise<T>,
+): Promise<T> => {
+  const session = await open();
+  try {
+    const result = await body(session);
+    expect(session.failures, "the page reported uncaught errors").toEqual([]);
+    return result;
+  } finally {
+    await session.close();
+  }
 };

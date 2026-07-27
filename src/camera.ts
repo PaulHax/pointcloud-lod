@@ -10,26 +10,26 @@ import type { Bounds, Vec3 } from "./octree";
 /** Column-major 4x4 matrix, OpenGL layout (translation in indices 12..14). */
 export type Mat16 = ArrayLike<number>;
 
-interface CameraViewCommon {
+type CameraViewCommon = {
   /** Column-major view-projection matrix. */
   readonly viewProj: Mat16;
   /** Camera position in world coordinates. */
   readonly position: Vec3;
   /** Viewport height in CSS pixels. */
   readonly viewportHeightCssPx: number;
-}
+};
 
-export interface PerspectiveCameraView extends CameraViewCommon {
+export type PerspectiveCameraView = CameraViewCommon & {
   readonly projection: "perspective";
   /** Vertical field of view, radians. */
   readonly fovY: number;
-}
+};
 
-export interface OrthographicCameraView extends CameraViewCommon {
+export type OrthographicCameraView = CameraViewCommon & {
   readonly projection: "orthographic";
   /** World-space half-height of the viewport (vtk.js `parallelScale`). */
   readonly parallelScale: number;
-}
+};
 
 /**
  * The two projections turn a world spacing into pixels by different laws, and
@@ -39,10 +39,10 @@ export interface OrthographicCameraView extends CameraViewCommon {
 export type CameraView = PerspectiveCameraView | OrthographicCameraView;
 
 /** Half-space `dot(normal, p) + d >= 0` containing the frustum interior. */
-export interface Plane {
+export type Plane = {
   readonly normal: Vec3;
   readonly d: number;
-}
+};
 
 const plane = (a: number, b: number, c: number, d: number): Plane | null => {
   const length = Math.hypot(a, b, c);
@@ -129,12 +129,14 @@ export const orthographicScreenSpaceError = (
   (spacing * viewportHeightCssPx) / (2 * Math.max(parallelScale, 1e-9));
 
 /**
- * Projected spacing for whichever projection the view declares. `distance` is
- * read only by the perspective branch.
+ * Screen-space error of one octree node, under whichever projection the view
+ * declares: its level's point spacing projected at the node's distance from
+ * the camera, or — under a parallel camera, where distance does not enter the
+ * law at all — at the world height the viewport spans.
  */
-export const screenSpaceError = (
+export const nodeScreenSpaceError = (
+  bounds: Bounds,
   spacing: number,
-  distance: number,
   view: CameraView,
 ): number =>
   view.projection === "orthographic"
@@ -145,18 +147,7 @@ export const screenSpaceError = (
       )
     : perspectiveScreenSpaceError(
         spacing,
-        distance,
+        distanceToBounds(view.position, bounds),
         view.viewportHeightCssPx,
         view.fovY,
       );
-
-/**
- * Screen-space error of one octree node: its level's point spacing projected
- * at the node's distance from the camera.
- */
-export const nodeScreenSpaceError = (
-  bounds: Bounds,
-  spacing: number,
-  view: CameraView,
-): number =>
-  screenSpaceError(spacing, distanceToBounds(view.position, bounds), view);

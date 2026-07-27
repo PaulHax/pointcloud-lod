@@ -10,16 +10,14 @@
 
 import {
   createAdaptiveBudget,
-  DEFAULTS,
   type AdaptiveBudget,
   type AdaptiveBudgetOptions,
-  type AdaptiveBudgetStats,
   type BudgetAdjustment,
   type BudgetRegime,
 } from "./adaptiveBudget";
 import { finiteAtLeast, finiteNonNegative, finiteWithin } from "./numeric";
 
-export interface HostFrameMetrics {
+export type HostFrameMetrics = {
   /** Complete host frame time, including non-VTK work. */
   readonly hostFrameMs: number;
   /** Time spent painting VTK content within the host frame. */
@@ -32,11 +30,12 @@ export interface HostFrameMetrics {
    * When this frame was measured. Any epoch will do — `performance.now()`,
    * `Date.now()`, a test clock — as long as the host stays on one of them:
    * only differences matter, and the governor adopts whatever the host
-   * supplies as the timeline it stamps its own decisions with. Omitted means
-   * `Date.now()`.
+   * supplies as the timeline it stamps its own decisions with. It need not be
+   * on every frame: the epoch is held as an offset from the local clock, so a
+   * frame that omits it is stamped by that clock in the host's own epoch.
    */
   readonly now?: number;
-}
+};
 
 /**
  * What is holding the moving regime. Explicit sources are user gestures the
@@ -47,20 +46,19 @@ export interface HostFrameMetrics {
  */
 export type MotionSourceKind = "explicit" | "inferred";
 
-export interface MotionReference {
+export type MotionReference = {
   /** Idempotent: releasing twice does not double-decrement. */
   release(): void;
-}
+};
 
-export interface ViewGovernorMemberOptions {
+export type ViewGovernorMemberOptions = {
   setPointBudget(points: number): void;
-  active?: boolean;
   /** Names this cloud in the diagnostics. */
   id?: string;
-}
+};
 
 /** Everything a member reports; each field is ignored when not usable. */
-export interface ViewGovernorMemberUpdate {
+export type ViewGovernorMemberUpdate = {
   active?: boolean;
   /** Root projected screen-space error from the controller's selection stats. */
   projectedImportance?: number;
@@ -70,19 +68,19 @@ export interface ViewGovernorMemberUpdate {
   physicalTileOperations?: number;
   /** Hierarchy page operations physically running. */
   physicalHierarchyOperations?: number;
-}
+};
 
-export interface ViewGovernorMember {
+export type ViewGovernorMember = {
   update(update: ViewGovernorMemberUpdate): void;
   release(): void;
-}
+};
 
-export interface ViewGovernorOptions extends AdaptiveBudgetOptions {
+export type ViewGovernorOptions = AdaptiveBudgetOptions & {
   /** Maximum fraction of a host frame assigned to VTK. Default 0.7. */
   vtkFrameFraction?: number;
   /** Delay before switching back to stationary allocation. Default 750 ms. */
   interactionSettleMs?: number;
-}
+};
 
 /** Which bound explains the budget a cloud is currently drawing to. */
 export type BudgetConstraint =
@@ -91,7 +89,7 @@ export type BudgetConstraint =
   | "memory"
   | "inactive";
 
-export interface ViewGovernorMemberStats {
+export type ViewGovernorMemberStats = {
   readonly id: string | null;
   readonly active: boolean;
   /** Null until the member reports; 0 is a real measurement, not "unknown". */
@@ -109,9 +107,9 @@ export interface ViewGovernorMemberStats {
   readonly activeConstraint: BudgetConstraint;
   readonly physicalTileOperations: number;
   readonly physicalHierarchyOperations: number;
-}
+};
 
-export interface ViewGovernorStats {
+export type ViewGovernorStats = {
   readonly regime: BudgetRegime;
   readonly motion: {
     readonly explicitReferences: number;
@@ -144,10 +142,9 @@ export interface ViewGovernorStats {
   readonly physicalTileOperations: number;
   readonly physicalHierarchyOperations: number;
   readonly needsFrame: boolean;
-  readonly adaptive: AdaptiveBudgetStats;
-}
+};
 
-export interface ViewGovernor {
+export type ViewGovernor = {
   register(options: ViewGovernorMemberOptions): ViewGovernorMember;
   /**
    * Hold the moving regime. References are counted across kinds, so
@@ -169,9 +166,9 @@ export interface ViewGovernor {
   needsFrame(): boolean;
   stats(): ViewGovernorStats;
   dispose(): void;
-}
+};
 
-interface MemberState {
+type MemberState = {
   setPointBudget(points: number): void;
   readonly id: string | null;
   active: boolean;
@@ -181,7 +178,7 @@ interface MemberState {
   physicalTileOperations: number;
   physicalHierarchyOperations: number;
   budget: number;
-}
+};
 
 /**
  * Projected importance is unbounded, so a strictly proportional split lets one
@@ -220,16 +217,17 @@ export const createViewGovernor = (
     0,
   );
   const budget: AdaptiveBudget = createAdaptiveBudget(budgetOptions);
-  // Configuration, so it is fixed for the governor's life.
-  const configuredMaxPoints = budget.stats().maxBudget;
-  // Shared with the loop's own cooldown so the two cannot drift apart.
-  const emergencyCooldownMs = budgetOptions.cooldownMs ?? DEFAULTS.cooldownMs;
+  // Configuration, so these are fixed for the governor's life. The cooldown is
+  // read back from the loop instead of re-defaulted here, so the two cannot
+  // drift apart.
+  const { maxBudget: configuredMaxPoints, cooldownMs: emergencyCooldownMs } =
+    budget.stats();
   const members = new Set<MemberState>();
   let explicitMotion = 0;
   let inferredMotion = 0;
-  let settling = false;
   let disposed = false;
   let settleTimer: ReturnType<typeof setTimeout> | null = null;
+  const settling = (): boolean => settleTimer !== null;
   let emergencyCooldownUntil = Number.NEGATIVE_INFINITY;
 
   /**
@@ -237,14 +235,20 @@ export const createViewGovernor = (
    * stamps its frames with. Mixing epochs — host frames on `performance.now()`
    * against `Date.now()` stamps — makes every cooldown comparison meaningless:
    * the tracks either freeze in permanent cooldown or never wait at all.
-   * `Date.now()` is only the fallback for a host that stamps nothing, and it
-   * is not monotonic either, which is the same hazard on a clock step.
+   * The host's epoch is therefore adopted as an OFFSET from the local clock,
+   * not as a stored instant. Holding the instant would freeze time for a host
+   * that supplies `metrics.now` only sometimes: every later stamp would repeat
+   * the last one it sent, so `now >= emergencyCooldownUntil` could never come
+   * true again and the loop would stop adapting for the rest of the session.
+   * With an offset a frame that omits the stamp still advances, in the host's
+   * own epoch. `Date.now()` is not monotonic, which is the same hazard on a
+   * clock step, and is why the offset is re-derived from every stamped frame.
    */
-  let hostClock: number | null = null;
-  const stampNow = (): number => hostClock ?? Date.now();
+  let hostEpochOffsetMs: number | null = null;
+  const stampNow = (): number => Date.now() + (hostEpochOffsetMs ?? 0);
 
   const moving = (): boolean => explicitMotion + inferredMotion > 0;
-  const interacting = (): boolean => moving() || settling;
+  const interacting = (): boolean => moving() || settling();
   const regime = (): BudgetRegime =>
     interacting() ? "interaction" : "stationary";
 
@@ -258,10 +262,12 @@ export const createViewGovernor = (
    * ceiling contributes no known headroom — and if nobody reports, the memory
    * bound lives entirely in the controllers.
    */
-  const memoryCeilingPoints = (): number | null => {
+  const memoryCeilingPoints = (
+    active: readonly MemberState[],
+  ): number | null => {
     let total = 0;
     let reported = false;
-    for (const member of activeMembers()) {
+    for (const member of active) {
       if (member.memoryCeilingPoints === null) continue;
       total += member.memoryCeilingPoints;
       reported = true;
@@ -277,25 +283,25 @@ export const createViewGovernor = (
    * apply here — and it applies to the aggregate, before the split, so no
    * member's share can be sized against memory another member owns.
    */
-  const aggregateBudget = (): number => {
-    const ceiling = memoryCeilingPoints();
+  const aggregateBudget = (ceiling: number | null): number => {
     const track = budget.budget(interacting());
     return ceiling === null ? track : Math.min(track, ceiling);
   };
 
-  const constraintOf = (): BudgetConstraint => {
-    const active = activeMembers();
+  const constraintOf = (
+    active: readonly MemberState[],
+    memory: number | null,
+  ): BudgetConstraint => {
     if (active.length === 0) return "inactive";
     const track = budget.budget(interacting());
-    const memory = memoryCeilingPoints();
-    // Ties go to the harder constraint: when memory and the configured maximum
-    // both sit exactly at the loop's budget, memory is what raising the
-    // configured maximum would fail to lift.
-    const underConfigured =
-      configuredMaxPoints === null || memory === null
-        ? true
-        : memory <= configuredMaxPoints;
-    if (memory !== null && memory <= track && underConfigured) return "memory";
+    if (memory !== null && memory <= track) {
+      // Ties go to the harder constraint: when memory and the configured
+      // maximum both sit exactly at the loop's budget, memory is what raising
+      // the configured maximum would fail to lift.
+      if (configuredMaxPoints === null || memory <= configuredMaxPoints) {
+        return "memory";
+      }
+    }
     if (configuredMaxPoints !== null && configuredMaxPoints <= track) {
       return "configured-maximum";
     }
@@ -305,36 +311,33 @@ export const createViewGovernor = (
   const distribute = (): void => {
     if (disposed) return;
     const active = activeMembers();
+    const ceiling = memoryCeilingPoints(active);
     // Hand the loop the memory ceiling before reading it. Clamping only the
     // aggregate would let the track integrate toward frame-time headroom the
     // memory ceiling never allows it to spend: the effective budget would sit
     // still while the track climbed for ever, so it would never report itself
     // pinned and a host watching `needsFrame()` would repaint for ever.
-    budget.setCeiling(memoryCeilingPoints());
-    const total = aggregateBudget();
+    budget.setCeiling(ceiling);
+    const total = aggregateBudget(ceiling);
     // Importance is root screen-space error in CSS px, so it is legitimately
     // below 1 for a distant cloud and exactly 0 for one that is fully culled
     // or still loading. Neither may be treated as "unknown": a member that
     // has never reported is the only one that needs a stand-in, and it gets
     // the largest reported weight so registering does not starve it.
-    const reported = active.filter((member) => member.importance !== null);
-    const maxReported = Math.max(
+    const maxReported = active.reduce(
+      (max, member) => Math.max(max, member.importance ?? 0),
       0,
-      ...reported.map((member) => member.importance ?? 0),
     );
-    const rawWeight = (member: MemberState): number =>
-      member.importance ?? maxReported;
-    const floorWeight = maxReported * MIN_SHARE_OF_EVEN_SPLIT;
+    // Every active member reporting zero means nothing is on screen, so there
+    // is no basis to prefer one over another: equal weights split evenly.
+    const floorWeight =
+      maxReported > 0 ? maxReported * MIN_SHARE_OF_EVEN_SPLIT : 1;
     const weightOf = (member: MemberState): number =>
-      Math.max(rawWeight(member), floorWeight);
+      Math.max(member.importance ?? maxReported, floorWeight);
     const weightTotal = active.reduce((sum, m) => sum + weightOf(m), 0);
     for (const member of members) {
       const next = member.active
-        ? weightTotal > 0
-          ? Math.max(1, Math.floor((total * weightOf(member)) / weightTotal))
-          : // Every active member reports zero: nothing is on screen, so
-            // there is no basis to prefer one over another.
-            Math.max(1, Math.floor(total / active.length))
+        ? Math.max(1, Math.floor((total * weightOf(member)) / weightTotal))
         : 0;
       if (next === member.budget) continue;
       // Deactivation (0) and first assignment always apply; between live
@@ -359,11 +362,9 @@ export const createViewGovernor = (
   };
 
   const startSettle = (): void => {
-    settling = true;
     clearSettle();
     settleTimer = setTimeout(() => {
       settleTimer = null;
-      settling = false;
       // Stationary refinement starts from exactly the density the moving
       // regime just sustained, so releasing the camera changes nothing on
       // screen, and measures it fresh: samples taken while moving describe a
@@ -402,7 +403,7 @@ export const createViewGovernor = (
       const state: MemberState = {
         setPointBudget: memberOptions.setPointBudget,
         id: memberOptions.id ?? null,
-        active: memberOptions.active ?? true,
+        active: true,
         importance: null,
         memoryCeilingPoints: null,
         physicalTileOperations: 0,
@@ -453,9 +454,8 @@ export const createViewGovernor = (
           // it — the moving regime would never adapt at all. Only motion that
           // begins from genuine stationary rest restarts the track: those
           // samples measured a scene and a load that have since moved on.
-          const resuming = settling;
+          const resuming = settling();
           clearSettle();
-          settling = false;
           if (!resuming) {
             budget.restartAt(true, budget.budget(true), stampNow());
           }
@@ -476,8 +476,13 @@ export const createViewGovernor = (
 
     recordHostFrame(metrics) {
       if (disposed || !finiteNonNegative(metrics?.hostFrameMs)) return;
-      if (finiteNonNegative(metrics.now)) hostClock = metrics.now;
-      const now = stampNow();
+      // One local reading for both the offset and this frame's stamp, so a
+      // stamped frame is stamped with exactly the instant the host reported.
+      const localNow = Date.now();
+      if (finiteNonNegative(metrics.now)) {
+        hostEpochOffsetMs = metrics.now - localNow;
+      }
+      const now = localNow + (hostEpochOffsetMs ?? 0);
       const candidates = [metrics.hostFrameMs];
       if (finiteNonNegative(metrics.vtkFrameMs)) {
         candidates.push(metrics.vtkFrameMs / vtkFrameFraction);
@@ -486,7 +491,8 @@ export const createViewGovernor = (
         candidates.push(metrics.gpuMs / vtkFrameFraction);
       }
       const severeInput =
-        (finiteNonNegative(metrics.inputDelayMs) && metrics.inputDelayMs > 50) ||
+        (finiteNonNegative(metrics.inputDelayMs) &&
+          metrics.inputDelayMs > 50) ||
         (finiteNonNegative(metrics.longTaskMs) && metrics.longTaskMs > 50);
       const inInteractionRegime = interacting();
       const target = budget.target(inInteractionRegime);
@@ -496,17 +502,18 @@ export const createViewGovernor = (
       // they cannot drive a fast grow/halve density sawtooth.
       const emergency = moving() && (severeInput || observedMs > target * 2);
       // After an emergency, hold the cut long enough to measure the cheaper
-      // rendering regime before allowing the normal controller to grow again.
-      if (emergency) {
-        if (now >= emergencyCooldownUntil) {
-          budget.reduceNow(inInteractionRegime, now, 0.5);
+      // rendering regime before allowing the normal controller to grow again:
+      // inside that window a frame decides nothing, emergency or not.
+      if (now >= emergencyCooldownUntil) {
+        if (emergency) {
+          budget.reduceNow(inInteractionRegime, now);
           emergencyCooldownUntil = now + emergencyCooldownMs;
+        } else {
+          budget.recordFrame(observedMs, {
+            interacting: inInteractionRegime,
+            now,
+          });
         }
-      } else if (now >= emergencyCooldownUntil) {
-        budget.recordFrame(observedMs, {
-          interacting: inInteractionRegime,
-          now,
-        });
       }
       distribute();
     },
@@ -516,8 +523,10 @@ export const createViewGovernor = (
     stats() {
       const adaptive = budget.stats();
       const track = interacting() ? adaptive.interaction : adaptive.stationary;
-      const viewConstraint = constraintOf();
-      const aggregate = aggregateBudget();
+      const active = activeMembers();
+      const viewCeiling = memoryCeilingPoints(active);
+      const viewConstraint = constraintOf(active, viewCeiling);
+      const aggregate = aggregateBudget(viewCeiling);
       const memberStats = [...members].map(
         (member): ViewGovernorMemberStats => {
           const ceiling = member.memoryCeilingPoints;
@@ -540,7 +549,6 @@ export const createViewGovernor = (
           };
         },
       );
-      const active = activeMembers();
       const sum = (pick: (member: MemberState) => number): number =>
         active.reduce((total, member) => total + pick(member), 0);
       return {
@@ -556,14 +564,14 @@ export const createViewGovernor = (
                 : inferredMotion > 0
                   ? "inferred"
                   : null,
-          settling,
+          settling: settling(),
         },
         targetFrameTimeMs: track.targetMs,
         estimateMs: track.estimateMs,
         samples: track.samples,
         trackBudget: track.budget,
         configuredMaxPoints,
-        memoryCeilingPoints: memoryCeilingPoints(),
+        memoryCeilingPoints: viewCeiling,
         aggregateBudget: aggregate,
         activeConstraint: viewConstraint,
         lastAdjustment: track.lastAdjustment,
@@ -572,7 +580,6 @@ export const createViewGovernor = (
         physicalTileOperations: sum((m) => m.physicalTileOperations),
         physicalHierarchyOperations: sum((m) => m.physicalHierarchyOperations),
         needsFrame: needsFrame(),
-        adaptive,
       };
     },
 

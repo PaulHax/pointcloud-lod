@@ -17,6 +17,7 @@
 
 import { afterAll, describe, expect, it } from "vitest";
 
+import { DEFAULTS as LOD_DEFAULTS } from "../../src/adaptiveBudget";
 import {
   closeBrowser,
   cloudsUnderTest,
@@ -31,18 +32,26 @@ const FLOOR_POINTS = 200_000;
 
 /**
  * Stated host frame times. The governor takes the worst of `hostFrameMs` and
- * `vtkFrameMs / vtkFrameFraction`, so each of these reaches the loop as about
- * 1.43x what it says — far enough either side of both targets (16 ms moving,
- * 33 ms settled, ±20% dead-bands) that no arithmetic here lands in a dead-band
- * by accident.
+ * `vtkFrameMs / vtkFrameFraction`, and this page configures a fraction of 1 —
+ * it paints nothing but the cloud, so VTK's allowance is the whole frame — so
+ * each of these reaches the loop as exactly what it says. Both are far enough
+ * either side of both targets (16 ms moving, 33 ms settled, ±20% dead-bands)
+ * that no arithmetic here lands in a dead-band by accident.
  */
 const SLOW_FRAME_MS = 200;
 const FAST_FRAME_MS = 1;
+/** The settled target itself, the loop's own thresholds rather than a copy. */
+const SETTLED_TARGET_MS = LOD_DEFAULTS.stationaryTargetMs;
 /**
- * Inside the settled dead-band (23 / 0.7 = 32.9 ms against a 33 ms target), so
- * the budget a run starts from is decided by a stated frame time too. Letting
- * the software rasteriser decide it would leave the question of whether a fall
- * is even observable to how loaded this machine happened to be.
+ * The frame time a run starts from, stated so that the starting budget is not
+ * decided by how loaded this machine happened to be.
+ *
+ * Below the settled dead-band (26.4 ms), and deliberately so: framing the
+ * cloud at page load is camera motion, which measures these same frames
+ * against the 16 ms moving target and cuts the budget hard, and the settled
+ * track is then seeded from wherever that left it. A frame time inside the
+ * settled dead-band would leave the seed exactly there — on the floor — and a
+ * run that starts on its floor cannot show a fall.
  */
 const NEUTRAL_FRAME_MS = 23;
 
@@ -73,7 +82,7 @@ const HOLD_FRAMES = 12;
 const SAMPLE_INTERVAL_MS = 25;
 
 /** One distinct state of the budget loop, as the page's own frame clock saw it. */
-interface BudgetState {
+type BudgetState = {
   readonly trackBudget: number;
   readonly memoryCeilingPoints: number | null;
   readonly needsFrame: boolean;
@@ -81,16 +90,16 @@ interface BudgetState {
   readonly direction: string;
   readonly fromBudget: number;
   readonly toBudget: number;
-}
+};
 
-interface BudgetTrace {
+type BudgetTrace = {
   readonly states: BudgetState[];
   /** Frames the loop measured, counted from the stamp it puts on each decision. */
   readonly measuredFrames: number;
-}
+};
 
 /** The page-side shape the recorder reads; the example's own public handles. */
-interface RecorderWindow {
+type RecorderWindow = {
   pointCloudExample: {
     stats(): {
       governor: {
@@ -114,7 +123,7 @@ interface RecorderWindow {
     previousKey: string;
     previousAtMs: number | null;
   };
-}
+};
 
 /**
  * Record every distinct state of the budget loop, on the page's frame clock.
@@ -177,7 +186,10 @@ const drainBudgetStates = (session: ExampleSession): Promise<BudgetTrace> =>
   session.page.evaluate(() => {
     const trace = (window as unknown as RecorderWindow).__budgetTrace;
     if (trace === undefined) return { states: [], measuredFrames: 0 };
-    const taken = { states: trace.states, measuredFrames: trace.measuredFrames };
+    const taken = {
+      states: trace.states,
+      measuredFrames: trace.measuredFrames,
+    };
     trace.states = [];
     trace.measuredFrames = 0;
     trace.previousKey = "";
@@ -190,16 +202,20 @@ const pageNeedsFrame = (session: ExampleSession): Promise<boolean> =>
   );
 
 const governorOf = (stats: ExampleStats) => {
-  expect(stats.governor, "the example is not running an adaptive governor").not.toBeNull();
+  expect(
+    stats.governor,
+    "the example is not running an adaptive governor",
+  ).not.toBeNull();
   return stats.governor!;
 };
 
-interface Sample {
+type Sample = {
   readonly at: number;
   readonly stats: ExampleStats;
-}
+};
 
-const budgetOf = (sample: Sample): number => governorOf(sample.stats).trackBudget;
+const budgetOf = (sample: Sample): number =>
+  governorOf(sample.stats).trackBudget;
 
 /**
  * Request frames until `done` holds.
@@ -249,7 +265,8 @@ const budgetSteady =
   (trail: readonly Sample[]): boolean => {
     const last = trail[trail.length - 1]!;
     const first = trail[0]!;
-    if (trail.every((sample) => budgetOf(sample) === budgetOf(first))) return false;
+    if (trail.every((sample) => budgetOf(sample) === budgetOf(first)))
+      return false;
     let lastMoved = 0;
     for (const [index, sample] of trail.entries()) {
       if (budgetOf(sample) !== budgetOf(last)) lastMoved = index;
@@ -277,7 +294,10 @@ const shown = (trace: BudgetTrace): string => JSON.stringify(trace, null, 2);
  * number.
  */
 const assertBudgetBounded = (trace: BudgetTrace): void => {
-  expect(trace.states.length, `nothing was recorded\n${shown(trace)}`).toBeGreaterThan(0);
+  expect(
+    trace.states.length,
+    `nothing was recorded\n${shown(trace)}`,
+  ).toBeGreaterThan(0);
   for (const state of trace.states) {
     expect(
       Number.isFinite(state.trackBudget),
@@ -331,8 +351,15 @@ describe("the adaptive budget loop at stated frame times", () => {
         // The settle's own decisions belong to the previous frame time.
         await drainBudgetStates(session);
         await session.setSyntheticFrameMs(SLOW_FRAME_MS);
-        const { result: falling } = await watching(session, SAMPLE_INTERVAL_MS, () =>
-          drive(session, "the budget stops falling", budgetSteady(QUIET_MS, QUIET_FRAMES)),
+        const { result: falling } = await watching(
+          session,
+          SAMPLE_INTERVAL_MS,
+          () =>
+            drive(
+              session,
+              "the budget stops falling",
+              budgetSteady(QUIET_MS, QUIET_FRAMES),
+            ),
         );
         const fall = await drainBudgetStates(session);
         const after = governorOf(falling[falling.length - 1]!.stats);
@@ -347,15 +374,23 @@ describe("the adaptive budget loop at stated frame times", () => {
         // gesture path (`emergency-cut`) or a reseed would move the same number
         // for a reason nothing in this scenario supplies.
         const cuts = changesIn(fall);
-        expect(cuts.length, `the loop never moved the budget\n${shown(fall)}`).toBeGreaterThan(0);
+        expect(
+          cuts.length,
+          `the loop never moved the budget\n${shown(fall)}`,
+        ).toBeGreaterThan(0);
         for (const cut of cuts) {
-          expect(cut.direction, `a fall step went the wrong way\n${shown(fall)}`).toBe("decrease");
-          expect(cut.reason, `the fall was not attributed to frame time\n${shown(fall)}`).toBe(
-            "above-target",
-          );
-          expect(cut.toBudget, `a decrease that did not decrease\n${shown(fall)}`).toBeLessThan(
-            cut.fromBudget,
-          );
+          expect(
+            cut.direction,
+            `a fall step went the wrong way\n${shown(fall)}`,
+          ).toBe("decrease");
+          expect(
+            cut.reason,
+            `the fall was not attributed to frame time\n${shown(fall)}`,
+          ).toBe("above-target");
+          expect(
+            cut.toBudget,
+            `a decrease that did not decrease\n${shown(fall)}`,
+          ).toBeLessThan(cut.fromBudget);
         }
 
         // The decision has to reach the cloud, not just the governor's stats.
@@ -369,7 +404,11 @@ describe("the adaptive budget loop at stated frame times", () => {
         const landed = after.trackBudget;
         await drainBudgetStates(session);
         await watching(session, SAMPLE_INTERVAL_MS, () =>
-          drive(session, "the slow frames have kept coming", heldFor(HOLD_MS, HOLD_FRAMES)),
+          drive(
+            session,
+            "the slow frames have kept coming",
+            heldFor(HOLD_MS, HOLD_FRAMES),
+          ),
         );
         const hold = await drainBudgetStates(session);
 
@@ -394,6 +433,62 @@ describe("the adaptive budget loop at stated frame times", () => {
       }
     });
 
+    it(`leaves an honest on-target frame alone: ${cloud.name}`, async () => {
+      // The example configures `vtkFrameFraction: 1`, because it paints
+      // nothing but the point cloud. The library's 0.7 default is right for a
+      // view compositing a basemap and video underneath, and applying it here
+      // would normalise every honest 33 ms frame up to 47 ms — past the top of
+      // the settled dead-band — and walk the budget down to its floor while
+      // nothing was ever late. A frame reported at exactly the settled target
+      // is the one input that tells the two apart.
+      const session = await openAdaptive(cloud.urlPath);
+      try {
+        const settled = await settleAndAssert(session, SETTLE_MS);
+        const view = governorOf(settled);
+        expect(
+          view.targetFrameTimeMs,
+          "the settled target is not the one these frames are stated against",
+        ).toBe(SETTLED_TARGET_MS);
+        const before = view.trackBudget;
+        expect(
+          before,
+          "the budget was already on its floor, so a fall could not show",
+        ).toBeGreaterThan(FLOOR_POINTS);
+
+        await drainBudgetStates(session);
+        await session.setSyntheticFrameMs(SETTLED_TARGET_MS);
+        await watching(session, SAMPLE_INTERVAL_MS, () =>
+          drive(
+            session,
+            "on-target frames have kept coming",
+            heldFor(HOLD_MS, HOLD_FRAMES),
+          ),
+        );
+        const trace = await drainBudgetStates(session);
+
+        expect(
+          trace.measuredFrames,
+          `no frames were measured, so nothing was proved\n${shown(trace)}`,
+        ).toBeGreaterThan(10);
+        expect(
+          changesIn(trace),
+          `frames at the target moved the budget\n${shown(trace)}`,
+        ).toEqual([]);
+        expect(
+          governorOf(await session.stats()).trackBudget,
+          `frames at the target cost the cloud points\n${shown(trace)}`,
+        ).toBe(before);
+        expect(
+          trace.states.map((state) => state.reason),
+          `an on-target frame was not read as on target\n${shown(trace)}`,
+        ).not.toContain("above-target");
+
+        expect(session.failures).toEqual([]);
+      } finally {
+        await session.close();
+      }
+    });
+
     it(`spends settled headroom on points, then stops asking: ${cloud.name}`, async () => {
       const session = await openAdaptive(cloud.urlPath);
       try {
@@ -403,15 +498,28 @@ describe("the adaptive budget loop at stated frame times", () => {
         // loop's own: slow frames until it is pinned on its floor.
         await session.setSyntheticFrameMs(SLOW_FRAME_MS);
         await watching(session, SAMPLE_INTERVAL_MS, () =>
-          drive(session, "the budget reaches its floor", budgetSteady(QUIET_MS, QUIET_FRAMES)),
+          drive(
+            session,
+            "the budget reaches its floor",
+            budgetSteady(QUIET_MS, QUIET_FRAMES),
+          ),
         );
         const low = governorOf(await session.stats()).trackBudget;
-        expect(low, "slow frames did not pin the budget to its floor").toBe(FLOOR_POINTS);
+        expect(low, "slow frames did not pin the budget to its floor").toBe(
+          FLOOR_POINTS,
+        );
 
         assertBudgetBounded(await drainBudgetStates(session));
         await session.setSyntheticFrameMs(FAST_FRAME_MS);
-        const { result: rising } = await watching(session, SAMPLE_INTERVAL_MS, () =>
-          drive(session, "the budget stops growing", budgetSteady(QUIET_MS, QUIET_FRAMES)),
+        const { result: rising } = await watching(
+          session,
+          SAMPLE_INTERVAL_MS,
+          () =>
+            drive(
+              session,
+              "the budget stops growing",
+              budgetSteady(QUIET_MS, QUIET_FRAMES),
+            ),
         );
         const growth = await drainBudgetStates(session);
         const grown = governorOf(rising[rising.length - 1]!.stats);
@@ -431,17 +539,23 @@ describe("the adaptive budget loop at stated frame times", () => {
         ).toBeLessThanOrEqual(grown.memoryCeilingPoints!);
 
         const gains = changesIn(growth);
-        expect(gains.length, `the loop never moved the budget\n${shown(growth)}`).toBeGreaterThan(0);
+        expect(
+          gains.length,
+          `the loop never moved the budget\n${shown(growth)}`,
+        ).toBeGreaterThan(0);
         for (const gain of gains) {
-          expect(gain.direction, `a growth step went the wrong way\n${shown(growth)}`).toBe(
-            "increase",
-          );
-          expect(gain.reason, `growth was not attributed to frame time\n${shown(growth)}`).toBe(
-            "below-target",
-          );
-          expect(gain.toBudget, `an increase that did not increase\n${shown(growth)}`).toBeGreaterThan(
-            gain.fromBudget,
-          );
+          expect(
+            gain.direction,
+            `a growth step went the wrong way\n${shown(growth)}`,
+          ).toBe("increase");
+          expect(
+            gain.reason,
+            `growth was not attributed to frame time\n${shown(growth)}`,
+          ).toBe("below-target");
+          expect(
+            gain.toBudget,
+            `an increase that did not increase\n${shown(growth)}`,
+          ).toBeGreaterThan(gain.fromBudget);
         }
         expect(
           governorOf(await session.stats()).aggregateBudget,
@@ -455,9 +569,10 @@ describe("the adaptive budget loop at stated frame times", () => {
           (stats) => stats.governor?.needsFrame === false,
           30_000,
         );
-        expect(await pageNeedsFrame(session), `the view still wants frames\n${shown(growth)}`).toBe(
-          false,
-        );
+        expect(
+          await pageNeedsFrame(session),
+          `the view still wants frames\n${shown(growth)}`,
+        ).toBe(false);
 
         // Asking is one thing; painting is what costs. Nothing here requests a
         // frame, so a page that is still measuring them is still spinning.

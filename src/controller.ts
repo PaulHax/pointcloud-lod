@@ -18,9 +18,13 @@ import {
   type CameraView,
 } from "./camera";
 import { selectNodes } from "./budget";
-import { percentile } from "./adaptiveBudget";
 import { createLruCache } from "./lru";
-import { finiteAtLeast, wholeAtLeast } from "./numeric";
+import {
+  finiteAtLeast,
+  finiteNonNegative,
+  finitePositive,
+  wholeAtLeast,
+} from "./numeric";
 import {
   createMemoryPool,
   type MemoryPool,
@@ -31,29 +35,30 @@ import {
   childKeys,
   keyFromString,
   keyToString,
+  levelFromString,
   type Bounds,
   type VoxelKey,
 } from "./octree";
-import type { TileData, TileSource } from "./tileSource";
+import { tileBytes, type TileData, type TileSource } from "./tileSource";
 
-export interface TileBatch {
+export type TileBatch = {
   readonly added: readonly { key: VoxelKey; tile: TileData }[];
   readonly removed: readonly VoxelKey[];
-}
+};
 
-export interface FixedPointPresentation {
+export type FixedPointPresentation = {
   readonly mode: "fixed";
   readonly diameterCssPx: number;
-}
+};
 
-export interface AutoPointPresentation {
+export type AutoPointPresentation = {
   readonly mode: "auto";
   /** Multiplier applied after deriving the density-aware Auto diameter. */
   readonly userScale: number;
   /** Bounds for the unscaled density-aware diameter. */
   readonly minDiameterCssPx?: number;
   readonly maxDiameterCssPx?: number;
-}
+};
 
 export type PointPresentation = FixedPointPresentation | AutoPointPresentation;
 
@@ -63,7 +68,7 @@ export type PointPresentation = FixedPointPresentation | AutoPointPresentation;
  * value. The live setters take the opposite side of the same policy — see
  * `LodController`.
  */
-export interface LodControllerOptions {
+export type LodControllerOptions = {
   source: TileSource;
   /** Receives batched tile arrivals/removals (typically a renderer adapter). */
   onTiles: (batch: TileBatch) => void;
@@ -108,12 +113,6 @@ export interface LodControllerOptions {
   hierarchyConcurrency?: number;
   /** CPU cache for deselected tiles, bytes. Default 256 MiB. */
   cacheBytes?: number;
-  /**
-   * Whether this controller may request and submit tiles. Default true.
-   * Inactive controllers retain only byte-bounded decoded cache entries; no
-   * renderer resources remain live.
-   */
-  active?: boolean;
   /** Trailing debounce for camera-driven reselection, ms. Default 150. */
   selectionDelayMs?: number;
   /**
@@ -127,9 +126,9 @@ export interface LodControllerOptions {
   onPointDiameterCssPx?: (diameterCssPx: number) => void;
   /** Non-abort fetch/hierarchy failures land here. Default: console.warn. */
   onError?: (error: unknown) => void;
-}
+};
 
-export interface LodControllerStats {
+export type LodControllerStats = {
   /** Whether selection, requests, and renderer submission are enabled. */
   readonly active: boolean;
   readonly residentTiles: number;
@@ -138,7 +137,17 @@ export interface LodControllerStats {
   readonly residentBytes: number;
   /** Decoded payloads across submitted tiles and the dormant CPU cache. */
   readonly decodedTiles: number;
-  /** Decoded bytes across submitted tiles and the dormant CPU cache. */
+  /**
+   * Decoded bytes across submitted tiles and the dormant CPU cache.
+   *
+   * Do NOT add this to a renderer adapter's `gpuResidentBytes` to get a total:
+   * a submitted tile's payload is one set of ArrayBuffers counted in both, so
+   * the sum double-counts everything on screen. The two exist because they
+   * bound different things — this one against `cacheBytes` on the CPU side,
+   * the adapter's against its own ceiling on the GPU side — and the overlap is
+   * exactly the submitted set. Real occupancy is
+   * `decodedBytes + adapter.pooledBytes`.
+   */
   readonly decodedBytes: number;
   readonly cachedBytes: number;
   /** Tile requests whose result the controller still wants. */
@@ -187,9 +196,9 @@ export interface LodControllerStats {
   readonly refinementCutoffPx: number;
   /** Latest selection pass and the reasons traversal stopped. */
   readonly selection: LodSelectionStats;
-}
+};
 
-export interface LodSelectionStats {
+export type LodSelectionStats = {
   readonly generation: number;
   /** Increments only when the selected key set changes. */
   readonly targetRevision: number;
@@ -206,10 +215,6 @@ export interface LodSelectionStats {
   readonly consideredNodes: number;
   readonly availableNodes: number;
   readonly selectedNodes: number;
-  readonly hierarchyUnavailableNodes: number;
-  readonly hierarchyPageBlockedNodes: number;
-  readonly frustumCulledNodes: number;
-  readonly frustumCulledPoints: number;
   readonly leafNodes: number;
   readonly sseStoppedNodes: number;
   readonly budgetSkippedNodes: number;
@@ -232,14 +237,14 @@ export interface LodSelectionStats {
       readonly max: number | null;
     };
   };
-}
+};
 
 /**
  * Setters carry live wire input, so they validate rather than throw: a value
  * that is not finite or is out of range is ignored and changes no state.
  * Construction is where an invalid number is fatal.
  */
-export interface LodController {
+export type LodController = {
   /**
    * Update the camera; selection reruns debounced (leading edge immediate).
    * A view with any non-finite number is ignored.
@@ -287,48 +292,55 @@ export interface LodController {
    * renderer adapter must hold, key for key.
    */
   activeKeys(): { readonly resident: string[]; readonly submitted: string[] };
-  /** Cancel everything and release all tiles. Idempotent. */
+  /**
+   * Cancel everything and release all tiles. Idempotent.
+   *
+   * The consumer is handed every submitted tile back as a removal, which is
+   * all this side can do: a renderer adapter answers a removal by pooling the
+   * actor for reuse, so disposing a controller alone leaves that pool holding
+   * GPU resources nothing will ever reclaim. Dispose the adapter too.
+   */
   dispose(): void;
-}
+};
 
-interface HierarchyEntry {
+type HierarchyEntry = {
   pointCount: number;
   bounds: Bounds;
   spacing: number;
   children: readonly VoxelKey[] | null;
   pageRef: boolean;
-}
+};
 
 const isAbortError = (error: unknown): boolean =>
   error instanceof Error && error.name === "AbortError";
 
-const tileBytes = (tile: TileData): number =>
-  tile.positions.byteLength + (tile.rgb?.byteLength ?? 0) + 64;
-
-/** The frontier stats report null for "nothing measured" rather than NaN. */
-const percentileOrNull = (
-  values: readonly number[],
-  p: number,
-): number | null => (values.length === 0 ? null : percentile(values, p));
-
 /**
- * Numeric policy, applied at every public boundary:
- *
- * - construction options are programmer errors — an invalid one throws with
- *   the offending name and value;
- * - live setters carry wire input — an invalid value is ignored and leaves
- *   the controller exactly as it was.
- *
- * Either way nothing non-finite reaches selection, the memory ceiling, or the
- * statistics: one NaN in `Math.min` silently empties a cloud and every
- * comparison downstream of it answers false forever.
+ * The frontier's five spacing statistics, from one sort of the sample. `at` is
+ * the nearest-rank formula and the last element is the maximum, so every
+ * reported number matches a per-statistic percentile call — but the walk this
+ * feeds reruns on every tile arrival, and sorting once per burst instead of
+ * five times per arrival is the difference during a moving camera. Reports
+ * null for "nothing measured" rather than NaN.
  */
-const outOfRange = (value: number, min: number): boolean =>
-  !Number.isFinite(value) || value < min;
-
-/** Finite and strictly positive: what every diameter, scale, and share needs. */
-const notPositive = (value: number): boolean =>
-  !Number.isFinite(value) || value <= 0;
+const spacingQuantiles = (
+  values: number[],
+): LodSelectionStats["readyTerminalFrontier"]["projectedSpacingCssPx"] => {
+  if (values.length === 0) {
+    return { p25: null, p50: null, p75: null, p95: null, max: null };
+  }
+  const sorted = values.sort((a, b) => a - b);
+  const at = (p: number): number =>
+    sorted[
+      Math.min(Math.max(Math.ceil(p * sorted.length) - 1, 0), sorted.length - 1)
+    ]!;
+  return {
+    p25: at(0.25),
+    p50: at(0.5),
+    p75: at(0.75),
+    p95: at(0.95),
+    max: sorted[sorted.length - 1]!,
+  };
+};
 
 const DEFAULT_PRESENTATION: FixedPointPresentation = {
   mode: "fixed",
@@ -338,8 +350,13 @@ const DEFAULT_AUTO_MIN_DIAMETER_CSS_PX = 1.5;
 const DEFAULT_AUTO_MAX_DIAMETER_CSS_PX = 4;
 const INITIAL_AUTO_DIAMETER_CSS_PX = 2;
 
+/** What `checkPresentation` returns: Auto bounds are always resolved. */
+type NormalizedPresentation =
+  | FixedPointPresentation
+  | Required<AutoPointPresentation>;
+
 type PresentationCheck =
-  | { readonly presentation: PointPresentation }
+  | { readonly presentation: NormalizedPresentation }
   | { readonly error: string };
 
 /** One validation body for both the throwing and the ignoring boundary. */
@@ -348,21 +365,25 @@ const checkPresentation = (
 ): PresentationCheck => {
   const presentation = value ?? DEFAULT_PRESENTATION;
   if (presentation.mode === "fixed") {
-    if (notPositive(presentation.diameterCssPx)) {
+    if (!finitePositive(presentation.diameterCssPx)) {
       return {
         error: `Fixed diameterCssPx must be finite and > 0, got ${presentation.diameterCssPx}`,
       };
     }
     return {
-      presentation: { mode: "fixed", diameterCssPx: presentation.diameterCssPx },
+      presentation: {
+        mode: "fixed",
+        diameterCssPx: presentation.diameterCssPx,
+      },
     };
   }
   const min = presentation.minDiameterCssPx ?? DEFAULT_AUTO_MIN_DIAMETER_CSS_PX;
   const max = presentation.maxDiameterCssPx ?? DEFAULT_AUTO_MAX_DIAMETER_CSS_PX;
   if (
-    notPositive(presentation.userScale) ||
-    notPositive(min) ||
-    outOfRange(max, min)
+    !finitePositive(presentation.userScale) ||
+    !finitePositive(min) ||
+    !Number.isFinite(max) ||
+    max < min
   ) {
     return {
       error:
@@ -381,7 +402,7 @@ const checkPresentation = (
 
 const normalizePresentation = (
   value: PointPresentation | undefined,
-): PointPresentation => {
+): NormalizedPresentation => {
   const checked = checkPresentation(value);
   if ("error" in checked) throw new Error(checked.error);
   return checked.presentation;
@@ -409,9 +430,9 @@ const isFiniteView = (view: CameraView): boolean => {
   // non-positive parallel scale inverts the projected spacing.
   if (
     scalar === undefined ||
-    notPositive(scalar) ||
+    !finitePositive(scalar) ||
     (view.projection === "perspective" && view.fovY >= Math.PI) ||
-    notPositive(view.viewportHeightCssPx)
+    !finitePositive(view.viewportHeightCssPx)
   ) {
     return false;
   }
@@ -425,17 +446,15 @@ const isFiniteView = (view: CameraView): boolean => {
 };
 
 const samePresentation = (
-  left: PointPresentation,
-  right: PointPresentation,
+  left: NormalizedPresentation,
+  right: NormalizedPresentation,
 ): boolean =>
-  left.mode === right.mode &&
-  (left.mode === "fixed"
-    ? left.diameterCssPx === (right as FixedPointPresentation).diameterCssPx
-    : left.userScale === (right as AutoPointPresentation).userScale &&
-      left.minDiameterCssPx ===
-        (right as AutoPointPresentation).minDiameterCssPx &&
-      left.maxDiameterCssPx ===
-        (right as AutoPointPresentation).maxDiameterCssPx);
+  left.mode === "fixed"
+    ? right.mode === "fixed" && left.diameterCssPx === right.diameterCssPx
+    : right.mode === "auto" &&
+      left.userScale === right.userScale &&
+      left.minDiameterCssPx === right.minDiameterCssPx &&
+      left.maxDiameterCssPx === right.maxDiameterCssPx;
 
 const emptyReadyTerminalFrontier =
   (): LodSelectionStats["readyTerminalFrontier"] => ({
@@ -453,6 +472,30 @@ const emptyReadyTerminalFrontier =
       max: null,
     },
   });
+
+/**
+ * A selection that has not run, or has been thrown away. The explicit return
+ * type is the point: a field added to `LodSelectionStats` becomes one compile
+ * error here rather than three silent omissions at the reset sites.
+ */
+const emptySelectionStats = (
+  generation: number,
+  targetRevision: number,
+): Omit<LodSelectionStats, "targetUndecodedTiles"> => ({
+  generation,
+  targetRevision,
+  targetTiles: 0,
+  targetPoints: 0,
+  consideredNodes: 0,
+  availableNodes: 0,
+  selectedNodes: 0,
+  leafNodes: 0,
+  sseStoppedNodes: 0,
+  budgetSkippedNodes: 0,
+  budgetSkippedPoints: 0,
+  projectedImportance: 0,
+  readyTerminalFrontier: emptyReadyTerminalFrontier(),
+});
 
 export const createLodController = (
   options: LodControllerOptions,
@@ -506,7 +549,7 @@ export const createLodController = (
     presentation.mode === "fixed"
       ? presentation.diameterCssPx
       : INITIAL_AUTO_DIAMETER_CSS_PX;
-  let active = options.active ?? true;
+  let active = true;
   let view: CameraView | null = null;
   let disposed = false;
   onPointDiameterCssPx(diameterCssPx);
@@ -517,13 +560,8 @@ export const createLodController = (
     onPointDiameterCssPx(next);
   };
 
-
-
   let explicitInteractionSeen = false;
   let interactionDepth = 0;
-  // Effective budget applied by the most recent selection; lets the settle
-  // timer reselect only when the effective budget has actually moved.
-  let lastSelectionBudget = pointBudget;
   const currentBudget = (): number =>
     active ? Math.min(pointBudget, memoryCeilingPoints()) : 0;
 
@@ -551,13 +589,21 @@ export const createLodController = (
    * Request order for both queues: coarse levels first, then the largest
    * screen-space error. That is the selected frontier working outwards, so a
    * hierarchy page is fetched in the order the pages it unblocks would be.
+   *
+   * Each key's level and error are read once and sorted alongside it rather
+   * than recomputed inside the comparator, which a comparison-sort calls
+   * O(n log n) times — the queues are rebuilt from scratch on every selection
+   * pass, which is exactly when the camera is moving fastest.
    */
-  const byFrontierPriority = (a: string, b: string): number => {
-    const levelA = keyFromString(a).level;
-    const levelB = keyFromString(b).level;
-    if (levelA !== levelB) return levelA - levelB;
-    return sseFor(b) - sseFor(a);
-  };
+  const byFrontierPriority = (keyStrings: readonly string[]): string[] =>
+    keyStrings
+      .map((keyString) => ({
+        keyString,
+        level: levelFromString(keyString),
+        sse: sseFor(keyString),
+      }))
+      .sort((a, b) => (a.level !== b.level ? a.level - b.level : b.sse - a.sse))
+      .map((entry) => entry.keyString);
 
   const pagesLoaded = new Set<string>();
   /** Hierarchy pages requested whose result is still wanted. */
@@ -574,10 +620,10 @@ export const createLodController = (
   // deselection, setSource, and dispose cancel normally and stay retryable.
   const MAX_ATTEMPTS = 3;
   const RETRY_BACKOFF_MS = 30_000;
-  interface FailureRecord {
+  type FailureRecord = {
     count: number;
     lastMs: number;
-  }
+  };
   const pageFailures = new Map<string, FailureRecord>();
   const tileFailures = new Map<string, FailureRecord>();
 
@@ -629,7 +675,7 @@ export const createLodController = (
       requestSelection();
     });
   };
-  if (active) joinMemoryPool();
+  joinMemoryPool();
 
   const FALLBACK_BYTES_PER_POINT = 16;
   const MEASURE_MIN_POINTS = 100_000;
@@ -646,7 +692,7 @@ export const createLodController = (
    */
   const memoryBudgetBytes = (): number => {
     const bytes = poolMember?.budgetBytes() ?? 0;
-    return notPositive(bytes) ? 0 : bytes;
+    return !finitePositive(bytes) ? 0 : bytes;
   };
 
   const memoryCeilingPoints = (): number => {
@@ -657,32 +703,22 @@ export const createLodController = (
   let target: ReadonlySet<string> = new Set<string>();
   let targetRevision = 0;
   let selectionGeneration = 0;
-  let selectionStats: Omit<LodSelectionStats, "targetUndecodedTiles"> = {
-    generation: 0,
-    targetRevision: 0,
-    targetTiles: 0,
-    targetPoints: 0,
-    consideredNodes: 0,
-    availableNodes: 0,
-    selectedNodes: 0,
-    hierarchyUnavailableNodes: 0,
-    hierarchyPageBlockedNodes: 0,
-    frustumCulledNodes: 0,
-    frustumCulledPoints: 0,
-    leafNodes: 0,
-    sseStoppedNodes: 0,
-    budgetSkippedNodes: 0,
-    budgetSkippedPoints: 0,
-    projectedImportance: 0,
-    readyTerminalFrontier: emptyReadyTerminalFrontier(),
-  };
-  let budgetSkipped = new Set<string>();
+  let selectionStats = emptySelectionStats(0, 0);
+  let budgetSkipped: ReadonlySet<string> = new Set<string>();
   /**
    * The one physical read a key may have running. It is created when the read
    * starts and removed only when the promise settles, cancelled or not: while
    * the entry is here nobody may start a rival read of the same key, and a
-   * reselect adopts this operation by flipping `wanted` back on instead of
-   * paying for the same bytes twice.
+   * reselect adopts this operation by flipping `wanted` back on.
+   *
+   * Adoption salvages the read only where cancellation was advisory — a source
+   * that ignores the signal, or one that had already finished by the time it
+   * fired. An `AbortSignal` cannot be un-aborted, so a source that honours it
+   * (a `fetch`, or the COPC decode past its next abort check) still rejects,
+   * and the error path re-queues the key at the head. Deferring the abort to
+   * make adoption always work would be worse than it sounds: the read holds
+   * its concurrency slot until it settles either way, so a read nobody wants
+   * would go on occupying a slot the camera's current tiles need.
    */
   const tileReads = new Map<
     string,
@@ -794,9 +830,7 @@ export const createLodController = (
    * the camera has moved past must not keep its slot reservation.
    */
   const queuePages = (keyStrings: readonly string[]): void => {
-    pageQueue = [...new Set(keyStrings)]
-      .filter(pageWanted)
-      .sort(byFrontierPriority);
+    pageQueue = byFrontierPriority([...new Set(keyStrings)].filter(pageWanted));
     pumpPages();
   };
 
@@ -825,7 +859,14 @@ export const createLodController = (
           pagesLoaded.add(keyString);
           pageFailures.delete(keyString);
           for (const info of infos) {
-            hierarchy.set(keyToString(info.key), {
+            const infoString = keyToString(info.key);
+            // The cached error was computed from the entry being replaced. A
+            // page reference and the node that supersedes it happen to carry
+            // the same bounds and spacing in both shipped sources, but that is
+            // the source's convention, not this cache's contract — dropping
+            // the value costs one recomputation and removes the requirement.
+            sseByKey.delete(infoString);
+            hierarchy.set(infoString, {
               pointCount: info.pointCount,
               bounds: info.bounds,
               spacing: info.spacing,
@@ -976,26 +1017,20 @@ export const createLodController = (
       hierarchyBlockedNodes,
       tileBlockedNodes,
       budgetBlockedNodes,
-      projectedSpacingCssPx: {
-        p25: percentileOrNull(values, 0.25),
-        p50: percentileOrNull(values, 0.5),
-        p75: percentileOrNull(values, 0.75),
-        p95: percentileOrNull(values, 0.95),
-        max: values.length > 0 ? Math.max(...values) : null,
-      },
+      projectedSpacingCssPx: spacingQuantiles(values),
     };
     selectionStats = { ...selectionStats, readyTerminalFrontier: frontier };
 
     if (presentation.mode === "auto") {
       const p75 = frontier.projectedSpacingCssPx.p75;
       if (p75 !== null) {
-        const min =
-          presentation.minDiameterCssPx ?? DEFAULT_AUTO_MIN_DIAMETER_CSS_PX;
-        const max =
-          presentation.maxDiameterCssPx ?? DEFAULT_AUTO_MAX_DIAMETER_CSS_PX;
-        const target =
-          presentation.userScale * Math.min(max, Math.max(min, p75));
-        emitDiameter(target);
+        emitDiameter(
+          presentation.userScale *
+            Math.min(
+              presentation.maxDiameterCssPx,
+              Math.max(presentation.minDiameterCssPx, p75),
+            ),
+        );
       }
     }
   };
@@ -1077,16 +1112,11 @@ export const createLodController = (
   const runSelection = (): void => {
     if (disposed || !active || view === null) return;
     const budget = currentBudget();
-    lastSelectionBudget = budget;
     const currentView = view;
     const planes = frustumPlanes(currentView.viewProj);
     const sse = (key: VoxelKey): number => sseFor(keyToString(key));
 
     const neededPages: VoxelKey[] = [];
-    let hierarchyUnavailableNodes = 0;
-    let hierarchyPageBlockedNodes = 0;
-    let frustumCulledNodes = 0;
-    let frustumCulledPoints = 0;
     let leafNodes = 0;
     let sseStoppedNodes = 0;
     const selection = selectNodes({
@@ -1096,23 +1126,15 @@ export const createLodController = (
       getNode: (key) => {
         const keyString = keyToString(key);
         const entry = hierarchy.get(keyString);
-        if (entry === undefined) {
-          hierarchyUnavailableNodes += 1;
-          return undefined;
-        }
+        if (entry === undefined) return undefined;
         // Culling comes first: a page reference carries the bounds of the
         // subtree it stands for, so an invisible one must not be requested at
         // all. Reading it would spend a hierarchy slot on a region no
         // selection can use, which is precisely the fan-out the page queue
         // exists to bound.
-        if (!boundsIntersectsFrustum(planes, entry.bounds)) {
-          frustumCulledNodes += 1;
-          frustumCulledPoints += entry.pointCount;
-          return undefined;
-        }
+        if (!boundsIntersectsFrustum(planes, entry.bounds)) return undefined;
         if (entry.pageRef && !pagesLoaded.has(keyString)) {
           neededPages.push(key);
-          hierarchyPageBlockedNodes += 1;
           return undefined;
         }
         const availableChildren = childrenOf(key, entry);
@@ -1129,7 +1151,7 @@ export const createLodController = (
 
     const previousTarget = target;
     target = selection.selected;
-    budgetSkipped = new Set(selection.budgetSkipped);
+    budgetSkipped = selection.budgetSkipped;
     if (
       previousTarget.size !== target.size ||
       [...target].some((keyString) => !previousTarget.has(keyString))
@@ -1145,10 +1167,6 @@ export const createLodController = (
       consideredNodes: selection.consideredNodes,
       availableNodes: selection.availableNodes,
       selectedNodes: selection.selectedNodes,
-      hierarchyUnavailableNodes,
-      hierarchyPageBlockedNodes,
-      frustumCulledNodes,
-      frustumCulledPoints,
       leafNodes,
       sseStoppedNodes,
       budgetSkippedNodes: selection.budgetSkippedNodes,
@@ -1170,7 +1188,9 @@ export const createLodController = (
     );
 
     // Deselected submitted tiles leave renderer/GPU residency immediately.
-    for (const keyString of [...resident.keys()]) {
+    // `releaseResident` deletes only the key it is handed, which is safe to do
+    // while iterating the map it deletes from — no snapshot needed.
+    for (const keyString of resident.keys()) {
       if (target.has(keyString)) continue;
       releaseResident(keyString);
     }
@@ -1190,8 +1210,10 @@ export const createLodController = (
       if (resident.has(keyString)) continue;
       const read = tileReads.get(keyString);
       if (read !== undefined) {
-        // Adopt the live read instead of starting a rival one; its payload
-        // claims residency when it lands.
+        // Adopt the live read instead of starting a rival one. If it outran
+        // its cancellation the payload claims residency when it lands; if the
+        // source really stopped, the abort path re-queues this key at the
+        // head. Either way there is never a second read of the same bytes.
         read.wanted = true;
         continue;
       }
@@ -1202,7 +1224,7 @@ export const createLodController = (
         toFetch.push(keyString);
       }
     }
-    queue = toFetch.sort(byFrontierPriority);
+    queue = byFrontierPriority(toFetch);
 
     updateReadyTerminalFrontier();
     scheduleFlush();
@@ -1216,6 +1238,13 @@ export const createLodController = (
   // goes quiet after the last interaction frame.
   let settleTimer: ReturnType<typeof setTimeout> | null = null;
 
+  const clearSelectionTimer = (): void => {
+    if (selectionTimer !== null) {
+      clearTimeout(selectionTimer);
+      selectionTimer = null;
+    }
+  };
+
   const clearSettleTimer = (): void => {
     if (settleTimer !== null) {
       clearTimeout(settleTimer);
@@ -1228,15 +1257,7 @@ export const createLodController = (
     settleTimer = setTimeout(() => {
       settleTimer = null;
       if (disposed) return;
-      // Explicit completion is also the stationary refinement trigger. In
-      // inference mode a budget change is the only missing work.
-      if (
-        explicitInteractionSeen ||
-        presentation.mode === "auto" ||
-        currentBudget() !== lastSelectionBudget
-      ) {
-        runSelection();
-      }
+      runSelection();
     }, interactionSettleMs);
   };
 
@@ -1284,25 +1305,10 @@ export const createLodController = (
     if (target.size > 0) targetRevision += 1;
     target = new Set();
     budgetSkipped = new Set();
-    selectionStats = {
-      ...selectionStats,
+    selectionStats = emptySelectionStats(
+      selectionStats.generation,
       targetRevision,
-      targetTiles: 0,
-      targetPoints: 0,
-      consideredNodes: 0,
-      availableNodes: 0,
-      selectedNodes: 0,
-      hierarchyUnavailableNodes: 0,
-      hierarchyPageBlockedNodes: 0,
-      frustumCulledNodes: 0,
-      frustumCulledPoints: 0,
-      leafNodes: 0,
-      sseStoppedNodes: 0,
-      budgetSkippedNodes: 0,
-      budgetSkippedPoints: 0,
-      projectedImportance: 0,
-      readyTerminalFrontier: emptyReadyTerminalFrontier(),
-    };
+    );
     resident.clear();
     residentPoints = 0;
     residentBytes = 0;
@@ -1335,7 +1341,7 @@ export const createLodController = (
   const queueRootPage = (): void => queuePages([keyToString(ROOT_KEY)]);
 
   // Bootstrap: hierarchy root page loads eagerly; selection waits for camera.
-  if (active) queueRootPage();
+  queueRootPage();
 
   return {
     setCamera(nextView) {
@@ -1370,7 +1376,7 @@ export const createLodController = (
     },
 
     setPointBudget(points) {
-      if (disposed || outOfRange(points, 0)) return;
+      if (disposed || !finiteNonNegative(points)) return;
       pointBudget = Math.floor(points);
       runSelection();
     },
@@ -1393,7 +1399,7 @@ export const createLodController = (
     },
 
     setRefinementCutoffPx(pixels) {
-      if (disposed || outOfRange(pixels, 0)) return;
+      if (disposed || !finiteNonNegative(pixels)) return;
       if (pixels === refinementCutoffPx) return;
       refinementCutoffPx = pixels;
       runSelection();
@@ -1423,10 +1429,7 @@ export const createLodController = (
         return;
       }
 
-      if (selectionTimer !== null) {
-        clearTimeout(selectionTimer);
-        selectionTimer = null;
-      }
+      clearSelectionTimer();
       clearSettleTimer();
       poolMember?.release();
       poolMember = null;
@@ -1445,35 +1448,22 @@ export const createLodController = (
       if (target.size > 0) targetRevision += 1;
       target = new Set();
       selectionGeneration += 1;
-      selectionStats = {
-        ...selectionStats,
-        generation: selectionGeneration,
-        targetRevision,
-        targetTiles: 0,
-        targetPoints: 0,
-        consideredNodes: 0,
-        availableNodes: 0,
-        selectedNodes: 0,
-        hierarchyUnavailableNodes: 0,
-        hierarchyPageBlockedNodes: 0,
-        frustumCulledNodes: 0,
-        frustumCulledPoints: 0,
-        leafNodes: 0,
-        sseStoppedNodes: 0,
-        budgetSkippedNodes: 0,
-        budgetSkippedPoints: 0,
-        projectedImportance: 0,
-        readyTerminalFrontier: emptyReadyTerminalFrontier(),
-      };
+      selectionStats = emptySelectionStats(selectionGeneration, targetRevision);
 
       // Nothing stays resident while hidden; the flush turns that into
       // removals for exactly the actors the consumer was last handed.
-      for (const keyString of [...resident.keys()]) releaseResident(keyString);
+      for (const keyString of resident.keys()) releaseResident(keyString);
       scheduleFlush();
     },
 
     stats() {
       const cachedBytes = cache.totalBytes();
+      let targetUndecodedTiles = 0;
+      for (const keyString of target) {
+        if (!resident.has(keyString) && !cache.has(keyString)) {
+          targetUndecodedTiles += 1;
+        }
+      }
       return {
         active,
         residentTiles: resident.size,
@@ -1510,9 +1500,7 @@ export const createLodController = (
           // wanted tiles it does not hold and read nothing" — a global
           // decoded count cannot, because tiles decoded for *other*
           // selections mask the deficit.
-          targetUndecodedTiles: [...target].filter(
-            (keyString) => !resident.has(keyString) && !cache.has(keyString),
-          ).length,
+          targetUndecodedTiles,
         },
       };
     },
@@ -1524,10 +1512,7 @@ export const createLodController = (
 
     dispose() {
       if (disposed) return;
-      if (selectionTimer !== null) {
-        clearTimeout(selectionTimer);
-        selectionTimer = null;
-      }
+      clearSelectionTimer();
       clearSettleTimer();
       interactionDepth = 0;
       // The consumer still owns everything the last flush handed it —

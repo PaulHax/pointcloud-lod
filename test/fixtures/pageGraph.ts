@@ -28,8 +28,7 @@ import {
   type VoxelKey,
 } from "../../src/octree";
 import type {
-  LoadNodesOptions,
-  LoadTileOptions,
+  LoadOptions,
   NodeInfo,
   TileData,
   TileSource,
@@ -40,7 +39,7 @@ import type {
 export const ROOT_CUBE: Cube = { center: [0, 0, 0], halfSize: 0.5 };
 const ROOT_SPACING = 0.1;
 
-export interface PageGraphOptions {
+export type PageGraphOptions = {
   /** Levels below the root. Depth 3 gives 85 pages at branching 4. */
   readonly depth?: number;
   /** Children per interior node, taken from the eight octants in order. */
@@ -53,9 +52,9 @@ export interface PageGraphOptions {
    * signal and rejects as soon as the signal fires.
    */
   readonly cancellation?: "advisory" | "immediate";
-}
+};
 
-export interface PendingRequest {
+export type PendingRequest = {
   /** Key of the page or tile this operation is reading. */
   readonly key: string;
   /** Whether the controller cancelled it; advisory work runs on regardless. */
@@ -66,9 +65,9 @@ export interface PendingRequest {
   land(): void;
   /** Fail this operation. */
   fail(error: Error): void;
-}
+};
 
-export interface PageGraphSource {
+export type PageGraphSource = {
   readonly source: TileSource;
   /** Every `nodes()` call, in the order the scheduler made them. */
   readonly pageCalls: string[];
@@ -84,12 +83,12 @@ export interface PageGraphSource {
   landTiles(): void;
   /** Page keys in the graph, breadth first (the root page included). */
   pageKeys(): string[];
-}
+};
 
-interface MutableRequest extends PendingRequest {
+type MutableRequest = PendingRequest & {
   aborted: boolean;
   settled: boolean;
-}
+};
 
 export const createPageGraphSource = (
   options: PageGraphOptions = {},
@@ -165,7 +164,7 @@ export const createPageGraphSource = (
   const source: TileSource = {
     metadata: (): TileSourceMetadata => ({ pointCount: pointsPerNode }),
 
-    nodes(key: VoxelKey, opts?: LoadNodesOptions): Promise<NodeInfo[]> {
+    nodes(key: VoxelKey, opts?: LoadOptions): Promise<NodeInfo[]> {
       const keyString = keyToString(key);
       pageCalls.push(keyString);
       return pending(keyString, opts?.signal, pageRequests, () =>
@@ -173,7 +172,7 @@ export const createPageGraphSource = (
       );
     },
 
-    loadTile(key: VoxelKey, opts?: LoadTileOptions): Promise<TileData> {
+    loadTile(key: VoxelKey, opts?: LoadOptions): Promise<TileData> {
       const keyString = keyToString(key);
       tileCalls.push(keyString);
       return pending(keyString, opts?.signal, tileRequests, () => ({

@@ -37,17 +37,18 @@ const parseRange = (
   const [, rawStart, rawEnd] = match;
   if (rawStart === "" && rawEnd === "") return null;
   // A suffix range (`bytes=-N`) asks for the last N bytes.
-  const start = rawStart === "" ? Math.max(0, size - Number(rawEnd)) : Number(rawStart);
+  const start =
+    rawStart === "" ? Math.max(0, size - Number(rawEnd)) : Number(rawStart);
   const end = rawStart === "" || rawEnd === "" ? size - 1 : Number(rawEnd);
   if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
   if (start > end || start < 0 || start >= size) return null;
   return { start, end: Math.min(end, size - 1) };
 };
 
-export interface StaticServer {
+export type StaticServer = {
   readonly origin: string;
   close(): Promise<void>;
-}
+};
 
 /**
  * Serve `roots` under their given URL prefixes. Every root is resolved and
@@ -85,7 +86,8 @@ export const startStaticServer = async (
         // join() would treat a leading slash as absolute and escape the root.
         .replace(/^\/+/, "");
       const candidate = join(dir, normalize(rest === "" ? "index.html" : rest));
-      if (candidate === dir || candidate.startsWith(dir + sep)) return candidate;
+      if (candidate === dir || candidate.startsWith(dir + sep))
+        return candidate;
     }
     return null;
   };

@@ -29,23 +29,9 @@ import vtkActor from "@kitware/vtk.js/Rendering/Core/Actor";
 import vtkPointGaussianMapper from "@kitware/vtk.js/Rendering/Core/PointGaussianMapper";
 
 import type { TileBatch } from "./controller";
+import { finiteAbove, finiteNonNegative } from "./numeric";
 import { keyToString, type Vec3 } from "./octree";
-import type { TileData } from "./tileSource";
-
-/** Column-major 4x4 multiply: out = a · b. */
-const multiplyMat4 = (a: ArrayLike<number>, b: ArrayLike<number>): number[] => {
-  const out = new Array<number>(16);
-  for (let column = 0; column < 4; column += 1) {
-    for (let row = 0; row < 4; row += 1) {
-      let sum = 0;
-      for (let k = 0; k < 4; k += 1) {
-        sum += a[k * 4 + row]! * b[column * 4 + k]!;
-      }
-      out[column * 4 + row] = sum;
-    }
-  }
-  return out;
-};
+import { tileBytes, type TileData } from "./tileSource";
 
 const IDENTITY: readonly number[] = [
   1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
@@ -62,26 +48,7 @@ const sameMatrix = (
   return true;
 };
 
-const translation = (origin: Vec3): number[] => [
-  1,
-  0,
-  0,
-  0,
-  0,
-  1,
-  0,
-  0,
-  0,
-  0,
-  1,
-  0,
-  origin[0],
-  origin[1],
-  origin[2],
-  1,
-];
-
-export interface RendererAdapterOptions {
+export type RendererAdapterOptions = {
   /** vtk.js renderer the tile actors are added to. */
   renderer: {
     addActor(actor: unknown): void;
@@ -95,9 +62,9 @@ export interface RendererAdapterOptions {
   devicePixelRatio?: number;
   /** Initial visibility. Default true. Tiles added while hidden stay hidden. */
   visible?: boolean;
-}
+};
 
-export interface RendererAdapter {
+export type RendererAdapter = {
   /**
    * Apply one controller batch (typically wired as `onTiles`). Batches apply
    * whether or not the adapter is visible; an addition for a key already on
@@ -129,9 +96,18 @@ export interface RendererAdapter {
    * owned by nothing but the pool.
    */
   activeKeys(): { readonly submitted: string[]; readonly pooled: string[] };
-  /** Remove and release every tile actor. Idempotent. */
+  /**
+   * Remove and release every tile actor, submitted and pooled. Idempotent.
+   *
+   * Disposing the controller is NOT enough on its own. Its teardown hands back
+   * the submitted set as removals, which this adapter answers by moving those
+   * actors into the reuse pool — so a host that disposes only the controller
+   * leaves up to `resourceCeilingBytes` of GPU resources alive with nothing
+   * left that could ever ask for them again. Both objects must be disposed,
+   * and the pair is what releases a cloud.
+   */
   dispose(): void;
-}
+};
 
 /**
  * Three disjoint questions, three sets of fields: what the controller has
@@ -139,7 +115,7 @@ export interface RendererAdapter {
  * `gpuResident*` is the sum of the first two — the resources this adapter
  * owns, which is what a memory ceiling has to work from.
  */
-export interface RendererAdapterStats {
+export type RendererAdapterStats = {
   /** Tiles matching the controller's submitted set; drawn while visible. */
   readonly submittedTiles: number;
   readonly submittedPoints: number;
@@ -154,48 +130,49 @@ export interface RendererAdapterStats {
   /**
    * Tracked vertex/color buffer bytes plus a small per-tile object estimate;
    * driver allocation overhead is not observable through WebGL.
+   *
+   * These are the same ArrayBuffers the controller reports under
+   * `decodedBytes`, so adding the two double-counts the submitted set. The
+   * only part of this that the controller does not already count is
+   * `pooledBytes` — retired tiles it has released and this adapter still
+   * holds.
    */
   readonly gpuResidentBytes: number;
-  /** What participates in drawing: the submitted set, or nothing while hidden. */
   /**
    * The pool ceiling. Only the pool is trimmed to it, so submitted tiles alone
    * may exceed it — but then the pool is empty.
    */
   readonly resourceCeilingBytes: number;
+  /** What participates in drawing: the submitted set, or nothing while hidden. */
   readonly drawnTiles: number;
   readonly drawnPoints: number;
   readonly visible: boolean;
   readonly diameterCssPx: number;
   readonly devicePixelRatio: number;
-}
+};
 
-/** Decoded bytes a tile occupies once handed to the renderer. */
-const tileResourceBytes = (tile: TileData): number =>
-  tile.positions.byteLength + (tile.rgb?.byteLength ?? 0) + 64;
-
-interface TileActors {
+type TileActors = {
   actor: any;
   mapper: any;
   polyData: any;
-  origin: Vec3;
-  pointCount: number;
+  tile: TileData;
   resourceBytes: number;
-  positions: Float32Array;
-  rgb: Uint8Array | undefined;
-}
+};
 
 export const createRendererAdapter = (
   options: RendererAdapterOptions,
 ): RendererAdapter => {
   const { renderer, scheduleRender } = options;
-  let diameterCssPx = options.diameterCssPx ?? 2;
-  let devicePixelRatio = options.devicePixelRatio ?? 1;
-  if (!Number.isFinite(diameterCssPx) || diameterCssPx <= 0) {
-    throw new Error("diameterCssPx must be finite and > 0");
-  }
-  if (!Number.isFinite(devicePixelRatio) || devicePixelRatio <= 0) {
-    throw new Error("devicePixelRatio must be finite and > 0");
-  }
+  let diameterCssPx = finiteAbove(
+    "diameterCssPx",
+    options.diameterCssPx ?? 2,
+    0,
+  );
+  let devicePixelRatio = finiteAbove(
+    "devicePixelRatio",
+    options.devicePixelRatio ?? 1,
+    0,
+  );
   let visible = options.visible ?? true;
   let baseMatrix: ArrayLike<number> = IDENTITY;
   // A key lives in at most one of the two: removal moves its entry from
@@ -207,8 +184,67 @@ export const createRendererAdapter = (
   let resourceCeilingBytes = 256 * 1024 * 1024;
   let disposed = false;
 
-  const tileMatrix = (origin: Vec3): number[] =>
-    multiplyMat4(baseMatrix, translation(origin));
+  // Running totals rather than a walk per question. Trimming asks how many
+  // bytes are held once per evicted entry, so re-summing both maps there made
+  // shedding a large pool quadratic in its size — and the pool is largest
+  // exactly when a cloud has just been deactivated and the ceiling dropped to
+  // nothing, which is when the walk is longest and the answer needed soonest.
+  // Every mutation of either map goes through the four helpers below.
+  let submittedPoints = 0;
+  let submittedBytes = 0;
+  let pooledPoints = 0;
+  let pooledBytes = 0;
+
+  const holdSubmitted = (keyString: string, entry: TileActors): void => {
+    tiles.set(keyString, entry);
+    submittedPoints += entry.tile.pointCount;
+    submittedBytes += entry.resourceBytes;
+  };
+
+  const dropSubmitted = (keyString: string, entry: TileActors): void => {
+    tiles.delete(keyString);
+    submittedPoints -= entry.tile.pointCount;
+    submittedBytes -= entry.resourceBytes;
+  };
+
+  const holdPooled = (keyString: string, entry: TileActors): void => {
+    pendingRelease.set(keyString, entry);
+    pooledPoints += entry.tile.pointCount;
+    pooledBytes += entry.resourceBytes;
+  };
+
+  const dropPooled = (keyString: string, entry: TileActors): void => {
+    pendingRelease.delete(keyString);
+    pooledPoints -= entry.tile.pointCount;
+    pooledBytes -= entry.resourceBytes;
+  };
+
+  /** A live scalar setter accepts only a usable, actually-different value. */
+  const acceptsScalar = (next: number, current: number): boolean =>
+    !disposed && Number.isFinite(next) && next > 0 && next !== current;
+
+  /** base · translate(origin): only the last column differs from base. */
+  const tileMatrix = (origin: Vec3): number[] => {
+    const out = Array.from(baseMatrix);
+    for (let row = 0; row < 4; row += 1) {
+      out[12 + row] =
+        baseMatrix[row]! * origin[0] +
+        baseMatrix[4 + row]! * origin[1] +
+        baseMatrix[8 + row]! * origin[2] +
+        baseMatrix[12 + row]!;
+    }
+    return out;
+  };
+
+  /** Push the adapter's current visual state onto one tile's actor/mapper. */
+  const applyTileState = (entry: TileActors): void => {
+    // The actor property remains in CSS pixels. The custom dense-point mapper
+    // multiplies it by scaleFactor before assigning physical gl_PointSize.
+    entry.mapper.setScaleFactor(devicePixelRatio);
+    entry.actor.getProperty().setPointSize(diameterCssPx);
+    entry.actor.setVisibility(visible);
+    entry.actor.setUserMatrix(tileMatrix(entry.tile.origin));
+  };
 
   const createTile = (tile: TileData): TileActors => {
     const polyData = vtkPolyData.newInstance();
@@ -225,24 +261,17 @@ export const createRendererAdapter = (
     const mapper = vtkPointGaussianMapper.newInstance();
     mapper.setInputData(polyData);
     mapper.setStatic?.(true);
-    // The actor property remains in CSS pixels. The custom dense-point mapper
-    // multiplies it by scaleFactor before assigning physical gl_PointSize.
-    mapper.setScaleFactor(devicePixelRatio);
     const actor = vtkActor.newInstance();
     actor.setMapper(mapper);
-    actor.getProperty().setPointSize(diameterCssPx);
-    actor.setVisibility(visible);
-    actor.setUserMatrix(tileMatrix(tile.origin));
-    return {
+    const entry: TileActors = {
       actor,
       mapper,
       polyData,
-      origin: tile.origin,
-      pointCount: tile.pointCount,
-      resourceBytes: tileResourceBytes(tile),
-      positions: tile.positions,
-      rgb: tile.rgb,
+      tile,
+      resourceBytes: tileBytes(tile),
     };
+    applyTileState(entry);
+    return entry;
   };
 
   const releaseTile = (entry: TileActors): void => {
@@ -254,36 +283,23 @@ export const createRendererAdapter = (
 
   /** Reuse is only sound while an entry still holds the payload being added. */
   const holdsPayload = (entry: TileActors, tile: TileData): boolean =>
-    entry.positions === tile.positions && entry.rgb === tile.rgb;
-
-  const sumPoints = (entries: Iterable<TileActors>): number => {
-    let points = 0;
-    for (const entry of entries) points += entry.pointCount;
-    return points;
-  };
-
-  const sumBytes = (entries: Iterable<TileActors>): number => {
-    let bytes = 0;
-    for (const entry of entries) bytes += entry.resourceBytes;
-    return bytes;
-  };
-
-  const resourceBytes = (): number =>
-    sumBytes(tiles.values()) + sumBytes(pendingRelease.values());
+    entry.tile.positions === tile.positions && entry.tile.rgb === tile.rgb;
 
   // Only the pool is trimmable: the submitted set is what the controller
   // decided fits its own memory ceiling, and dropping an actor from it would
   // punch a hole nothing would ever refill (the controller sees no change).
   const trimPool = (additionalBytes = 0): void => {
-    while (
-      pendingRelease.size > 0 &&
-      resourceBytes() + additionalBytes > resourceCeilingBytes
-    ) {
-      const [key, entry] = pendingRelease.entries().next().value as [
-        string,
-        TileActors,
-      ];
-      pendingRelease.delete(key);
+    // Deleting the entry just yielded is well-defined for a Map iterator, and
+    // iteration stays in insertion order — so this sheds oldest-first without
+    // rebuilding an iterator per eviction.
+    for (const [key, entry] of pendingRelease) {
+      if (
+        submittedBytes + pooledBytes + additionalBytes <=
+        resourceCeilingBytes
+      ) {
+        return;
+      }
+      dropPooled(key, entry);
       releaseTile(entry);
     }
   };
@@ -296,12 +312,12 @@ export const createRendererAdapter = (
         const keyString = keyToString(key);
         const entry = tiles.get(keyString);
         if (entry === undefined) continue;
-        tiles.delete(keyString);
+        dropSubmitted(keyString, entry);
         // Stop drawing the stale selection synchronously, but retain its
         // resources for bounded reuse. Releasing and reallocating a refined
         // cloud's actors at every interaction boundary creates input long tasks.
         entry.actor.setVisibility(false);
-        pendingRelease.set(keyString, entry);
+        holdPooled(keyString, entry);
         changed = true;
       }
       for (const { key, tile } of batch.added) {
@@ -313,27 +329,24 @@ export const createRendererAdapter = (
           // old actor would draw superseded points for the rest of the
           // session, and its payload can never be reused, so it goes now.
           if (holdsPayload(current, tile)) continue;
-          tiles.delete(keyString);
+          dropSubmitted(keyString, current);
           releaseTile(current);
         }
         const stale = pendingRelease.get(keyString);
         if (stale !== undefined) {
-          pendingRelease.delete(keyString);
+          dropPooled(keyString, stale);
           if (holdsPayload(stale, tile)) {
-            stale.origin = tile.origin;
-            stale.actor.getProperty().setPointSize(diameterCssPx);
-            stale.mapper.setScaleFactor(devicePixelRatio);
-            stale.actor.setUserMatrix(tileMatrix(tile.origin));
-            stale.actor.setVisibility(visible);
-            tiles.set(keyString, stale);
+            stale.tile = tile;
+            applyTileState(stale);
+            holdSubmitted(keyString, stale);
             changed = true;
             continue;
           }
           releaseTile(stale);
         }
-        trimPool(tileResourceBytes(tile));
+        trimPool(tileBytes(tile));
         const entry = createTile(tile);
-        tiles.set(keyString, entry);
+        holdSubmitted(keyString, entry);
         renderer.addActor(entry.actor);
         changed = true;
       }
@@ -354,20 +367,13 @@ export const createRendererAdapter = (
       // object, and the next update still needs to detect that visual change.
       baseMatrix = Array.from(next);
       for (const entry of tiles.values()) {
-        entry.actor.setUserMatrix(tileMatrix(entry.origin));
+        entry.actor.setUserMatrix(tileMatrix(entry.tile.origin));
       }
       scheduleRender();
     },
 
     setPointDiameterCssPx(nextDiameterCssPx) {
-      if (
-        disposed ||
-        !Number.isFinite(nextDiameterCssPx) ||
-        nextDiameterCssPx <= 0 ||
-        nextDiameterCssPx === diameterCssPx
-      ) {
-        return;
-      }
+      if (!acceptsScalar(nextDiameterCssPx, diameterCssPx)) return;
       diameterCssPx = nextDiameterCssPx;
       for (const entry of tiles.values()) {
         entry.actor.getProperty().setPointSize(nextDiameterCssPx);
@@ -376,14 +382,7 @@ export const createRendererAdapter = (
     },
 
     setDevicePixelRatio(nextDevicePixelRatio) {
-      if (
-        disposed ||
-        !Number.isFinite(nextDevicePixelRatio) ||
-        nextDevicePixelRatio <= 0 ||
-        nextDevicePixelRatio === devicePixelRatio
-      ) {
-        return;
-      }
+      if (!acceptsScalar(nextDevicePixelRatio, devicePixelRatio)) return;
       devicePixelRatio = nextDevicePixelRatio;
       for (const entry of tiles.values()) {
         entry.mapper.setScaleFactor(nextDevicePixelRatio);
@@ -403,16 +402,12 @@ export const createRendererAdapter = (
     },
 
     setResourceCeilingBytes(bytes) {
-      if (disposed || !Number.isFinite(bytes) || bytes < 0) return;
+      if (disposed || !finiteNonNegative(bytes)) return;
       resourceCeilingBytes = bytes;
       trimPool();
     },
 
     stats() {
-      const submittedPoints = sumPoints(tiles.values());
-      const submittedBytes = sumBytes(tiles.values());
-      const pooledPoints = sumPoints(pendingRelease.values());
-      const pooledBytes = sumBytes(pendingRelease.values());
       return {
         submittedTiles: tiles.size,
         submittedPoints,
@@ -446,6 +441,10 @@ export const createRendererAdapter = (
       for (const entry of pendingRelease.values()) releaseTile(entry);
       tiles.clear();
       pendingRelease.clear();
+      submittedPoints = 0;
+      submittedBytes = 0;
+      pooledPoints = 0;
+      pooledBytes = 0;
     },
   };
 };

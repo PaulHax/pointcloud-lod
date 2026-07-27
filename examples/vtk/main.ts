@@ -25,6 +25,7 @@ import vtkCompositeCameraManipulator from "@kitware/vtk.js/Interaction/Manipulat
 import macro from "@kitware/vtk.js/macros";
 
 import {
+  DEFAULTS,
   ROOT_KEY,
   createCopcTileSource,
   createLodController,
@@ -204,8 +205,6 @@ interactorStyle.addMouseManipulator(
 );
 interactor.setInteractorStyle(interactorStyle);
 
-/** The adaptive floor is stated so an out-of-order maximum is caught here. */
-const ADAPTIVE_MIN_BUDGET = 200_000;
 /** How long the camera must hold still before inferred motion is released. */
 const MOTION_DEBOUNCE_MS = 250;
 /**
@@ -330,8 +329,7 @@ const movedBeyondJitter = (previous: number, next: number): boolean =>
   MOTION_RELATIVE_EPSILON * Math.max(1, Math.abs(previous), Math.abs(next));
 
 /**
- * World-to-clip entries describing where the camera is looking, row-major as
- * `cameraView()` transposes it (index = row * 4 + column).
+ * World-to-clip entries describing where the camera is looking.
  *
  * The clip-z row is deliberately left out, exactly as the bridge leaves out
  * its own: a host folds a depth remap derived from the scene's visible bounds
@@ -410,12 +408,11 @@ const readGovernorOptions = (): ViewGovernorOptions | null => {
     interactionTargetMs <= 0 ||
     stationaryTargetMs === null ||
     stationaryTargetMs <= 0 ||
-    (maxBudget !== null && maxBudget < ADAPTIVE_MIN_BUDGET)
+    (maxBudget !== null && maxBudget < DEFAULTS.minBudget)
   ) {
     return null;
   }
   return {
-    minBudget: ADAPTIVE_MIN_BUDGET,
     interactionTargetMs,
     stationaryTargetMs,
     // The default allows VTK 70% of a host frame, which is right for a view
@@ -456,7 +453,7 @@ const syncGovernor = (): void => {
     // the governor the panel last described.
     setMessage(
       "Frame-time targets must be above 0 ms and any maximum at least " +
-        `${ADAPTIVE_MIN_BUDGET.toLocaleString()} points.`,
+        `${DEFAULTS.minBudget.toLocaleString()} points.`,
       true,
     );
     return;
@@ -809,35 +806,33 @@ const RADIANS = Math.PI / 180;
 /**
  * Frame the cloud and put the orbit point in the middle of it.
  *
- * The centre comes from the root tile's points rather than from the root
- * node's bounds, because a COPC root node is a cube spanning the octree, not
- * the data: for a tile far wider than it is tall, the cube's centre floats
- * high above the ground and every orbit would swing about a point in the sky.
- * The root tile is a uniform subsample of the whole cloud, so its extent is a
- * good estimate of the real one for the price of a tile that is about to be
- * read anyway.
+ * The extent comes from the source's stated data bounds, never from the root
+ * node's: a COPC root node is a cube spanning the octree, not the data, so for
+ * a survey far wider than it is tall the cube's centre floats high above the
+ * ground and every orbit would swing about a point in the sky. A source that
+ * states no bounds leaves that cube as the only estimate — and nothing here
+ * reads a tile, so opening a cloud costs one hierarchy page and the tiles the
+ * first selection actually wants.
  */
 const frameRoot = async (source: TileSource): Promise<void> => {
+  const stated = source.metadata().bounds;
   const entries = await source.nodes(ROOT_KEY);
   const root = entries.find(
     ({ key }) => key.level === 0 && key.x === 0 && key.y === 0 && key.z === 0,
   );
   if (!root) throw new Error("The COPC hierarchy has no root node");
 
-  const { origin, positions, pointCount } = await source.loadTile(ROOT_KEY);
-  const min = [Infinity, Infinity, Infinity];
-  const max = [-Infinity, -Infinity, -Infinity];
-  for (let i = 0; i < pointCount; i += 1) {
-    for (let axis = 0; axis < 3; axis += 1) {
-      const value = origin[axis]! + positions[i * 3 + axis]!;
-      if (value < min[axis]!) min[axis] = value;
-      if (value > max[axis]!) max[axis] = value;
-    }
-  }
-  // An empty or degenerate root leaves the node's bounds as the only estimate.
-  const usable = pointCount > 0 && min.every(Number.isFinite);
-  const low = usable ? min : [...root.bounds.min];
-  const high = usable ? max : [...root.bounds.max];
+  // A header carrying an unset or inverted extent is worse than none: it would
+  // put the camera somewhere no data is and leave the view blank.
+  const usable =
+    stated !== undefined &&
+    stated.min.every((value, axis) => {
+      const top = stated.max[axis]!;
+      return Number.isFinite(value) && Number.isFinite(top) && top >= value;
+    });
+  const extent = usable ? stated : root.bounds;
+  const low = [...extent.min];
+  const high = [...extent.max];
 
   framing = {
     center: low.map((value, axis) => (value + high[axis]!) / 2),
@@ -1048,7 +1043,11 @@ budgetModeSelect.addEventListener("change", () => {
 
 pointBudgetInput.addEventListener("change", applyBudgetMode);
 
-for (const input of [movingTargetInput, stationaryTargetInput, maxPointsInput]) {
+for (const input of [
+  movingTargetInput,
+  stationaryTargetInput,
+  maxPointsInput,
+]) {
   input.addEventListener("change", () => {
     syncGovernor();
     scheduleRender();
@@ -1174,8 +1173,9 @@ Object.assign(window, {
           ? (first.getProperty().getPointSize() ?? null)
           : null,
         mapperScaleFactor: first
-          ? ((first.getMapper() as { getScaleFactor?: () => number })
-              .getScaleFactor?.() ?? null)
+          ? ((
+              first.getMapper() as { getScaleFactor?: () => number }
+            ).getScaleFactor?.() ?? null)
           : null,
       };
     },

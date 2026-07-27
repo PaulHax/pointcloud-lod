@@ -20,18 +20,18 @@ const FIXTURE = fileURLToPath(
 const makeSource = () => createCopcTileSource({ source: Getter.file(FIXTURE) });
 
 /** One synthetic node: interleaved RGB, absent for a format without color. */
-interface StubNode {
+type StubNode = {
   pointCount: number;
   channels?: number[];
   /** Simulates a node whose point data cannot be read. */
   unreadable?: boolean;
-}
+};
 
-interface StubAsset {
+type StubAsset = {
   pointDataRecordFormat: number;
   /** Keyed by "level-x-y-z"; "0-0-0-0" is the node the shift is sampled from. */
   nodes: Record<string, StubNode>;
-}
+};
 
 /**
  * RGB-depth cases no committed fixture can express — dark and bright
@@ -43,6 +43,7 @@ interface StubAsset {
 const stub = vi.hoisted(() => ({
   asset: null as StubAsset | null,
   viewLoads: 0,
+  pageLoads: 0,
 }));
 
 vi.mock("copc", async (importOriginal) => {
@@ -62,6 +63,10 @@ vi.mock("copc", async (importOriginal) => {
           header: {
             pointCount: nodes.reduce((sum, n) => sum + n.pointCount, 0),
             pointDataRecordFormat: a.pointDataRecordFormat,
+            // A data extent well inside the octree cube below, which is what a
+            // real survey looks like and what makes the two distinguishable.
+            min: [1, 2, 3],
+            max: [21, 12, 7],
           },
           info: {
             cube: [0, 0, 0, 64, 64, 64],
@@ -71,6 +76,7 @@ vi.mock("copc", async (importOriginal) => {
         };
       },
       loadHierarchyPage: async (source: never, page: never) => {
+        stub.pageLoads += 1;
         const a = asset();
         if (a === null) return actual.Copc.loadHierarchyPage(source, page);
         const nodes = Object.fromEntries(
@@ -149,6 +155,7 @@ const serviceRgb = (rootChannels: number[], channels: number[]): Uint8Array => {
 afterEach(() => {
   stub.asset = null;
   stub.viewLoads = 0;
+  stub.pageLoads = 0;
 });
 
 describe("createCopcTileSource", () => {
@@ -156,6 +163,39 @@ describe("createCopcTileSource", () => {
     const source = await makeSource();
     const meta = source.metadata();
     expect(meta.pointCount).toBe(2000);
+  });
+
+  it("states the data's own extent, not the octree cube enclosing it", async () => {
+    const source = await makeSource();
+    const bounds = source.metadata().bounds;
+    expect(bounds, "the fixture's header carries an extent").toBeDefined();
+
+    const root = (await source.nodes(ROOT_KEY)).find(
+      (n) => keyToString(n.key) === "0-0-0-0",
+    )!;
+    for (let axis = 0; axis < 3; axis += 1) {
+      // Inside the cube, and — on a fixture that is not a perfect cube — some
+      // axis is strictly inside it. That difference is the whole reason a host
+      // frames from this rather than from the node bounds.
+      expect(bounds!.min[axis]).toBeGreaterThanOrEqual(root.bounds.min[axis]!);
+      expect(bounds!.max[axis]).toBeLessThanOrEqual(root.bounds.max[axis]!);
+    }
+    const cubeSide = root.bounds.max[0]! - root.bounds.min[0]!;
+    const spans = [0, 1, 2].map(
+      (axis) => bounds!.max[axis]! - bounds!.min[axis]!,
+    );
+    expect(Math.min(...spans)).toBeLessThan(cubeSide);
+  });
+
+  it("reads the root hierarchy page once, however early it is wanted", async () => {
+    // Opening samples RGB from the root node, a host frames the scene from the
+    // hierarchy, and the controller bootstraps from it. The page is immutable,
+    // so all three must come out of one range read.
+    const source = await makeSource();
+    const before = stub.pageLoads;
+    expect(await source.nodes(ROOT_KEY)).toEqual(await source.nodes(ROOT_KEY));
+    expect(stub.pageLoads).toBe(before);
+    expect(before).toBe(1);
   });
 
   it("enumerates the hierarchy with point counts summing to the total", async () => {
@@ -216,7 +256,11 @@ describe("createCopcTileSource", () => {
         copc,
         subtree.nodes[keyToString(info.key)]!,
       );
-      const raw = [view.getter("Red"), view.getter("Green"), view.getter("Blue")];
+      const raw = [
+        view.getter("Red"),
+        view.getter("Green"),
+        view.getter("Blue"),
+      ];
       for (let i = 0; i < Math.min(tile.pointCount, 40); i += 1) {
         for (const [channel, get] of raw.entries()) {
           expect(tile.rgb![i * 3 + channel]).toBe(get(i) >> 8);
@@ -369,6 +413,20 @@ describe("createCopcTileSource RGB depth", () => {
     expect(tile.positions).toHaveLength(6);
     // Only the tile itself was decoded: a colorless format needs no sample.
     expect(stub.viewLoads).toBe(1);
+  });
+
+  it("decodes the root node once, sampling and drawing from the same read", async () => {
+    // The shift sample must decode the root, and the controller asks for that
+    // same node as its first tile.
+    const source = await openStub(FULL_RANGE);
+    expect(stub.viewLoads).toBe(1);
+    expect(await loadRgb(source, "0-0-0-0")).toEqual(
+      new Uint8Array([0, 128, 255, 16, 32, 64]),
+    );
+    expect(stub.viewLoads).toBe(1);
+    // Held for one read only; a second one goes back to the file.
+    await loadRgb(source, "0-0-0-0");
+    expect(stub.viewLoads).toBe(2);
   });
 
   it("falls back to no shift when the root node cannot be sampled", async () => {
