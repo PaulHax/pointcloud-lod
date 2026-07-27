@@ -763,11 +763,35 @@ syncGovernor();
 updateDiagnostics();
 setInterval(updateDiagnostics, DIAGNOSTICS_INTERVAL_MS);
 
-const initialUrl = new URLSearchParams(window.location.search).get("url");
-if (initialUrl) {
-  urlInput.value = initialUrl;
-  loadUrl();
-}
+/**
+ * The cloud this page opens with when no `?url=` says otherwise.
+ *
+ * Dublin City 2015, collected by NYU's Urban Modeling Group and published
+ * under CC-BY-4.0; mirrored on the AWS Open Data bucket `open-lidar-data`,
+ * which serves `Access-Control-Allow-Origin: *` and honours Range requests.
+ * One 250 m tile: 98.4 million points at 394 points/m², six levels deep, and
+ * a hierarchy that genuinely spans pages — so opening the page exercises
+ * paged hierarchy loading, deep refinement and eviction rather than just
+ * proving a file parses.
+ *
+ * It is PDRF 6, which carries no colour, so it draws in the actor's flat
+ * colour. That is the trade: nothing else public that we checked reaches this
+ * density, and the coloured alternatives are an order of magnitude sparser.
+ * For colour instead of detail, load the Luxembourg Lidar 2019 tiles (CC0) or
+ * `https://s3.amazonaws.com/hobu-lidar/autzen-classified.copc.laz` (CC-BY-4.0).
+ *
+ * Nothing else in the library or the tests depends on this constant: every
+ * browser check passes an explicit `?url=`, so this is the interactive
+ * default only.
+ */
+const DEFAULT_CLOUD_URL =
+  "https://open-lidar-data.s3.eu-central-1.amazonaws.com/data/IE/NYU_EDU/" +
+  "Dublin_City_2015/copc/T_316000_233500.copc.laz";
+
+const initialUrl =
+  new URLSearchParams(window.location.search).get("url") ?? DEFAULT_CLOUD_URL;
+urlInput.value = initialUrl;
+loadUrl();
 
 // Driving handles for browser checks. Everything here drives the page the way
 // a user or a host would — the camera moves, the panel changes, a frame is
