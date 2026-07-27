@@ -79,6 +79,8 @@ interface Extremes {
   readonly physicalTiles: number;
   readonly inFlight: number;
   readonly fetchConcurrency: number;
+  /** Smallest margin seen between what selection wanted and what was decoded. */
+  readonly undecodedTiles: number;
 }
 
 const nothingSeen: Extremes = {
@@ -87,6 +89,7 @@ const nothingSeen: Extremes = {
   inFlight: 0,
   // Read off the page rather than assumed: the example owns this number.
   fetchConcurrency: Number.POSITIVE_INFINITY,
+  undecodedTiles: 0,
 };
 
 const extend = (seen: Extremes, stats: ExampleStats): Extremes => {
@@ -97,6 +100,10 @@ const extend = (seen: Extremes, stats: ExampleStats): Extremes => {
     physicalTiles: Math.max(seen.physicalTiles, cloud.physicalTileOperations),
     inFlight: Math.max(seen.inFlight, cloud.inFlight),
     fetchConcurrency: Math.min(seen.fetchConcurrency, cloud.fetchConcurrency),
+    undecodedTiles: Math.max(
+      seen.undecodedTiles,
+      cloud.selection.targetTiles - cloud.decodedTiles,
+    ),
   };
 };
 
@@ -233,14 +240,20 @@ describe("an orbit reversing as fast as the page will take it", () => {
           `more reads were wanted than were running: ${JSON.stringify(seen)}`,
         ).toBeLessThanOrEqual(seen.physicalTiles);
 
-        // A cloud too small to stream is fully resident before the burst
-        // starts and has no reads to cancel, so only a deep one can show the
-        // bounds were load-bearing rather than vacuous.
-        if (cloud.deep) {
+        // A burst that issued no read proved nothing about cancellation — but
+        // "deep cloud" is not the condition that decides it. A cloud whose
+        // whole decoded set fits the CPU cache is served from there however
+        // far the camera travels: measured on a 9.1 M-point cloud, eight
+        // seconds of drifting reversal issued zero reads while the 18.9 M-point
+        // cloud beside it issued plenty. So rather than demand reads, require
+        // an explanation for their absence — either the burst was fetching, or
+        // every tile it selected was already decoded and there was nothing to
+        // fetch. What is not allowed is a quiet zero with tiles outstanding.
+        if (seen.physicalTiles === 0) {
           expect(
-            seen.physicalTiles,
-            "the reversal never put a read in flight, so it cancelled nothing",
-          ).toBeGreaterThan(0);
+            seen.undecodedTiles,
+            `no read was issued, yet selection wanted tiles nothing had decoded: ${JSON.stringify(seen)}`,
+          ).toBe(0);
         }
 
         // The drain is what this scenario hunts: a leaked slot is permanent,
