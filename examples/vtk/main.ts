@@ -637,7 +637,11 @@ const updateDiagnostics = (): void => {
 let clippingDirty = true;
 
 /** Where loading the current cloud framed it, so the view can go back. */
-let framing: { center: number[]; radius: number } | null = null;
+let framing: {
+  center: number[];
+  radius: number;
+  bounds: [number, number, number, number, number, number];
+} | null = null;
 
 const scheduleRender = (): void => {
   if (frameQueued) return;
@@ -786,6 +790,7 @@ const frameRoot = async (source: TileSource): Promise<void> => {
       Math.hypot(...high.map((value, axis) => value - low[axis]!)) / 2,
       1e-6,
     ),
+    bounds: [low[0]!, high[0]!, low[1]!, high[1]!, low[2]!, high[2]!],
   };
   applyFraming();
 };
@@ -793,7 +798,7 @@ const frameRoot = async (source: TileSource): Promise<void> => {
 /** Put the camera back where loading the current cloud put it. */
 const applyFraming = (): void => {
   if (framing === null) return;
-  const { center, radius } = framing;
+  const { center, radius, bounds } = framing;
   // Far enough back that a sphere of that radius fits the vertical field.
   const distance = radius / Math.tan((VIEW_ANGLE / 2) * RADIANS);
   const elevation = START_ELEVATION * RADIANS;
@@ -820,6 +825,13 @@ const applyFraming = (): void => {
   // A parallel camera has no eye distance to frame from, so the world height
   // the viewport spans is stated directly.
   camera.setParallelScale(radius);
+  // Set the range from the data's own bounds rather than from the renderer's
+  // props, which are empty until something is selected. Selection culls
+  // against this frustum, so a range left over from a nearer scene rejects
+  // every node of a wider one — and with nothing selected there is never an
+  // actor to trigger a recompute. That deadlock is permanent: a blank view
+  // that no amount of waiting resolves.
+  renderer.resetCameraClippingRange(bounds);
   clippingDirty = true;
 };
 
