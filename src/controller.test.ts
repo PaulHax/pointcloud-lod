@@ -480,6 +480,33 @@ describe("createLodController", () => {
     controller.dispose();
   });
 
+  it("an initially inactive controller defers hierarchy I/O until activated", async () => {
+    const graph = createPageGraphSource({ depth: 0 });
+    const controller = createLodController({
+      source: graph.source,
+      onTiles: () => {},
+      scheduleRender: () => {},
+      selectionDelayMs: 0,
+      active: false,
+    });
+
+    controller.setCamera(VIEW);
+    await settle();
+    expect(graph.pageCalls).toHaveLength(0);
+    expect(controller.stats()).toMatchObject({
+      active: false,
+      hierarchyInFlight: 0,
+      queuedPages: 0,
+      memoryBudgetBytes: 0,
+    });
+
+    controller.setActive(true);
+    await settle();
+    expect(graph.pageCalls).toEqual(["0-0-0-0"]);
+    expect(controller.stats().active).toBe(true);
+    controller.dispose();
+  });
+
   it("evicts deselected tiles beyond the cache byte bound", async () => {
     const { controller, deferred, loadCalls } = makeController(SMALL_TREE, {
       cacheBytes: 1, // nothing survives deselection

@@ -78,6 +78,12 @@ export type LodControllerOptions = {
    */
   scheduleRender: () => void;
   /**
+   * Whether hierarchy I/O, selection, and renderer submission start enabled.
+   * Default true. An initially inactive controller retains camera updates and
+   * starts from the latest view when activated.
+   */
+  active?: boolean;
+  /**
    * Visible-point budget driving selection. Default 2,000,000. The
    * memory-derived point cap applies on top.
    */
@@ -549,7 +555,7 @@ export const createLodController = (
     presentation.mode === "fixed"
       ? presentation.diameterCssPx
       : INITIAL_AUTO_DIAMETER_CSS_PX;
-  let active = true;
+  let active = options.active ?? true;
   let view: CameraView | null = null;
   let disposed = false;
   onPointDiameterCssPx(diameterCssPx);
@@ -675,7 +681,7 @@ export const createLodController = (
       requestSelection();
     });
   };
-  joinMemoryPool();
+  if (active) joinMemoryPool();
 
   const FALLBACK_BYTES_PER_POINT = 16;
   const MEASURE_MIN_POINTS = 100_000;
@@ -1340,8 +1346,9 @@ export const createLodController = (
   /** Bootstrap path for the root page, used before any camera exists. */
   const queueRootPage = (): void => queuePages([keyToString(ROOT_KEY)]);
 
-  // Bootstrap: hierarchy root page loads eagerly; selection waits for camera.
-  queueRootPage();
+  // Bootstrap: an active controller loads hierarchy eagerly; an inactive one
+  // waits until activation so a hidden cloud performs no hierarchy I/O.
+  if (active) queueRootPage();
 
   return {
     setCamera(nextView) {
