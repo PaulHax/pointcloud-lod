@@ -39,10 +39,21 @@ export default defineConfig({
     },
   ],
   resolve: {
-    alias: {
-      "@kitware/vtk.js": vtkJsDir,
-      "gl-matrix": glMatrixDir,
-    },
+    // vtk.js's Vite ESM build is flat (`.../Camera.js`) while its public
+    // subpaths are extensionless (`.../Camera`). Resolve those entry points
+    // explicitly; imports inside the built modules are already relative .js
+    // paths and need no special handling.
+    alias: [
+      {
+        find: /^@kitware\/vtk\.js\/(.+)$/,
+        replacement: `${vtkJsDir}/$1.js`,
+      },
+      {
+        find: "@kitware/vtk.js",
+        replacement: `${vtkJsDir}/index.js`,
+      },
+      { find: "gl-matrix", replacement: glMatrixDir },
+    ],
     dedupe: ["@kitware/vtk.js"],
   },
   build: {

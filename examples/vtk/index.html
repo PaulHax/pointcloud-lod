@@ -12,10 +12,9 @@
       <header class="title-row">
         <h1>pointcloud-lod</h1>
         <div class="title-actions">
-          <button id="reset-view" type="button" class="ghost">
+          <button id="reset-view" type="button" class="reset-view">
             Reset view
           </button>
-          <span id="regime" class="regime" data-regime="idle">no cloud</span>
         </div>
       </header>
 
@@ -100,6 +99,30 @@
             <option value="perspective" selected>Perspective</option>
             <option value="orthographic">Orthographic</option>
           </select>
+        </div>
+      </div>
+
+      <div class="field-grid">
+        <div>
+          <label for="point-size-mode">Point size</label>
+          <select id="point-size-mode">
+            <option value="fixed">Fixed</option>
+            <option value="auto" selected>Auto</option>
+          </select>
+        </div>
+        <div>
+          <label id="point-size-label" for="point-size">Size (CSS px)</label>
+          <div class="range-output">
+            <input
+              id="point-size"
+              type="range"
+              min="0.25"
+              max="8"
+              step="0.25"
+              value="2"
+            />
+            <output id="point-size-value" for="point-size">2.00 px</output>
+          </div>
         </div>
       </div>
 

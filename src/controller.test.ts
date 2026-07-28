@@ -343,6 +343,89 @@ describe("createLodController", () => {
     controller.dispose();
   });
 
+  it("never replaces selected tiles when only the point budget grows", async () => {
+    const tree: Record<string, FakeEntry> = {
+      "0-0-0-0": {
+        pointCount: 10,
+        spacing: 10,
+        bounds: { min: [-1, -1, -0.5], max: [1, 1, 0.5] },
+        children: ["1-0-0-0", "1-1-0-0"],
+      },
+      "1-0-0-0": {
+        pointCount: 80,
+        spacing: 1,
+        bounds: { min: [-0.5, -0.2, -0.5], max: [-0.1, 0.2, 0.5] },
+      },
+      "1-1-0-0": {
+        pointCount: 30,
+        spacing: 1,
+        bounds: { min: [0.1, -0.2, -0.5], max: [0.5, 0.2, 0.5] },
+      },
+    };
+    const { controller, loadCalls } = makeController(tree, {
+      pointBudget: 50,
+    });
+    await settle();
+    controller.setCamera({ ...VIEW, position: [0.5, 0, 2] });
+    await settle();
+    expect(loadCalls).toEqual(["0-0-0-0", "1-1-0-0"]);
+    const initialRevision = controller.stats().selection.targetRevision;
+
+    // The farther 80-point child now fits by itself, but replacing the
+    // selected 30-point child would make a larger budget look less refined.
+    controller.setPointBudget(90);
+    await settle();
+    expect(loadCalls).toEqual(["0-0-0-0", "1-1-0-0"]);
+    expect(controller.stats().selection.targetRevision).toBe(initialRevision);
+
+    // Once the extra budget truly covers both, the near child is additive.
+    controller.setPointBudget(120);
+    await settle();
+    expect(loadCalls).toEqual(["0-0-0-0", "1-1-0-0", "1-0-0-0"]);
+    controller.dispose();
+  });
+
+  it("keeps a near-tied selected tile until a challenger is materially more important", async () => {
+    const tree: Record<string, FakeEntry> = {
+      "0-0-0-0": {
+        pointCount: 100,
+        spacing: 1,
+        bounds: { min: [-1, -1, -0.5], max: [1, 1, 0.5] },
+        children: ["1-0-0-0", "1-1-0-0"],
+      },
+      "1-0-0-0": {
+        pointCount: 60,
+        spacing: 0.1,
+        bounds: { min: [-0.5, -0.2, -0.5], max: [-0.1, 0.2, 0.5] },
+      },
+      "1-1-0-0": {
+        pointCount: 60,
+        spacing: 0.1,
+        bounds: { min: [0.1, -0.2, -0.5], max: [0.5, 0.2, 0.5] },
+      },
+    };
+    const { controller, loadCalls } = makeController(tree, {
+      pointBudget: 160,
+    });
+    await settle();
+
+    controller.setCamera({ ...VIEW, position: [-0.5, 0, 2] });
+    await settle();
+    expect(loadCalls).toEqual(["0-0-0-0", "1-0-0-0"]);
+
+    // The right child becomes about 8% more important. That is too small a
+    // difference to replace a large actor at the budget boundary.
+    controller.setCamera({ ...VIEW, position: [0.5, 0, 2] });
+    await settle();
+    expect(loadCalls).toEqual(["0-0-0-0", "1-0-0-0"]);
+
+    // Once the difference clears the hysteresis band, the selection follows.
+    controller.setCamera({ ...VIEW, position: [1, 0, 2] });
+    await settle();
+    expect(loadCalls).toEqual(["0-0-0-0", "1-0-0-0", "1-1-0-0"]);
+    controller.dispose();
+  });
+
   it("cancels in-flight fetches when the camera looks away", async () => {
     const { controller, deferred, batches } = makeController(SMALL_TREE);
     await settle();
@@ -980,6 +1063,54 @@ describe("createLodController — ready frontier and presentation", () => {
       },
     });
     expect(stats.presentation.diameterCssPx).toBe(4);
+    controller.dispose();
+  });
+
+  it("holds the selected Auto diameter while detail tiles arrive", async () => {
+    const tree: Record<string, FakeEntry> = {
+      "0-0-0-0": {
+        pointCount: 100,
+        spacing: 0.08,
+        children: ["1-0-0-0", "1-1-0-0", "1-0-1-0", "1-1-1-0"],
+      },
+      "1-0-0-0": { pointCount: 10, spacing: 0.02 },
+      "1-1-0-0": { pointCount: 10, spacing: 0.02 },
+      "1-0-1-0": { pointCount: 10, spacing: 0.02 },
+      "1-1-1-0": { pointCount: 10, spacing: 0.02 },
+    };
+    const { controller, deferred, diameters } = makePresented(tree, {
+      pointBudget: 1_000,
+      presentation: {
+        mode: "auto",
+        userScale: 1,
+        minDiameterCssPx: 0.5,
+        maxDiameterCssPx: 10,
+      },
+    });
+    await settle();
+    controller.setCamera(ORTHOGRAPHIC_VIEW);
+    await settle();
+
+    // The complete selection's level-1 spacing is known before its payloads
+    // arrive. Auto adopts it once, instead of drawing early detail at the
+    // root's 4 px spacing and shrinking every actor when the last child lands.
+    expect(controller.stats().presentation.diameterCssPx).toBeCloseTo(1);
+    expect(diameters).toEqual([2, 1]);
+
+    deferred.get("0-0-0-0")!.resolve();
+    await settle();
+    expect(controller.stats().presentation.diameterCssPx).toBeCloseTo(1);
+
+    for (const keyString of tree["0-0-0-0"]!.children!) {
+      deferred.get(keyString)!.resolve();
+      await settle();
+      expect(controller.stats().presentation.diameterCssPx).toBeCloseTo(1);
+    }
+    expect(diameters).toEqual([2, 1]);
+    expect(
+      controller.stats().selection.readyTerminalFrontier.projectedSpacingCssPx
+        .max,
+    ).toBeCloseTo(1);
     controller.dispose();
   });
 

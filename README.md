@@ -127,10 +127,10 @@ automatically or stay at a fixed size.
 ```text
 camera or budget changes
   → select a parent-closed set of visible octree nodes
+  → update Auto point diameter for the selected terminal density
   → fetch missing hierarchy pages and tile payloads
   → make each decoded tile resident
   → recompute the ready terminal coverage frontier
-  → update Auto point diameter
   → submit one batched renderer delta
   → paint one coalesced frame
 ```
@@ -143,15 +143,28 @@ and the last one still gets a trailing selection.
 Selection is parent-closed: a child adds points without replacing its parent.
 While a selected child is still loading, missing from the hierarchy, or
 excluded by the point budget, the closest ready ancestor continues to cover
-that region.
+that region. At a same-level point-budget boundary, an already selected node
+keeps a 10% priority advantage. This hysteresis prevents nearly tied tiles from
+trading places under tiny camera changes while still allowing culling,
+refinement-cutoff transitions, and materially better candidates to take effect.
+Candidates are visited breadth-first and foreground-to-horizon. When the next
+candidate does not fit, that pass stops adding optional detail instead of
+spending the remainder on either a cheaper horizon tile or a deeper foreground
+child. The next budget increase therefore extends the current band before
+descending another level.
 
 The **ready terminal coverage frontier** is the set of ready nodes currently
 responsible for the ends of those visible branches. Some may be fine children
-while another is still a coarse parent. Auto presentation projects every
-terminal's world-space point spacing into CSS pixels and uses the largest
-spacing as the common point diameter, after applying `userScale` and the
-configured bounds. The diameter shrinks only when no remaining terminal needs
-the larger footprint.
+while another is still a coarse parent, so its statistics describe exactly
+what is on screen while payloads stream.
+
+Auto presentation follows the corresponding **selected** terminal density. It
+projects each selected terminal's world-space point spacing into CSS pixels and
+uses the largest spacing as the common point diameter, after applying the
+configured bounds and `userScale`. Hierarchy- and budget-blocked branches retain
+their closest sampled parent. Tile readiness does not change the diameter: the
+selection adopts its completed density once, then newly decoded tiles add
+detail without shrinking every point already on screen.
 
 Tile arrivals and diameter changes can both request a render. `scheduleRender`
 must therefore coalesce requests, normally with `requestAnimationFrame`, and
@@ -190,7 +203,7 @@ that every dataset contain that many useful visible points.
 
 #### Point-presentation flow: Auto or Fixed
 
-Auto presentation follows the density of the ready coverage:
+Auto presentation follows the density of the selected coverage:
 
 ```js
 controller.setPresentation({
@@ -201,8 +214,9 @@ controller.setPresentation({
 });
 ```
 
-- `userScale` changes overlap without changing selection: above 1 makes points
-  fuller; below 1 makes them more separated.
+- `userScale` changes overlap without changing selection: 1 matches the full
+  estimated point spacing, above 1 overlaps footprints, and below 1 leaves
+  separation between them.
 - `minDiameterCssPx` prevents very dense detail from becoming sub-pixel.
 - `maxDiameterCssPx` limits how large coarse points may become.
 
@@ -269,10 +283,16 @@ Range), frames it automatically, and streams it through the same three pieces
 an application wires: one controller, one renderer adapter, and one view
 governor for the view.
 
+The example defaults to Auto presentation at `0.5×`, using half the estimated
+point spacing as its diameter. Its sidebar can switch to a constant Fixed
+CSS-pixel diameter when comparing presentation policies.
+
 Its controls are all runtime, so one build loads any dataset:
 
 - **Point budget** — `Adaptive` gives the number to a `ViewGovernor`; `Fixed`
   gives it straight to `setPointBudget`.
+- **Point size** — `Fixed` directly controls the CSS-pixel diameter; `Auto`
+  controls the density-derived diameter's scale and defaults to `0.5×`.
 - **Moving / settled target** — the two regimes' frame-time targets. Changing
   either replaces the governor, since the library fixes its options at
   construction.
@@ -288,13 +308,17 @@ time, percentile estimate, sample count, adaptive track budget, configured
 maximum, memory ceiling, aggregate view budget, this cloud's share, the last
 adjustment and its reason, the binding constraint, and the physical tile and
 hierarchy work counts — next to the controller's selection, decoded-memory,
-GPU-residency and frame-time statistics. A badge shows the current regime.
+GPU-residency and frame-time statistics. The current moving, settling, or
+settled status is the first row of that budget chain.
 
 The page holds an explicit motion reference for the interactor's gestures and
 infers the rest by comparing the camera it hands to LOD on every painted frame,
-releasing that reference after 250 ms of stillness. It times every paint,
-reports it through `recordHostFrame`, and repaints while `needsFrame()` is
-true. `window.pointCloudExample` exposes `stats()`, `setProjection()`,
+releasing that reference after 250 ms of stillness. It reports the displayed
+frame interval and synchronous vtk render cost through `recordHostFrame`, so
+asynchronous rendering and missed presentation frames count toward the point
+budget without renderer-specific instrumentation. The page repaints while
+`needsFrame()` is true.
+`window.pointCloudExample` exposes `stats()`, `setProjection()`,
 `setBudgetMode()` and `dispose()` for browser tests.
 
 Install a vtk.js build containing `vtkPointGaussianMapper` as described in
@@ -434,12 +458,10 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
   no signal, so an abandoned read keeps its slot until its promise settles
   and a look-away/look-back storm cannot multiply real I/O.
   Fixed presentation keeps one CSS-pixel diameter; Auto presentation derives
-  the diameter from the largest projected spacing on the ready terminal
-  coverage frontier, scaled by `userScale` and clamped to the presentation's
-  min/max, and emits it as soon as the frontier is remeasured. Using the
-  largest terminal keeps a mixed coarse/fine frontier covered until every
-  visible region has refined. Two CSS pixels is the seed it starts from before
-  any frontier exists.
+  the diameter from the largest projected spacing on the selected terminal
+  coverage frontier, clamped to the presentation's min/max and scaled by
+  `userScale`, and emits it when selection changes. Two CSS pixels is the seed
+  it starts from before any selected frontier exists.
 - **Renderer adapter** (`createRendererAdapter`) — turns tile batches into
   vtk.js actors, one `vtkPolyData` + `vtkPointGaussianMapper` per tile
   (one gl.POINTS vertex per point, no cell topology), with an anchor base

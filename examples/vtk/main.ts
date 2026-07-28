@@ -32,6 +32,7 @@ import {
   type CameraView,
   type LodController,
   type MotionReference,
+  type PointPresentation,
   type TileSource,
   type ViewGovernor,
   type ViewGovernorMember,
@@ -56,6 +57,10 @@ const urlInput = element<HTMLInputElement>("#cloud-url");
 const loadUrlButton = element<HTMLButtonElement>("#load-url");
 const budgetModeSelect = element<HTMLSelectElement>("#budget-mode");
 const projectionSelect = element<HTMLSelectElement>("#projection");
+const pointSizeModeSelect = element<HTMLSelectElement>("#point-size-mode");
+const pointSizeInput = element<HTMLInputElement>("#point-size");
+const pointSizeLabel = element<HTMLLabelElement>("#point-size-label");
+const pointSizeValue = element<HTMLOutputElement>("#point-size-value");
 const fixedControls = element<HTMLElement>("#fixed-controls");
 const adaptiveControls = element<HTMLElement>("#adaptive-controls");
 const pointBudgetInput = element<HTMLInputElement>("#point-budget");
@@ -63,7 +68,6 @@ const movingTargetInput = element<HTMLInputElement>("#moving-target");
 const stationaryTargetInput = element<HTMLInputElement>("#stationary-target");
 const maxPointsInput = element<HTMLInputElement>("#max-points");
 const resetViewButton = element<HTMLButtonElement>("#reset-view");
-const regimeBadge = element<HTMLElement>("#regime");
 const message = element<HTMLOutputElement>("#message");
 const stats = element<HTMLElement>("#stats");
 const frameRateChart = element<SVGSVGElement>("#frame-rate-chart");
@@ -98,7 +102,7 @@ const ORBIT_RADIANS_PER_VIEWPORT = 2 * Math.PI;
 /** Keep a small stable margin on either side of the world-up singularity. */
 const MAX_ORBIT_PITCH = (89 * Math.PI) / 180;
 /** Closest a perspective eye may get, relative to the loaded scene. */
-const MIN_DOLLY_DISTANCE_RATIO = 1e-6;
+const MIN_DOLLY_DISTANCE_RATIO = 1e-5;
 /** Enough coordinate increments to keep eye and focus numerically distinct. */
 const MIN_DOLLY_DISTANCE_ULPS = 1024;
 
@@ -153,25 +157,36 @@ const dollyToPosition = (
 
   const dollyCamera = renderer.getActiveCamera();
   let appliedFactor = requestedFactor;
-  if (!dollyCamera.getParallelProjection() && requestedFactor > 1) {
+  let minimumDistance = 0;
+  let approachDirection: number[] | null = null;
+  if (!dollyCamera.getParallelProjection()) {
     const cameraPosition = dollyCamera.getPosition() as number[];
     const focalPoint = dollyCamera.getFocalPoint() as number[];
+    const offset = focalPoint.map(
+      (value, axis) => value - cameraPosition[axis]!,
+    );
+    const distance = Math.hypot(...offset);
+    if (Number.isFinite(distance) && distance > 0) {
+      approachDirection = offset.map((value) => value / distance);
+    }
     const sceneScale = framing?.radius ?? dollyCamera.getDistance();
     const coordinateScale = Math.max(
       sceneScale,
       ...cameraPosition.map(Math.abs),
       ...focalPoint.map(Math.abs),
     );
-    const minimumDistance = Math.max(
+    minimumDistance = Math.max(
       sceneScale * MIN_DOLLY_DISTANCE_RATIO,
       coordinateScale * Number.EPSILON * MIN_DOLLY_DISTANCE_ULPS,
       Number.MIN_VALUE,
     );
-    const maximumFactor = Math.max(
-      dollyCamera.getDistance() / minimumDistance,
-      1,
-    );
-    appliedFactor = Math.min(requestedFactor, maximumFactor);
+    if (requestedFactor > 1) {
+      const maximumFactor = Math.max(
+        dollyCamera.getDistance() / minimumDistance,
+        1,
+      );
+      appliedFactor = Math.min(requestedFactor, maximumFactor);
+    }
   }
 
   if (!Number.isFinite(appliedFactor) || appliedFactor === 1) return 1;
@@ -181,6 +196,32 @@ const dollyToPosition = (
     renderer,
     interactor,
   );
+  if (approachDirection !== null) {
+    const focalPoint = dollyCamera.getFocalPoint() as number[];
+    const cameraPosition = dollyCamera.getPosition() as number[];
+    const nextOffset = focalPoint.map(
+      (value, axis) => value - cameraPosition[axis]!,
+    );
+    const signedDistance = nextOffset.reduce(
+      (sum, value, axis) => sum + value * approachDirection![axis]!,
+      0,
+    );
+    // Clamp the result as well as the requested factor. Zoom-to-cursor moves
+    // the focal point before dollying, and large projected coordinates can
+    // round an exactly capped step onto or through it.
+    if (!Number.isFinite(signedDistance) || signedDistance < minimumDistance) {
+      dollyCamera.setPosition(
+        focalPoint[0]! - approachDirection[0]! * minimumDistance,
+        focalPoint[1]! - approachDirection[1]! * minimumDistance,
+        focalPoint[2]! - approachDirection[2]! * minimumDistance,
+      );
+      renderer.resetCameraClippingRange();
+    }
+    const panCenter = dollyCamera.getFocalPoint() as number[];
+    interactor
+      .getInteractorStyle()
+      .setCenterOfRotation(panCenter[0]!, panCenter[1]!, panCenter[2]!);
+  }
   return appliedFactor;
 };
 
@@ -357,6 +398,7 @@ const MOTION_RELATIVE_EPSILON = 1e-9;
 const DIAGNOSTICS_INTERVAL_MS = 100;
 
 type BudgetMode = "adaptive" | "fixed";
+type PointSizeMode = "fixed" | "auto";
 type Projection = "perspective" | "orthographic";
 
 let controller: LodController | null = null;
@@ -385,6 +427,8 @@ let syntheticFrameMs: number | null = null;
  */
 let currentDevicePixelRatio = window.devicePixelRatio;
 let loadGeneration = 0;
+let fixedPointDiameterCssPx = 2;
+let autoPointScale = 0.5;
 
 const setMessage = (text: string, error = false): void => {
   message.textContent = text;
@@ -393,6 +437,33 @@ const setMessage = (text: string, error = false): void => {
 
 const budgetMode = (): BudgetMode =>
   budgetModeSelect.value === "fixed" ? "fixed" : "adaptive";
+
+const pointSizeMode = (): PointSizeMode =>
+  pointSizeModeSelect.value === "auto" ? "auto" : "fixed";
+
+const pointPresentation = (): PointPresentation =>
+  pointSizeMode() === "auto"
+    ? { mode: "auto", userScale: autoPointScale }
+    : { mode: "fixed", diameterCssPx: fixedPointDiameterCssPx };
+
+const syncPointSizeControl = (): void => {
+  const auto = pointSizeMode() === "auto";
+  pointSizeLabel.textContent = auto ? "Auto scale" : "Size (CSS px)";
+  pointSizeInput.min = "0.25";
+  pointSizeInput.max = auto ? "2" : "8";
+  pointSizeInput.step = auto ? "0.05" : "0.25";
+  pointSizeInput.value = String(
+    auto ? autoPointScale : fixedPointDiameterCssPx,
+  );
+  pointSizeValue.value = auto
+    ? `${autoPointScale.toFixed(2)}×`
+    : `${fixedPointDiameterCssPx.toFixed(2)} px`;
+};
+
+const applyPointPresentation = (): void => {
+  controller?.setPresentation(pointPresentation());
+  scheduleRender();
+};
 
 const numberFrom = (input: HTMLInputElement): number | null => {
   const text = input.value.trim();
@@ -693,14 +764,14 @@ const plotFrameRate = (filteredFps: number): void => {
  * display showed 333 frames. Multiple renders before the next animation tick
  * are coalesced because the display can present only their final result.
  */
-const sampleFrameRate = (presentedAt: number): void => {
+const sampleFrameRate = (presentedAt: number): number | null => {
   frameRateLastActiveAt = presentedAt;
   frameRateIdle = false;
   const previous = lastFramePresentedAt;
   lastFramePresentedAt = presentedAt;
-  if (previous === null) return;
+  if (previous === null) return null;
   const intervalMs = presentedAt - previous;
-  if (!Number.isFinite(intervalMs) || intervalMs <= 0) return;
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) return null;
 
   filteredFrameIntervalMs =
     filteredFrameIntervalMs === null
@@ -718,9 +789,16 @@ const sampleFrameRate = (presentedAt: number): void => {
       `${formatFrameRate(filteredFps)} average, plotted over the latest ` +
       `${frameRateSamples.length} rendered frames`,
   );
+  return intervalMs;
 };
 
-const recordFrameRate = (): void => {
+/** Coalesce the synchronous costs of paints landing in one presentation. */
+let pendingVtkFrameMs: number | null = null;
+const recordFrameRate = (vtkFrameMs: number): void => {
+  pendingVtkFrameMs =
+    pendingVtkFrameMs === null
+      ? vtkFrameMs
+      : Math.max(pendingVtkFrameMs, vtkFrameMs);
   if (frameRateTickQueued) return;
   frameRateTickQueued = true;
   const generation = frameRateGeneration;
@@ -729,13 +807,24 @@ const recordFrameRate = (): void => {
     // to the previous one must not put its last frame into the new history.
     if (generation !== frameRateGeneration) return;
     frameRateTickQueued = false;
-    sampleFrameRate(presentedAt);
+    const hostFrameMs = sampleFrameRate(presentedAt);
+    const measuredVtkFrameMs = pendingVtkFrameMs;
+    pendingVtkFrameMs = null;
+    if (hostFrameMs === null || measuredVtkFrameMs === null) return;
+    governor?.recordHostFrame({
+      // The presentation interval captures asynchronous rendering and missed
+      // display frames. Browser tests can substitute a deterministic sample.
+      hostFrameMs: syntheticFrameMs ?? hostFrameMs,
+      vtkFrameMs: measuredVtkFrameMs,
+    });
+    if (governor?.needsFrame()) scheduleRender();
   });
 };
 
 const resetFrameRate = (): void => {
   frameRateGeneration += 1;
   frameRateTickQueued = false;
+  pendingVtkFrameMs = null;
   frameRateSamples.length = 0;
   lastFramePresentedAt = null;
   filteredFrameIntervalMs = null;
@@ -803,7 +892,14 @@ const governorLines = (view: ViewGovernorStats): StatSection => {
   return {
     title: "Budget chain",
     rows: [
-      row("regime", `${view.regime}${view.motion.settling ? " settling" : ""}`),
+      row(
+        "status",
+        view.motion.settling
+          ? "settling"
+          : view.regime === "interaction"
+            ? "moving"
+            : "settled",
+      ),
       row("motion", view.motion.source ?? "none"),
       row(
         "references",
@@ -889,24 +985,6 @@ const cloudLines = (): StatSection | null => {
   };
 };
 
-const updateRegimeBadge = (view: ViewGovernorStats | null): void => {
-  if (!controller) {
-    regimeBadge.dataset.regime = "idle";
-    regimeBadge.textContent = "no cloud";
-    return;
-  }
-  if (!view) {
-    regimeBadge.dataset.regime = "fixed";
-    regimeBadge.textContent = "fixed budget";
-    return;
-  }
-  regimeBadge.dataset.regime = view.regime;
-  regimeBadge.textContent =
-    view.regime === "interaction"
-      ? `moving · ${view.motion.source ?? "settling"}`
-      : "settled";
-};
-
 /**
  * Values are written into elements that already exist, and the table is only
  * rebuilt when its rows actually differ — otherwise ten rebuilds a second
@@ -953,7 +1031,6 @@ const renderStats = (sections: StatSection[]): void => {
 
 const updateDiagnostics = (): void => {
   const view = governor?.stats() ?? null;
-  updateRegimeBadge(view);
   updateFrameRateIdle(performance.now());
   updateFrameRateTarget(view?.targetFrameTimeMs ?? null);
   renderStats(
@@ -1021,8 +1098,10 @@ const updateMember = (): void => {
 };
 
 // Every paint the interactor drives ends here — ours and the ones its own
-// animation loop runs during a gesture — so one place measures the frame,
-// feeds the rendered camera to LOD, and asks whether another frame is owed.
+// animation loop runs during a gesture — so one place measures synchronous vtk
+// work and feeds the rendered camera to LOD. The following presentation tick
+// reports full displayed cadence to the governor because WebGL submission time
+// alone cannot say whether the frame made presentation.
 interactor.onRenderEvent(() => {
   const startedAt = frameStartedAt;
   const completedAt = performance.now();
@@ -1035,14 +1114,7 @@ interactor.onRenderEvent(() => {
   updateMember();
   classifyCameraMotion(view);
   if (startedAt !== null) {
-    // Host frame and VTK frame are the same measurement here because this page
-    // paints nothing else. A host with a basemap under the canvas reports the
-    // whole frame as hostFrameMs and the VTK paint alone as vtkFrameMs.
-    governor?.recordHostFrame({
-      hostFrameMs: lastFrameMs,
-      vtkFrameMs: lastFrameMs,
-    });
-    if (controller) recordFrameRate();
+    if (controller) recordFrameRate(lastFrameMs);
   }
   if (governor?.needsFrame()) scheduleRender();
 });
@@ -1061,6 +1133,12 @@ interactor.onEndAnimation(() => {
   explicitMotion?.release();
   explicitMotion = null;
   controller?.endInteraction();
+  const focalPoint = camera.getFocalPoint();
+  interactorStyle.setCenterOfRotation(
+    focalPoint[0],
+    focalPoint[1],
+    focalPoint[2],
+  );
   // The interactor paints once more immediately after this event; that paint
   // is a real frame and gets timed like any other.
   frameStartedAt = performance.now();
@@ -1209,12 +1287,7 @@ const loadSource = async (
       fetchConcurrency: 6,
       cacheBytes: 256 * 1024 ** 2,
       refinementCutoffPx: 0.75,
-      presentation: {
-        mode: "auto",
-        userScale: 1,
-        minDiameterCssPx: 1.25,
-        maxDiameterCssPx: 4,
-      },
+      presentation: pointPresentation(),
       onTiles: (batch) => {
         adapter?.applyBatch(batch);
         clippingDirty = true;
@@ -1337,6 +1410,20 @@ budgetModeSelect.addEventListener("change", () => {
 
 pointBudgetInput.addEventListener("change", applyBudgetMode);
 
+pointSizeModeSelect.addEventListener("change", () => {
+  syncPointSizeControl();
+  applyPointPresentation();
+});
+
+pointSizeInput.addEventListener("input", () => {
+  const value = numberFrom(pointSizeInput);
+  if (value === null || value <= 0) return;
+  if (pointSizeMode() === "auto") autoPointScale = value;
+  else fixedPointDiameterCssPx = value;
+  syncPointSizeControl();
+  applyPointPresentation();
+});
+
 for (const input of [
   movingTargetInput,
   stationaryTargetInput,
@@ -1357,6 +1444,7 @@ window.addEventListener("resize", () => {
 });
 
 syncBudgetControls();
+syncPointSizeControl();
 syncGovernor();
 // The panel runs on its own clock: driving it from the render loop would leave
 // it a frame stale exactly when the view stops painting, and would charge its
@@ -1529,6 +1617,12 @@ Object.assign(window, {
         if (next.parallelScale !== undefined) {
           camera.setParallelScale(next.parallelScale);
         }
+        const focalPoint = camera.getFocalPoint();
+        interactorStyle.setCenterOfRotation(
+          focalPoint[0],
+          focalPoint[1],
+          focalPoint[2],
+        );
         renderer.resetCameraClippingRange();
         scheduleRender();
       },
