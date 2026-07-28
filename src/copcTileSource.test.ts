@@ -164,8 +164,9 @@ const loadRgb = async (source: TileSource, key: string) =>
  * `app/telesculptor_web/app/pointcloud_tiles/service.py`: `_asset_rgb_shift`
  * samples the root node once — 8 when any channel there exceeds 255 — and
  * `_rgb_to_uint8` applies `(rgb16 >> shift).astype(np.uint8)` to every tile of
- * the asset. That narrowing keeps the low byte, exactly like a Uint8Array
- * store, so agreement can be asserted byte for byte.
+ * the asset. Every asset asserted against this is one the sample decides
+ * correctly, so each shifted channel already fits a byte and the clipping this
+ * source adds cannot move it — agreement holds byte for byte.
  */
 const serviceRgb = (rootChannels: number[], channels: number[]): Uint8Array => {
   const shift = Math.max(...rootChannels) > 255 ? 8 : 0;
@@ -436,6 +437,11 @@ describe("createCopcTileSource RGB depth", () => {
   // and a bright node: sampling either child alone disagrees with the other.
   const DARK = [12, 24, 200, 255, 100, 3];
   const BRIGHT = [40000, 41000, 42000, 300, 400, 500];
+  // Channels on both sides of 255, for the cases where the asset-wide sample
+  // decides no shift: the small ones must survive untouched, the large ones
+  // must clip rather than wrap round to near-black.
+  const MIXED = [40000, 200, 42000, 30, 400, 50];
+  const MIXED_CLIPPED = new Uint8Array([255, 200, 255, 30, 255, 50]);
   const NEIGHBOURS: StubAsset = {
     pointDataRecordFormat: 2,
     nodes: {
@@ -510,14 +516,28 @@ describe("createCopcTileSource RGB depth", () => {
       pointDataRecordFormat: 2,
       nodes: {
         "0-0-0-0": { pointCount: 2, channels: BRIGHT, unreadable: true },
-        "1-0-0-0": { pointCount: 2, channels: BRIGHT },
+        "1-0-0-0": { pointCount: 2, channels: MIXED },
       },
     });
-    expect(await loadRgb(source, "1-0-0-0")).toEqual(
-      Uint8Array.from(BRIGHT, (c) => c & 0xff),
-    );
+    expect(await loadRgb(source, "1-0-0-0")).toEqual(MIXED_CLIPPED);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+
+  it("clips a 16-bit channel the root sample missed instead of wrapping", async () => {
+    // A root dark enough to read as 8-bit sitting over a node that is not: the
+    // asset-wide decision misses, which is exactly when the store would wrap.
+    const source = await openStub({
+      pointDataRecordFormat: 2,
+      nodes: {
+        "0-0-0-0": { pointCount: 1, channels: [12, 24, 200] },
+        "1-0-0-0": { pointCount: 2, channels: MIXED },
+      },
+    });
+    // Wrapping would send 40000 to 64 and the brighter 42000 to 16: the top of
+    // the cloud comes back darker than its own mid-tones, and out of order with
+    // itself, which reads as a broken decoder rather than a washed-out sample.
+    expect(await loadRgb(source, "1-0-0-0")).toEqual(MIXED_CLIPPED);
   });
 
   it("produces the RGB bytes the HTTP tile service would serve", async () => {

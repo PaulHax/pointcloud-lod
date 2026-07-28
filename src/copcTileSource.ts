@@ -181,11 +181,14 @@ const abortableGetter = (
  * does use the full 16-bit range, so all of its tiles shift by 8. Sampling per
  * node instead would leave a dark node unshifted beside a shifted bright
  * neighbour and band the render, which is the whole reason this is decided
- * once. A root that cannot be read, or that holds no points, falls back to no
- * shift: shifting a genuinely 8-bit cloud would crush every channel to zero,
- * while leaving a 16-bit cloud unshifted only mangles colors that are still
- * visible. The `reg-ui` HTTP tile service samples by the same rule, so both
- * transports hand the renderer identical bytes.
+ * once. A root that cannot be read, that holds no points, or that is simply
+ * darker than the rest of the cloud falls back to no shift: shifting a
+ * genuinely 8-bit cloud would crush every channel to zero, while leaving a
+ * 16-bit cloud unshifted clips its channels to white (see `clipToByte`) — a
+ * washed-out cloud, still recognisably the survey. The `reg-ui` HTTP tile
+ * service samples by the same rule, so both transports hand the renderer
+ * identical bytes wherever that sample is right, which is every cloud whose
+ * root carries its brightest decade.
  *
  * The root node comes from the page the source already read at open, and the
  * points it decodes to are kept for the first read of the root tile, so the
@@ -200,6 +203,18 @@ const rgbShiftOf = (view: PointDataView): number => {
   }
   return 0;
 };
+
+/**
+ * A shifted channel narrowed to what a Uint8Array can hold.
+ *
+ * The asset-wide shift is a sample, and a sample can miss — a dark root over a
+ * 16-bit cloud decides no shift, and then a deeper node's real channels arrive
+ * far above 255. Storing those straight into the byte array would wrap them mod
+ * 256, so a smooth 16-bit gradient lands as pseudo-random noise that reads as a
+ * decoder bug rather than a too-bright cloud. Clipping keeps the miss legible
+ * and the gradient monotonic.
+ */
+const clipToByte = (channel: number): number => (channel > 255 ? 255 : channel);
 
 /** COPC sources resolve their metadata asynchronously (header + info VLR). */
 export const createCopcTileSource = async (
@@ -366,9 +381,9 @@ export const createCopcTileSource = async (
         positions[o + 1] = getY(i) - oy;
         positions[o + 2] = getZ(i) - oz;
         if (rgb !== undefined) {
-          rgb[o] = getR!(i) >> shift;
-          rgb[o + 1] = getG!(i) >> shift;
-          rgb[o + 2] = getB!(i) >> shift;
+          rgb[o] = clipToByte(getR!(i) >> shift);
+          rgb[o + 1] = clipToByte(getG!(i) >> shift);
+          rgb[o + 2] = clipToByte(getB!(i) >> shift);
         }
       }
 
