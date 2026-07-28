@@ -112,6 +112,155 @@ For servers that reproject or transform points per tile, use
 `createHttpTileSource({ endpoint, metadata })` instead of the COPC source; it
 speaks a compact binary tile protocol (`PCT1`).
 
+### Application flows and primary controls
+
+There are two loops in a typical integration:
+
+- the required camera → selection → streaming → render loop;
+- an optional frame-time loop that automatically changes the point budget.
+
+Point presentation is a separate choice: it can follow the streamed density
+automatically or stay at a fixed size.
+
+#### Camera, selection, streaming, and render
+
+```text
+camera or budget changes
+  → select a parent-closed set of visible octree nodes
+  → fetch missing hierarchy pages and tile payloads
+  → make each decoded tile resident
+  → recompute the ready terminal coverage frontier
+  → update Auto point diameter
+  → submit one batched renderer delta
+  → paint one coalesced frame
+```
+
+`setCamera()` is the normal entry point. It should receive the actual camera
+used for rendering, including the CSS viewport height. The first change
+selects immediately; repeated changes are rate-limited by `selectionDelayMs`
+and the last one still gets a trailing selection.
+
+Selection is parent-closed: a child adds points without replacing its parent.
+While a selected child is still loading, missing from the hierarchy, or
+excluded by the point budget, the closest ready ancestor continues to cover
+that region.
+
+The **ready terminal coverage frontier** is the set of ready nodes currently
+responsible for the ends of those visible branches. Some may be fine children
+while another is still a coarse parent. Auto presentation projects every
+terminal's world-space point spacing into CSS pixels and uses the largest
+spacing as the common point diameter, after applying `userScale` and the
+configured bounds. The diameter shrinks only when no remaining terminal needs
+the larger footprint.
+
+Tile arrivals and diameter changes can both request a render. `scheduleRender`
+must therefore coalesce requests, normally with `requestAnimationFrame`, and
+must not paint synchronously from either callback. That lets a newly resident
+tile, the frontier-derived diameter, and the renderer batch land before the
+same frame.
+
+#### Point-budget flow: adaptive or direct
+
+With a `ViewGovernor`, the host closes a frame-time feedback loop:
+
+```text
+paint frame
+  → recordHostFrame({ hostFrameMs, vtkFrameMs })
+  → governor adjusts the aggregate view budget
+  → governor splits it across active controllers
+  → each controller receives setPointBudget(points)
+  → selection and streaming react
+  → needsFrame() says whether another measurement is useful
+```
+
+The governor is optional. It never reads the renderer or schedules a frame on
+its own. The host reports completed frames, camera-motion references, member
+importance, memory ceilings, and outstanding physical work. See
+[Adaptive quality](#adaptive-quality) for the complete wiring.
+
+For a fixed budget, omit the governor and set the controller directly:
+
+```js
+controller.setPointBudget(1_500_000);
+```
+
+The effective budget is still capped by the controller's memory-derived point
+ceiling. A higher budget permits more selected detail; it does not require
+that every dataset contain that many useful visible points.
+
+#### Point-presentation flow: Auto or Fixed
+
+Auto presentation follows the density of the ready coverage:
+
+```js
+controller.setPresentation({
+  mode: "auto",
+  userScale: 1,
+  minDiameterCssPx: 1.25,
+  maxDiameterCssPx: 4,
+});
+```
+
+- `userScale` changes overlap without changing selection: above 1 makes points
+  fuller; below 1 makes them more separated.
+- `minDiameterCssPx` prevents very dense detail from becoming sub-pixel.
+- `maxDiameterCssPx` limits how large coarse points may become.
+
+For a constant point footprint, use Fixed presentation. No frontier
+measurement changes it:
+
+```js
+controller.setPresentation({ mode: "fixed", diameterCssPx: 2 });
+```
+
+Keep CSS size separate from framebuffer density. Report display-density
+changes through `adapter.setDevicePixelRatio(window.devicePixelRatio)`.
+
+#### Direct controls and lifecycle
+
+These methods are useful when application policy lives outside the library:
+
+| Control                                              | Effect                                                                                                                                                                   |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `controller.setPointBudget(points)`                  | Set the visible-point target directly. Use this instead of a governor for a fixed or externally managed budget.                                                          |
+| `controller.setPresentation(...)`                    | Switch live between Auto and Fixed point presentation.                                                                                                                   |
+| `controller.setRefinementCutoffPx(pixels)`           | Stop descending when a node's projected spacing is below this threshold. Lower values allow finer traversal; the point and memory budgets still apply.                   |
+| `controller.refresh()`                               | Force immediate reselection against the current camera, useful after external state changes that do not produce a new camera value.                                      |
+| `controller.beginInteraction()` / `endInteraction()` | Mark explicit camera interaction and control the controller's settled reselection window. Calls may be nested.                                                           |
+| `governor.beginMotion(kind)`                         | Hold the adaptive budget in its moving-camera regime. Use `"explicit"` for announced gestures and `"inferred"` for playback or programmatic motion detected by the host. |
+| `adapter.setPointDiameterCssPx(pixels)`              | Set point size outside the controller. Omit `onPointDiameterCssPx` when the application owns this value so two policies do not compete.                                  |
+| `adapter.setDevicePixelRatio(ratio)`                 | Update CSS-to-framebuffer scaling without changing selection or the CSS point diameter.                                                                                  |
+| `adapter.setResourceCeilingBytes(bytes)`             | Bound GPU resources retained in the adapter's actor-reuse pool. A host can feed it the controller's current `memoryBudgetBytes`.                                         |
+| `adapter.setVisible(false)`                          | Hide drawing only. Actors, GPU resources, selection, and streaming remain live for an immediate show.                                                                    |
+| `controller.setActive(false)`                        | Stop selection and tile fetches, emit removals that move actors into the bounded adapter pool, and retain decoded payloads in the bounded CPU cache.                     |
+| `controller.setSource(source)`                       | Replace the dataset or revision, dropping old hierarchy, residency, cache, and pending results before bootstrapping the new source.                                      |
+| `adapter.setBaseMatrix(matrix)`                      | Apply or update the registration transform without rebuilding tile payloads.                                                                                             |
+
+The main dials and their tradeoffs are:
+
+| Dial                              | Primary effect                                                                              | Tune when                                                      |
+| --------------------------------- | ------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `pointBudget` or governor targets | Visible detail and render cost                                                              | First performance/quality control                              |
+| `presentation`                    | Point coverage and apparent density, not selected detail                                    | Points look porous or overly solid                             |
+| `refinementCutoffPx`              | How far hierarchy traversal is allowed to descend                                           | Storage has detail finer than the view needs                   |
+| `memory`                          | GPU-resident byte ceiling, converted to a point ceiling                                     | Multiple clouds compete for GPU memory                         |
+| `cacheBytes`                      | Decoded CPU payloads retained for fast reselection                                          | Revisiting views causes too much decoding or uses too much RAM |
+| `fetchConcurrency`                | Parallel tile fetch/decode work                                                             | The source is under-filled or decoding saturates the client    |
+| `hierarchyConcurrency`            | Parallel hierarchy-page work                                                                | Deep traversal stalls waiting for hierarchy                    |
+| `selectionDelayMs`                | Reselection rate during camera changes                                                      | Camera motion causes excess selection churn                    |
+| `interactionSettleMs`             | Controller delay for a settled reselection; governor delay for the stationary budget regime | Quality rises too early or too late after motion               |
+
+Visibility, activity, and disposal answer different questions:
+
+```text
+setVisible(false)  → draw nothing; keep actors and streaming
+setActive(false)   → stop tile fetches; pool submitted actors and cache payloads
+dispose both       → release controller state and every adapter-owned actor
+```
+
+Always dispose both the controller and adapter when the cloud is permanently
+removed.
+
 ### vtk.js example
 
 The runnable example in [`examples/vtk`](./examples/vtk/) loads either a local
@@ -285,10 +434,12 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
   no signal, so an abandoned read keeps its slot until its promise settles
   and a look-away/look-back storm cannot multiply real I/O.
   Fixed presentation keeps one CSS-pixel diameter; Auto presentation derives
-  the diameter from the p75 projected spacing of the ready terminal coverage
-  frontier, scaled by `userScale` and clamped to the presentation's min/max,
-  and emits it as soon as the frontier is remeasured. Two CSS pixels is the
-  seed it starts from before any frontier exists.
+  the diameter from the largest projected spacing on the ready terminal
+  coverage frontier, scaled by `userScale` and clamped to the presentation's
+  min/max, and emits it as soon as the frontier is remeasured. Using the
+  largest terminal keeps a mixed coarse/fine frontier covered until every
+  visible region has refined. Two CSS pixels is the seed it starts from before
+  any frontier exists.
 - **Renderer adapter** (`createRendererAdapter`) — turns tile batches into
   vtk.js actors, one `vtkPolyData` + `vtkPointGaussianMapper` per tile
   (one gl.POINTS vertex per point, no cell topology), with an anchor base

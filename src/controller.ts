@@ -1028,13 +1028,13 @@ export const createLodController = (
     selectionStats = { ...selectionStats, readyTerminalFrontier: frontier };
 
     if (presentation.mode === "auto") {
-      const p75 = frontier.projectedSpacingCssPx.p75;
-      if (p75 !== null) {
+      const largestSpacing = frontier.projectedSpacingCssPx.max;
+      if (largestSpacing !== null) {
         emitDiameter(
           presentation.userScale *
             Math.min(
               presentation.maxDiameterCssPx,
-              Math.max(presentation.minDiameterCssPx, p75),
+              Math.max(presentation.minDiameterCssPx, largestSpacing),
             ),
         );
       }

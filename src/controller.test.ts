@@ -294,7 +294,7 @@ const SMALL_TREE: Record<string, FakeEntry> = {
 };
 
 /**
- * One leaf, sized so the density-aware p75 lands at 5 css px: 0.9 world
+ * One leaf, sized so the density-aware spacing lands at 5 css px: 0.9 world
  * spacing over +/-1 bounds is what makes the Auto diameter come out at 4.
  */
 const AUTO_LEAF: Record<string, FakeEntry> = {
@@ -943,7 +943,47 @@ describe("createLodController — ready frontier and presentation", () => {
     controller.dispose();
   });
 
-  it("uses the density-aware p75 with clamps throughout interaction", async () => {
+  it("keeps a mixed frontier covered by its coarsest terminal spacing", async () => {
+    const tree: Record<string, FakeEntry> = {
+      "0-0-0-0": {
+        pointCount: 100,
+        spacing: 0.08,
+        children: ["1-0-0-0", "1-1-0-0", "1-0-1-0", "1-1-1-0"],
+      },
+      "1-0-0-0": { pointCount: 10, spacing: 0.02 },
+      "1-1-0-0": { pointCount: 10, spacing: 0.02 },
+      "1-0-1-0": { pointCount: 10, spacing: 0.02 },
+      "1-1-1-0": { pointCount: 10, spacing: 0.02 },
+    };
+    const { controller, deferred } = makePresented(tree, {
+      pointBudget: 130,
+      presentation: {
+        mode: "auto",
+        userScale: 1,
+        minDiameterCssPx: 0.5,
+        maxDiameterCssPx: 10,
+      },
+    });
+    await settle();
+    controller.setCamera(ORTHOGRAPHIC_VIEW);
+    await settle();
+    for (const pending of deferred.values()) pending.resolve();
+    await settle();
+
+    const stats = controller.stats();
+    expect(stats.selection.readyTerminalFrontier).toMatchObject({
+      count: 4,
+      budgetBlockedNodes: 1,
+      projectedSpacingCssPx: {
+        p75: 1,
+        max: 4,
+      },
+    });
+    expect(stats.presentation.diameterCssPx).toBe(4);
+    controller.dispose();
+  });
+
+  it("uses the largest terminal spacing with clamps throughout interaction", async () => {
     const { controller, deferred, diameters } = makePresented(AUTO_LEAF, {
       presentation: { mode: "auto", userScale: 1 },
     });
