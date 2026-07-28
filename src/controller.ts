@@ -621,11 +621,26 @@ export const createLodController = (
   // counted per key and the key rests once it runs out of attempts. The rest
   // is a backoff, not an eviction: a transient outage must not blank a tile
   // for the life of the controller, so the allowance is restored once the key
-  // has been quiet for RETRY_BACKOFF_MS and the key becomes fetchable again.
+  // has been quiet for RETRY_BACKOFF_MS.
+  //
+  // Restoring the allowance only makes a key fetchable — something still has
+  // to ask. A selection pass cannot be that something: on a converged scene
+  // the camera is still, the budget has settled and nothing lands, so no pass
+  // ever runs and one HTTP 500 would hold a parent-density hole (or an
+  // unrefinable subtree) open until the user touched the camera. Each
+  // non-abort failure therefore arms a timer for that key — RETRY_SOON_MS
+  // while attempts remain, the remainder of the backoff once the key is
+  // resting — which re-queues it and pumps, so the ordinary arrival path
+  // repaints. A key nothing wants any more when its timer fires is dropped
+  // silently, and dropEverything/dispose cancel every armed timer, so no
+  // retry can carry work across an epoch.
   // A new source (dropEverything) is a fresh start. Aborts never count —
   // deselection, setSource, and dispose cancel normally and stay retryable.
   const MAX_ATTEMPTS = 3;
   const RETRY_BACKOFF_MS = 30_000;
+  // Long enough that three attempts at a struggling endpoint are not one
+  // burst, short enough that a blip repaints without waiting on the user.
+  const RETRY_SOON_MS = 1_000;
   type FailureRecord = {
     count: number;
     lastMs: number;
@@ -652,6 +667,93 @@ export const createLodController = (
     if (Date.now() - record.lastMs < RETRY_BACKOFF_MS) return true;
     failures.delete(keyString);
     return false;
+  };
+
+  /** When the key may be asked for again: soon, or when its rest is over. */
+  const retryDelayMs = (
+    failures: Map<string, FailureRecord>,
+    keyString: string,
+  ): number => {
+    const record = failures.get(keyString);
+    if (record === undefined || record.count < MAX_ATTEMPTS) {
+      return RETRY_SOON_MS;
+    }
+    return Math.max(0, record.lastMs + RETRY_BACKOFF_MS - Date.now());
+  };
+
+  const tileRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const pageRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  const clearRetryTimers = (): void => {
+    for (const timer of tileRetryTimers.values()) clearTimeout(timer);
+    tileRetryTimers.clear();
+    for (const timer of pageRetryTimers.values()) clearTimeout(timer);
+    pageRetryTimers.clear();
+  };
+
+  /** At most one armed retry per key, always at the earliest legal moment. */
+  const armRetry = (
+    timers: Map<string, ReturnType<typeof setTimeout>>,
+    failures: Map<string, FailureRecord>,
+    keyString: string,
+    run: (keyString: string) => void,
+  ): void => {
+    const pending = timers.get(keyString);
+    if (pending !== undefined) clearTimeout(pending);
+    timers.set(
+      keyString,
+      setTimeout(
+        () => {
+          timers.delete(keyString);
+          if (!disposed) run(keyString);
+        },
+        retryDelayMs(failures, keyString),
+      ),
+    );
+  };
+
+  const scheduleTileRetry = (keyString: string): void =>
+    armRetry(tileRetryTimers, tileFailures, keyString, retryTile);
+
+  const retryTile = (keyString: string): void => {
+    // Anything that already answers for the key — deselection, an adopted
+    // read, a payload that landed anyway — makes this retry pointless.
+    if (
+      !target.has(keyString) ||
+      resident.has(keyString) ||
+      tileReads.has(keyString)
+    ) {
+      return;
+    }
+    // Reading the record is also what restores the allowance, and a key still
+    // inside its backoff must wait rather than spend an attempt early.
+    if (resting(tileFailures, keyString)) {
+      scheduleTileRetry(keyString);
+      return;
+    }
+    // At the head: this key is a hole in the current frame, not new detail.
+    queue.unshift(keyString);
+    pump();
+  };
+
+  const schedulePageRetry = (keyString: string): void =>
+    armRetry(pageRetryTimers, pageFailures, keyString, retryPage);
+
+  const retryPage = (keyString: string): void => {
+    // Nothing is fetched while hidden; reactivation reselects from scratch.
+    if (!active) return;
+    if (pagesLoaded.has(keyString) || pagesInFlight.has(keyString)) return;
+    if (resting(pageFailures, keyString)) {
+      schedulePageRetry(keyString);
+      return;
+    }
+    // Whether a page is still needed is selection's answer, not a set this
+    // side keeps, so rerun it: it re-derives the page queue from the current
+    // camera, which both re-requests this page and drops the ones the camera
+    // has moved past. Before the first camera selection cannot run at all,
+    // and the bootstrap page is then the only page there is to ask for.
+    if (view !== null) runSelection();
+    else if (keyString === keyToString(ROOT_KEY)) queueRootPage();
   };
 
   /** Tiles currently delivered to the consumer. */
@@ -898,6 +1000,7 @@ export const createLodController = (
           if (!isAbortError(error)) {
             recordFailure(pageFailures, keyString);
             onError(error);
+            schedulePageRetry(keyString);
           }
           pumpPages();
         },
@@ -1103,6 +1206,9 @@ export const createLodController = (
           if (!isAbortError(error)) {
             recordFailure(tileFailures, keyString);
             onError(error);
+            if (target.has(keyString) && !resident.has(keyString)) {
+              scheduleTileRetry(keyString);
+            }
           } else if (target.has(keyString) && !resident.has(keyString)) {
             // A source that honours the signal really stopped, and the key was
             // reselected while the read was cancelled: it needs a fresh one.
@@ -1293,6 +1399,9 @@ export const createLodController = (
     // decodes behind those results are still running, and pretending
     // otherwise is how a source swap under a moving camera doubles real I/O.
     epoch += 1;
+    // Armed retries belong to the epoch that scheduled them: one firing after
+    // the swap would re-queue a key of the old source against the new one.
+    clearRetryTimers();
     for (const read of tileReads.values()) {
       read.wanted = false;
       read.abort.abort();

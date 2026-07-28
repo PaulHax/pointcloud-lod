@@ -1240,6 +1240,200 @@ describe("createLodController — failing sources", () => {
     vi.useRealTimers();
   });
 
+  it("refetches a transiently failed tile with the camera never touched", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { controller, loadCalls, deferred } = makeController(SMALL_TREE, {
+      onError: () => {},
+    });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    expect(loadCalls).toHaveLength(3);
+
+    // One tile 500s while its siblings land. The scene is converged — still
+    // camera, settled budget, nothing else in flight — so no selection pass
+    // will ever run to ask again.
+    deferred.get("0-0-0-0")!.resolve();
+    deferred.get("1-1-0-0")!.resolve();
+    deferred.get("1-0-0-0")!.reject(new Error("500"));
+    await settle();
+    expect(controller.stats().residentTiles).toBe(2);
+    const generation = controller.stats().selection.generation;
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await settle();
+    expect(loadCalls).toEqual([
+      "0-0-0-0",
+      "1-0-0-0",
+      "1-1-0-0",
+      "1-0-0-0", // the retry the controller issued by itself
+    ]);
+    deferred.get("1-0-0-0")!.resolve();
+    await settle();
+    expect(controller.stats().residentTiles).toBe(3);
+    // No reselection was needed to get there.
+    expect(controller.stats().selection.generation).toBe(generation);
+
+    controller.dispose();
+    vi.useRealTimers();
+  });
+
+  it("waits out the backoff before refetching a tile that spent its attempts", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { controller, loadCalls, deferred } = makeController(SMALL_TREE, {
+      onError: () => {},
+    });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    expect(loadCalls).toHaveLength(3);
+
+    // The retry timers burn the whole allowance on their own: no refresh, no
+    // camera move, three attempts a second apart.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      for (const d of deferred.values()) d.reject(new Error("500"));
+      await settle();
+      await vi.advanceTimersByTimeAsync(1000);
+      await settle();
+    }
+    expect(loadCalls).toHaveLength(9); // 3 tiles x 3 attempts
+
+    // Now the keys rest: the prompt retry must not fire again until the whole
+    // backoff has elapsed since the last failure (at 2000 ms).
+    await vi.advanceTimersByTimeAsync(28_999);
+    await settle();
+    expect(loadCalls).toHaveLength(9);
+
+    await vi.advanceTimersByTimeAsync(2);
+    await settle();
+    expect(loadCalls).toHaveLength(12);
+    for (const d of deferred.values()) d.resolve();
+    await settle();
+    expect(controller.stats().residentTiles).toBe(3);
+
+    controller.dispose();
+    vi.useRealTimers();
+  });
+
+  it("dispose cancels armed retries", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { controller, loadCalls, deferred } = makeController(SMALL_TREE, {
+      onError: () => {},
+    });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    for (const d of deferred.values()) d.reject(new Error("500"));
+    await settle();
+    expect(loadCalls).toHaveLength(3);
+
+    controller.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await settle();
+    expect(loadCalls).toHaveLength(3);
+
+    vi.useRealTimers();
+  });
+
+  it("a new source cancels retries armed against the old one", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { controller, deferred } = makeController(SMALL_TREE, {
+      onError: () => {},
+    });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    for (const d of deferred.values()) d.reject(new Error("500"));
+    await settle();
+
+    const replacement = makeFakeSource(SMALL_TREE);
+    controller.setSource(replacement.source);
+    expect(vi.getTimerCount()).toBe(0);
+    await settle();
+    const afterSwap = replacement.loadCalls.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    await settle();
+    expect(replacement.loadCalls).toHaveLength(afterSwap);
+
+    controller.dispose();
+    vi.useRealTimers();
+  });
+
+  it("refetches a transiently failed hierarchy page with the camera never touched", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    let offline = true;
+    let pageCalls = 0;
+    const bounds = {
+      min: [-0.5, -0.5, -0.5] as [number, number, number],
+      max: [0.5, 0.5, 0.5] as [number, number, number],
+    };
+    const source: TileSource = {
+      metadata: () => METADATA,
+      async nodes(key: VoxelKey) {
+        pageCalls += 1;
+        if (keyToString(key) === "0-0-0-0") {
+          return [
+            {
+              key: { level: 0, x: 0, y: 0, z: 0 },
+              pointCount: 0, // structural: no tile of its own
+              bounds,
+              spacing: 0.1,
+              children: [{ level: 1, x: 0, y: 0, z: 0 }],
+            },
+            {
+              key: { level: 1, x: 0, y: 0, z: 0 },
+              pointCount: 60,
+              bounds,
+              spacing: 0.05,
+              pageRef: true,
+            },
+          ];
+        }
+        if (offline) throw new Error("500");
+        return [
+          {
+            key: { level: 1, x: 0, y: 0, z: 0 },
+            pointCount: 60,
+            bounds,
+            spacing: 0.05,
+          },
+        ];
+      },
+      loadTile: async () => makeTile(60),
+    };
+    const sink = collectBatches();
+    const controller = createLodController({
+      source,
+      onTiles: sink.onTiles,
+      scheduleRender: sink.scheduleRender,
+      selectionDelayMs: 0,
+      onError: () => {},
+    });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+
+    // The page that unblocks the only refinable subtree failed, so nothing is
+    // drawn and nothing is left to trigger another selection pass.
+    expect(pageCalls).toBe(2);
+    expect(controller.stats().residentTiles).toBe(0);
+
+    offline = false;
+    await vi.advanceTimersByTimeAsync(1000);
+    await settle();
+    expect(pageCalls).toBe(3);
+    expect(controller.stats().residentTiles).toBe(1);
+
+    controller.dispose();
+    vi.useRealTimers();
+  });
+
   it("keeps aborted fetches retryable", async () => {
     // Deselection, setSource, and dispose abort normally — they must never
     // count against the failure allowance, however often they happen.
