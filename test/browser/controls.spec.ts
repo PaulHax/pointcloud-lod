@@ -32,6 +32,11 @@ const cross = (left: number[], right: number[]): number[] => [
 const cameraDistance = (reading: CameraReading): number =>
   Math.hypot(...difference(reading.position, reading.focalPoint));
 
+const cameraPitchDegrees = (reading: CameraReading): number => {
+  const offset = difference(reading.position, reading.focalPoint);
+  return (Math.asin(offset[2]! / Math.hypot(...offset)) * 180) / Math.PI;
+};
+
 const relativeGap = (left: number, right: number): number =>
   Math.abs(left - right) /
   Math.max(Math.abs(left), Math.abs(right), Number.MIN_VALUE);
@@ -51,6 +56,55 @@ const wheelAtViewerCenter = async (
 };
 
 describe("example controls", () => {
+  it("stops orbit pitch before either world-up pole", async () => {
+    const session = await openExample({ cloud: FIXTURE_CLOUD.urlPath });
+    try {
+      await session.setBudgetMode("fixed");
+      const initial = await session.readCamera();
+      const initialDistance = cameraDistance(initial);
+      const box = await session.page.locator("#viewer").boundingBox();
+      if (box === null) throw new Error("the viewer has no box to orbit in");
+      const x = box.x + box.width / 2;
+      const y = box.y + box.height / 2;
+
+      await session.page.mouse.move(x, y);
+      await session.page.mouse.down({ button: "right" });
+      await session.page.mouse.move(x, y + 100);
+      await session.frame();
+      const upper = await session.readCamera();
+      expect(cameraPitchDegrees(upper)).toBeCloseTo(89, 8);
+
+      // More travel into the pole holds the same orientation, but backing the
+      // pointer away responds on its first move instead of sticking until it
+      // crosses the whole discarded overshoot.
+      await session.page.mouse.move(x, y + 180);
+      await session.frame();
+      const heldUpper = await session.readCamera();
+      expect(cameraPitchDegrees(heldUpper)).toBeCloseTo(89, 8);
+      await session.page.mouse.move(x, y + 170);
+      await session.frame();
+      const awayFromUpper = await session.readCamera();
+      expect(cameraPitchDegrees(awayFromUpper)).toBeLessThan(86);
+      await session.page.mouse.up({ button: "right" });
+
+      await session.page.locator("#reset-view").click();
+      await session.frame();
+      await session.page.mouse.move(x, y);
+      await session.page.mouse.down({ button: "right" });
+      await session.page.mouse.move(x, y - 350);
+      await session.frame();
+      await session.page.mouse.up({ button: "right" });
+      const lower = await session.readCamera();
+      expect(cameraPitchDegrees(lower)).toBeCloseTo(-89, 8);
+      expect(relativeGap(cameraDistance(lower), initialDistance)).toBeLessThan(
+        1e-12,
+      );
+      expect(session.failures).toEqual([]);
+    } finally {
+      await session.close();
+    }
+  });
+
   it("reports presented FPS and stops wheel zoom before the focal point", async () => {
     const session = await openExample({ cloud: FIXTURE_CLOUD.urlPath });
     try {

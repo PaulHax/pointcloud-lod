@@ -29,11 +29,6 @@ declare module "@kitware/vtk.js/Interaction/Manipulators/MouseCameraTrackballPan
   export default manipulator;
 }
 
-declare module "@kitware/vtk.js/Interaction/Manipulators/MouseCameraTrackballRotateManipulator" {
-  const manipulator: { newInstance(initialValues?: object): any };
-  export default manipulator;
-}
-
 declare module "@kitware/vtk.js/Interaction/Manipulators/CompositeMouseManipulator" {
   const manipulator: {
     extend(publicAPI: object, model: object, initialValues?: object): void;

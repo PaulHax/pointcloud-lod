@@ -19,7 +19,6 @@ import "@kitware/vtk.js/Rendering/Profiles/Geometry";
 import vtkFullScreenRenderWindow from "@kitware/vtk.js/Rendering/Misc/FullScreenRenderWindow";
 import vtkInteractorStyleManipulator from "@kitware/vtk.js/Interaction/Style/InteractorStyleManipulator";
 import vtkMouseCameraTrackballPanManipulator from "@kitware/vtk.js/Interaction/Manipulators/MouseCameraTrackballPanManipulator";
-import vtkMouseCameraTrackballRotateManipulator from "@kitware/vtk.js/Interaction/Manipulators/MouseCameraTrackballRotateManipulator";
 import vtkCompositeMouseManipulator from "@kitware/vtk.js/Interaction/Manipulators/CompositeMouseManipulator";
 import vtkCompositeCameraManipulator from "@kitware/vtk.js/Interaction/Manipulators/CompositeCameraManipulator";
 import macro from "@kitware/vtk.js/macros";
@@ -94,6 +93,10 @@ const WORLD_UP: [number, number, number] = [0, 0, 1];
 const DOLLY_PER_VIEWPORT = 1.6;
 /** Zoom ratio per wheel notch. */
 const DOLLY_PER_NOTCH = 1.12;
+/** Orbit travel across one whole viewport. Matches vtk.js's trackball. */
+const ORBIT_RADIANS_PER_VIEWPORT = 2 * Math.PI;
+/** Keep a small stable margin on either side of the world-up singularity. */
+const MAX_ORBIT_PITCH = (89 * Math.PI) / 180;
 /** Closest a perspective eye may get, relative to the loaded scene. */
 const MIN_DOLLY_DISTANCE_RATIO = 1e-6;
 /** Enough coordinate increments to keep eye and focus numerically distinct. */
@@ -182,6 +185,87 @@ const dollyToPosition = (
 };
 
 /**
+ * World-up orbit with pitch constrained before either pole.
+ *
+ * vtk.js's world-up trackball keeps the horizon level but lets elevation pass
+ * through ±90°. At the pole the screen-right axis is undefined; crossing it
+ * reverses the horizontal basis and makes the next orbit or pan feel flipped.
+ * Keeping pitch as an explicit spherical coordinate removes that singular
+ * transition while retaining vtk.js's one-turn-per-viewport sensitivity.
+ */
+const createOrbitManipulator = (initialValues: object): any => {
+  const publicAPI = {};
+  const model = { ...initialValues };
+  macro.obj(publicAPI, model);
+  vtkCompositeMouseManipulator.extend(publicAPI, model, initialValues);
+  vtkCompositeCameraManipulator.extend(publicAPI, model, initialValues);
+
+  let previous = { x: 0, y: 0 };
+  const api = publicAPI as {
+    onButtonDown: (i: any, r: any, p: { x: number; y: number }) => void;
+    onMouseMove: (i: any, r: any, p: { x: number; y: number } | null) => void;
+  };
+  api.onButtonDown = (_interactor, _renderer, position) => {
+    previous = position;
+  };
+  api.onMouseMove = (interactor, renderer, position) => {
+    if (!position) return;
+    const orbitCamera = renderer.getActiveCamera();
+    const cameraPosition = orbitCamera.getPosition() as number[];
+    const focalPoint = orbitCamera.getFocalPoint() as number[];
+    const offset = cameraPosition.map(
+      (value, axis) => value - focalPoint[axis]!,
+    );
+    const distance = Math.hypot(...offset);
+    const horizontalDistance = Math.hypot(offset[0]!, offset[1]!);
+    if (distance === 0 || horizontalDistance === 0) {
+      previous = position;
+      return;
+    }
+
+    const [width, height] = interactor
+      .getView()
+      .getViewportSize(renderer) as number[];
+    const yaw =
+      ((previous.x - position.x) / Math.max(width!, 1)) *
+      ORBIT_RADIANS_PER_VIEWPORT;
+    const pitchStep =
+      ((previous.y - position.y) / Math.max(height!, 1)) *
+      ORBIT_RADIANS_PER_VIEWPORT;
+    const pitch = Math.max(
+      -MAX_ORBIT_PITCH,
+      Math.min(
+        MAX_ORBIT_PITCH,
+        Math.asin(Math.max(-1, Math.min(1, offset[2]! / distance))) + pitchStep,
+      ),
+    );
+
+    // Yaw the horizontal eye direction around world up, then rebuild the eye
+    // offset at the constrained pitch without changing orbit distance.
+    const horizontalX = offset[0]! / horizontalDistance;
+    const horizontalY = offset[1]! / horizontalDistance;
+    const cosineYaw = Math.cos(yaw);
+    const sineYaw = Math.sin(yaw);
+    const yawedX = horizontalX * cosineYaw - horizontalY * sineYaw;
+    const yawedY = horizontalX * sineYaw + horizontalY * cosineYaw;
+    const horizontalRadius = Math.cos(pitch) * distance;
+    orbitCamera.setPosition(
+      focalPoint[0]! + yawedX * horizontalRadius,
+      focalPoint[1]! + yawedY * horizontalRadius,
+      focalPoint[2]! + Math.sin(pitch) * distance,
+    );
+    orbitCamera.setViewUp(...WORLD_UP);
+    orbitCamera.orthogonalizeViewUp();
+    renderer.resetCameraClippingRange();
+    if (interactor.getLightFollowCamera()) {
+      renderer.updateLightsGeometryToFollowCamera();
+    }
+    previous = position;
+  };
+  return publicAPI;
+};
+
+/**
  * Drag-to-zoom, toward the point the gesture started on.
  *
  * The step is a fraction of the distance to what is being looked at, so it
@@ -252,14 +336,7 @@ const interactorStyle = vtkInteractorStyleManipulator.newInstance();
 interactorStyle.addMouseManipulator(
   vtkMouseCameraTrackballPanManipulator.newInstance({ button: 1 }),
 );
-interactorStyle.addMouseManipulator(
-  vtkMouseCameraTrackballRotateManipulator.newInstance({
-    button: 3,
-    useWorldUpVec: true,
-    worldUpVec: WORLD_UP,
-    useFocalPointAsCenterOfRotation: true,
-  }),
-);
+interactorStyle.addMouseManipulator(createOrbitManipulator({ button: 3 }));
 // Middle drag and the wheel both zoom toward the cursor: the camera moves
 // along the ray through whatever is under the pointer, so that point stays
 // roughly put and the view closes in on it rather than on the screen centre.
