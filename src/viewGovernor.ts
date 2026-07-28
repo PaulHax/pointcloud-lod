@@ -368,7 +368,10 @@ export const createViewGovernor = (
       // Stationary refinement starts from exactly the density the moving
       // regime just sustained, so releasing the camera changes nothing on
       // screen, and measures it fresh: samples taken while moving describe a
-      // different regime and must not decide the next stationary step.
+      // different regime and must not decide the next stationary step. The
+      // converse holds as well, and `recordHostFrame` enforces it: the frames
+      // painted inside this window are not moving frames either, so they must
+      // not decide the next interaction step.
       budget.restartAt(false, budget.budget(true), stampNow());
       distribute();
     }, interactionSettleMs);
@@ -494,17 +497,31 @@ export const createViewGovernor = (
         (finiteNonNegative(metrics.inputDelayMs) &&
           metrics.inputDelayMs > 50) ||
         (finiteNonNegative(metrics.longTaskMs) && metrics.longTaskMs > 50);
+      const inMotion = moving();
       const inInteractionRegime = interacting();
       const target = budget.target(inInteractionRegime);
       const observedMs = Math.max(...candidates);
       // Emergency cuts protect live motion. Once motion has stopped, isolated
       // long tasks and missed frames use the sampled stationary controller so
       // they cannot drive a fast grow/halve density sawtooth.
-      const emergency = moving() && (severeInput || observedMs > target * 2);
+      const emergency = inMotion && (severeInput || observedMs > target * 2);
+      // A frame painted inside the settle window measures neither regime, so
+      // it decides neither track. It was drawn at the interaction budget, so
+      // it cannot size the stationary one; and it carries none of the cost of
+      // motion — no gesture handling, no camera-driven reselection — so
+      // folding it into the interaction track can only ever find headroom.
+      // With emergency cuts reserved for live motion, that leaves the moving
+      // budget with a growth path and no matching shrink path: every hover
+      // after a gesture ratchets it above the density real motion sustains,
+      // and the next gesture opens over target and has to halve back down.
+      // A settle window is under a second; discarding it costs one adjustment
+      // step, and the stationary track is seeded from the same budget the
+      // moment the window closes.
+      const settleWindowOnly = inInteractionRegime && !inMotion;
       // After an emergency, hold the cut long enough to measure the cheaper
       // rendering regime before allowing the normal controller to grow again:
       // inside that window a frame decides nothing, emergency or not.
-      if (now >= emergencyCooldownUntil) {
+      if (!settleWindowOnly && now >= emergencyCooldownUntil) {
         if (emergency) {
           budget.reduceNow(inInteractionRegime, now);
           emergencyCooldownUntil = now + emergencyCooldownMs;

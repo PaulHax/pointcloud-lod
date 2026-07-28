@@ -402,6 +402,73 @@ describe("createViewGovernor stationary refinement", () => {
   });
 });
 
+describe("createViewGovernor settle window", () => {
+  it("does not let cheap settle frames grow the moving budget", () => {
+    const governor = createViewGovernor(FAST_ADAPT);
+    governor.register({ setPointBudget: vi.fn() });
+
+    const gesture = governor.beginMotion("explicit");
+    // 16 ms is the moving target, squarely inside the dead-band: the gesture
+    // itself asks for no change, so anything that moves the budget below came
+    // from the settle window.
+    frames(governor, 16, 8);
+    const sustained = governor.stats().trackBudget;
+    expect(sustained).toBe(1_000_000);
+
+    gesture.release();
+    // The camera has stopped but the debounce still reports the interaction
+    // regime. These frames are cheap precisely because nothing is moving.
+    frames(governor, 1, 40);
+    expect(governor.stats().regime).toBe("interaction");
+    expect(governor.stats().motion).toMatchObject({
+      source: null,
+      settling: true,
+    });
+    expect(governor.stats().trackBudget).toBe(sustained);
+  });
+
+  it("keeps the moving budget stable across gesture and hover cycles", () => {
+    const governor = createViewGovernor(FAST_ADAPT);
+    governor.register({ setPointBudget: vi.fn() });
+
+    // What each gesture starts from. Cheap hover frames counted as moving
+    // frames would ratchet this up every cycle, and the user would feel it as
+    // a gesture that opens too heavy and then halves.
+    const opening: number[] = [];
+    for (let cycle = 0; cycle < 5; cycle += 1) {
+      const gesture = governor.beginMotion("explicit");
+      opening.push(governor.stats().trackBudget);
+      frames(governor, 16, 8); // sustained exactly on the moving target
+      gesture.release();
+      frames(governor, 1, 45); // hover, inside the settle window
+      vi.advanceTimersByTime(100);
+      frames(governor, 33, 8); // reading the scene, on the settled target
+    }
+
+    expect(opening[0]).toBe(1_000_000);
+    expect(new Set(opening).size).toBe(1);
+  });
+
+  it("resumes measuring the settled track once the window closes", () => {
+    const governor = createViewGovernor(FAST_ADAPT);
+    governor.register({ setPointBudget: vi.fn() });
+
+    governor.beginMotion("explicit").release();
+    frames(governor, 1, 40); // discarded: still inside the settle window
+    vi.advanceTimersByTime(100);
+    expect(governor.stats().regime).toBe("stationary");
+    expect(governor.stats().samples).toBe(0);
+
+    // Discarding the window's frames suspends measurement, it does not end it.
+    frames(governor, 1, 8);
+    expect(governor.stats().aggregateBudget).toBe(1_250_000);
+    expect(governor.stats().lastAdjustment).toMatchObject({
+      direction: "increase",
+      reason: "below-target",
+    });
+  });
+});
+
 describe("createViewGovernor emergency response", () => {
   it("reduces immediately on a severely missed frame while moving", () => {
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
