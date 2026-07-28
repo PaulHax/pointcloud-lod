@@ -8,7 +8,12 @@
 
 import { afterAll, describe, expect, it } from "vitest";
 
-import { closeBrowser, cloudsUnderTest, openExample } from "./harness";
+import {
+  closeBrowser,
+  cloudsUnderTest,
+  hierarchyPagesServed,
+  openExample,
+} from "./harness";
 import { settleAndAssert } from "./invariants";
 
 describe("every cloud under test", () => {
@@ -30,6 +35,24 @@ describe("every cloud under test", () => {
           expect(stats.sourcePoints).toBeGreaterThan(
             stats.controller!.selection.targetPoints,
           );
+        }
+        // A multipage cloud is the only thing that makes the bounded page
+        // scheduler and the page-blocked branch of selection run at all, and
+        // nothing else in the matrix can tell it apart from a single-page one:
+        // a cloud whose whole hierarchy arrives in the root page opens and
+        // converges perfectly well. So state that pages beyond the root were
+        // really fetched: opening any cloud reads the root page, and every
+        // page past that one is a page selection had to go and get. The count
+        // comes from the whole session's traffic rather than from a stats
+        // field, because convergence is defined as no page read outstanding —
+        // by the time this line runs, every gauge is back at rest.
+        if (cloud.multipage) {
+          const pages = await hierarchyPagesServed(session, cloud);
+          expect(
+            pages,
+            `${cloud.name} is meant to span several hierarchy pages, but ` +
+              `${pages} were read while it loaded`,
+          ).toBeGreaterThan(1);
         }
         expect(session.failures).toEqual([]);
       } finally {

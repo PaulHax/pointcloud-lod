@@ -16,6 +16,7 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { Copc, Getter, type Hierarchy } from "copc";
 import {
   chromium,
   type Browser,
@@ -128,6 +129,17 @@ export const cloudPair = (): [CloudUnderTest, CloudUnderTest] => {
   return [FIXTURE_CLOUD, MULTIPAGE_CLOUD];
 };
 
+/** A half-open byte range, the interval both copc's getter and HTTP name. */
+export type ByteRange = {
+  readonly begin: number;
+  readonly end: number;
+};
+
+/** A range the page was served, tagged with the URL it was read from. */
+export type ServedRange = ByteRange & {
+  readonly urlPath: string;
+};
+
 export type ExampleStats = {
   controller: LodControllerStats | null;
   adapter: RendererAdapterStats | null;
@@ -160,6 +172,13 @@ export type ExampleSession = {
   readonly origin: string;
   /** Every uncaught error and rejected promise the page produced. */
   readonly failures: readonly string[];
+  /**
+   * Every byte range the page has been served, in arrival order and across
+   * every cloud it loaded. Cumulative on purpose: the controller's own numbers
+   * are gauges of work in flight, which convergence defines to be zero, so
+   * they cannot answer what was read on the way there.
+   */
+  readonly served: readonly ServedRange[];
   stats(): Promise<ExampleStats>;
   /** Both sides' key sets, for asserting they agree. */
   keys(): Promise<ExampleKeys>;
@@ -205,6 +224,71 @@ export type ExampleSession = {
   /** Wait for selection and loading to converge and the view to stop asking. */
   settle(timeoutMs?: number): Promise<ExampleStats>;
   close(): Promise<void>;
+};
+
+/**
+ * Where a cloud's bytes sit on this machine, so the same asset the browser is
+ * streaming can also be read directly. Supplied clouds name their file; the
+ * committed fixtures are served out of `FIXTURES` under their own names.
+ */
+const cloudFile = (cloud: CloudUnderTest): string => {
+  const supplied = cloud.files[cloud.urlPath];
+  if (supplied !== undefined) return supplied;
+  const prefix = "/fixtures/";
+  if (!cloud.urlPath.startsWith(prefix)) {
+    throw new Error(`no local file backs ${cloud.urlPath}`);
+  }
+  return resolve(FIXTURES, cloud.urlPath.slice(prefix.length));
+};
+
+/**
+ * Every hierarchy page in `file`, as the byte range reading one costs. Walked
+ * here in node, which is the only way to know what a page read looks like on
+ * the wire without asking the code under test.
+ */
+const hierarchyPageRanges = async (file: string): Promise<ByteRange[]> => {
+  const getter = Getter.file(file);
+  const copc = await Copc.create(getter);
+  const ranges: ByteRange[] = [];
+  const pending: Hierarchy.Page[] = [copc.info.rootHierarchyPage];
+  while (pending.length > 0) {
+    const page = pending.pop()!;
+    ranges.push({
+      begin: page.pageOffset,
+      end: page.pageOffset + page.pageLength,
+    });
+    const subtree = await Copc.loadHierarchyPage(getter, page);
+    for (const sub of Object.values(subtree.pages)) {
+      if (sub !== undefined) pending.push(sub);
+    }
+  }
+  return ranges;
+};
+
+/**
+ * How many distinct hierarchy pages of `cloud` the session has been served.
+ *
+ * There is no stats field to read this off: the controller reports pages in
+ * flight and pages queued, and `settle()` is defined as both being zero, so by
+ * the time any check looks the gauge is back at rest whether one page was read
+ * or seventy-three. The transport keeps the cumulative record instead — one
+ * page read is one 206 for that page's own byte range.
+ *
+ * Ranges are matched exactly rather than by region: COPC interleaves hierarchy
+ * pages with point data, so "past the point records" would not tell a page
+ * read from a tile read, and an exact match cannot mistake one for the other.
+ */
+export const hierarchyPagesServed = async (
+  session: ExampleSession,
+  cloud: CloudUnderTest,
+): Promise<number> => {
+  const pages = await hierarchyPageRanges(cloudFile(cloud));
+  const served = new Set(
+    session.served
+      .filter((range) => range.urlPath === cloud.urlPath)
+      .map((range) => `${range.begin}-${range.end}`),
+  );
+  return pages.filter(({ begin, end }) => served.has(`${begin}-${end}`)).length;
 };
 
 let sharedBrowser: Browser | null = null;
@@ -290,6 +374,24 @@ export const openExample = async (
     if (message.type() === "error") failures.push(`console: ${message.text()}`);
   });
 
+  const served: ServedRange[] = [];
+  page.on("response", (response) => {
+    // 206 only, and the range is read off the request the response answers:
+    // this is the record of ranges the server actually delivered, so a range
+    // it refused, or a request nothing ever answered, cannot pass for a read.
+    if (response.status() !== 206) return;
+    const requested = /^bytes=(\d+)-(\d+)$/.exec(
+      response.request().headers()["range"] ?? "",
+    );
+    if (requested === null) return;
+    served.push({
+      urlPath: new URL(response.url()).pathname,
+      begin: Number(requested[1]),
+      // Half-open, matching the copc getter; the header states the last byte.
+      end: Number(requested[2]) + 1,
+    });
+  });
+
   const query = new URLSearchParams({ url: cloud });
   await page.goto(`${server.origin}/?${query}`, { waitUntil: "load" });
   await page.waitForFunction(
@@ -322,6 +424,7 @@ export const openExample = async (
     page,
     origin: server.origin,
     failures,
+    served,
     stats,
     keys: () =>
       page.evaluate(() =>
