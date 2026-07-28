@@ -53,7 +53,7 @@ export type FixedPointPresentation = {
 
 export type AutoPointPresentation = {
   readonly mode: "auto";
-  /** Multiplier applied after deriving the density-aware Auto diameter. */
+  /** Multiplier for the Auto diameter; 1 matches the projected spacing. */
   readonly userScale: number;
   /** Bounds for the unscaled density-aware diameter. */
   readonly minDiameterCssPx?: number;
@@ -355,6 +355,14 @@ const DEFAULT_PRESENTATION: FixedPointPresentation = {
 const DEFAULT_AUTO_MIN_DIAMETER_CSS_PX = 1.5;
 const DEFAULT_AUTO_MAX_DIAMETER_CSS_PX = 4;
 const INITIAL_AUTO_DIAMETER_CSS_PX = 2;
+/**
+ * Keep a selected node while a same-level challenger is only marginally more
+ * important. Without this band, nodes straddling the point-budget boundary
+ * trade places under tiny camera moves, replacing large actors even though the
+ * view has barely changed. Nodes outside the frustum or below the refinement
+ * cutoff never become candidates, so those changes remain immediate.
+ */
+const SELECTION_PRIORITY_HYSTERESIS = 0.1;
 
 /** What `checkPresentation` returns: Auto bounds are always resolved. */
 type NormalizedPresentation =
@@ -1018,6 +1026,89 @@ export const createLodController = (
   const isEntryReady = (keyString: string, entry: HierarchyEntry): boolean =>
     entry.pointCount === 0 || resident.has(keyString);
 
+  /**
+   * Size Auto points for the selected density, not the subset that has happened
+   * to finish loading.
+   *
+   * The ready frontier is intentionally conservative: while any selected child
+   * is missing, its ready parent remains a terminal so the diagnostic describes
+   * what is on screen. Using that same frontier for one global point diameter
+   * makes streaming unstable, though. Several fine tiles can land under the
+   * coarse diameter, then the last sibling makes the parent cease to be a
+   * terminal and every actor shrinks at once. More fine tiles subsequently land,
+   * producing a dense → sparse → dense sequence with an unchanged selection.
+   *
+   * Selection already states the density the completed frame is converging on.
+   * Following its terminals moves the diameter once, with the selection, and
+   * leaves tile arrivals to add detail monotonically. Hierarchy- and
+   * budget-blocked branches still retain their closest sampled parent because
+   * no selected descendant describes a finer density there.
+   */
+  const updateAutoDiameter = (): void => {
+    if (
+      presentation.mode !== "auto" ||
+      view === null ||
+      !target.has(keyToString(ROOT_KEY))
+    ) {
+      return;
+    }
+
+    const planes = frustumPlanes(view.viewProj);
+    let largestSpacing: number | null = null;
+    const include = (entry: HierarchyEntry, keyString: string): void => {
+      if (entry.pointCount === 0) return;
+      largestSpacing = Math.max(largestSpacing ?? 0, sseFor(keyString));
+    };
+
+    const walk = (key: VoxelKey): void => {
+      const keyString = keyToString(key);
+      if (!target.has(keyString)) return;
+      const entry = hierarchy.get(keyString);
+      if (entry === undefined) return;
+
+      const children = childrenOf(key, entry);
+      if (children.length === 0 || sseFor(keyString) < refinementCutoffPx) {
+        include(entry, keyString);
+        return;
+      }
+
+      let blocked = false;
+      const selectedChildren: VoxelKey[] = [];
+      for (const child of children) {
+        const childString = keyToString(child);
+        const childEntry = hierarchy.get(childString);
+        if (childEntry === undefined) {
+          blocked = true;
+          continue;
+        }
+        if (!boundsIntersectsFrustum(planes, childEntry.bounds)) continue;
+        if (childEntry.pageRef && !pagesLoaded.has(childString)) {
+          blocked = true;
+          continue;
+        }
+        if (!target.has(childString)) {
+          blocked = budgetSkipped.has(childString) || blocked;
+          continue;
+        }
+        selectedChildren.push(child);
+      }
+
+      if (blocked) include(entry, keyString);
+      for (const child of selectedChildren) walk(child);
+    };
+
+    walk(ROOT_KEY);
+    if (largestSpacing !== null) {
+      emitDiameter(
+        presentation.userScale *
+          Math.min(
+            presentation.maxDiameterCssPx,
+            Math.max(presentation.minDiameterCssPx, largestSpacing),
+          ),
+      );
+    }
+  };
+
   const updateReadyTerminalFrontier = (): void => {
     const currentView = view;
     if (currentView === null || !active || !target.has(keyToString(ROOT_KEY))) {
@@ -1129,19 +1220,6 @@ export const createLodController = (
       projectedSpacingCssPx: spacingQuantiles(values),
     };
     selectionStats = { ...selectionStats, readyTerminalFrontier: frontier };
-
-    if (presentation.mode === "auto") {
-      const largestSpacing = frontier.projectedSpacingCssPx.max;
-      if (largestSpacing !== null) {
-        emitDiameter(
-          presentation.userScale *
-            Math.min(
-              presentation.maxDiameterCssPx,
-              Math.max(presentation.minDiameterCssPx, largestSpacing),
-            ),
-        );
-      }
-    }
   };
 
   const pump = (): void => {
@@ -1221,12 +1299,22 @@ export const createLodController = (
     }
   };
 
-  const runSelection = (): void => {
+  const runSelection = (seed?: {
+    readonly selected: ReadonlySet<string>;
+    readonly totalPoints: number;
+  }): void => {
     if (disposed || !active || view === null) return;
     const budget = currentBudget();
     const currentView = view;
     const planes = frustumPlanes(currentView.viewProj);
     const sse = (key: VoxelKey): number => sseFor(keyToString(key));
+    const previousTarget = target;
+    const priority = (key: VoxelKey): number => {
+      const value = sse(key);
+      return previousTarget.has(keyToString(key))
+        ? value * (1 + SELECTION_PRIORITY_HYSTERESIS)
+        : value;
+    };
 
     const neededPages: VoxelKey[] = [];
     let leafNodes = 0;
@@ -1234,7 +1322,8 @@ export const createLodController = (
     const selection = selectNodes({
       root: ROOT_KEY,
       pointBudget: budget,
-      priority: sse,
+      priority,
+      seed,
       getNode: (key) => {
         const keyString = keyToString(key);
         const entry = hierarchy.get(keyString);
@@ -1261,7 +1350,6 @@ export const createLodController = (
       },
     });
 
-    const previousTarget = target;
     target = selection.selected;
     budgetSkipped = selection.budgetSkipped;
     if (
@@ -1286,6 +1374,7 @@ export const createLodController = (
       projectedImportance: target.size > 0 ? sse(ROOT_KEY) : 0,
       readyTerminalFrontier: emptyReadyTerminalFrontier(),
     };
+    updateAutoDiameter();
     // The root page bootstraps the hierarchy, so it can never come back
     // through neededPages: that path needs a hierarchy entry, and only the
     // root page can create one. Without this, a failed bootstrap leaves the
@@ -1493,8 +1582,19 @@ export const createLodController = (
 
     setPointBudget(points) {
       if (disposed || !finiteNonNegative(points)) return;
+      const previousBudget = currentBudget();
       pointBudget = Math.floor(points);
-      runSelection();
+      const nextBudget = currentBudget();
+      runSelection(
+        nextBudget > previousBudget &&
+          target.size > 0 &&
+          selectionStats.targetPoints <= nextBudget
+          ? {
+              selected: target,
+              totalPoints: selectionStats.targetPoints,
+            }
+          : undefined,
+      );
     },
 
     setSource(nextSource) {
@@ -1531,6 +1631,7 @@ export const createLodController = (
       if (presentation.mode === "fixed") {
         emitDiameter(presentation.diameterCssPx);
       } else {
+        updateAutoDiameter();
         updateReadyTerminalFrontier();
       }
     },

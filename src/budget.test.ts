@@ -98,22 +98,23 @@ describe("selectNodes", () => {
     expect(result.budgetSkippedPoints).toBe(60);
   });
 
-  it("a skipped node cannot fit later even if siblings left room", () => {
+  it("does not backfill the remainder with a lower-priority sibling", () => {
     const result = select(
       {
         "0-0-0-0": 100,
         "1-1-1-1": 500, // highest priority but too big — skipped
-        "1-0-0-0": 40, // still fits afterwards
+        "1-0-0-0": 40, // fits, but is below the priority boundary
       },
       200,
       (key) => key.x + key.y + key.z,
     );
 
-    expect(result.selected).toEqual(new Set(["0-0-0-0", "1-0-0-0"]));
-    expect(result.totalPoints).toBe(140);
+    expect(result.selected).toEqual(new Set(["0-0-0-0"]));
+    expect(result.budgetSkipped).toEqual(new Set(["1-1-1-1", "1-0-0-0"]));
+    expect(result.totalPoints).toBe(100);
   });
 
-  it("never selects a child whose parent was skipped (hole-free invariant)", () => {
+  it("does not descend deeper after reaching a same-level priority boundary", () => {
     const result = select(
       {
         "0-0-0-0": 50,
@@ -123,11 +124,13 @@ describe("selectNodes", () => {
         "2-2-0-0": 5, // child of the selected '1-1-0-0'
       },
       100,
+      (key) => key.x,
     );
 
-    expect(result.selected).toEqual(new Set(["0-0-0-0", "1-1-0-0", "2-2-0-0"]));
+    expect(result.selected).toEqual(new Set(["0-0-0-0", "1-1-0-0"]));
     expect(result.selected.has("2-0-0-0")).toBe(false);
-    expect(result.totalPoints).toBe(65);
+    expect(result.selected.has("2-2-0-0")).toBe(false);
+    expect(result.totalPoints).toBe(60);
   });
 
   it("refines level by level (breadth-first), not depth-first", () => {
@@ -147,6 +150,48 @@ describe("selectNodes", () => {
 
     expect(result.selected).toEqual(new Set(["0-0-0-0", "1-0-0-0", "1-1-0-0"]));
     expect(result.totalPoints).toBe(30);
+  });
+
+  it("uses a larger budget only to extend a seeded selection", () => {
+    const counts = {
+      "0-0-0-0": 10,
+      "1-0-0-0": 80,
+      "1-1-0-0": 30,
+    };
+    const priority = (key: VoxelKey): number =>
+      keyToString(key) === "1-0-0-0" ? 100 : 1;
+    // This parent-closed seed can come from an earlier view in which the
+    // cheaper child had higher priority.
+    const initial = {
+      selected: new Set(["0-0-0-0", "1-1-0-0"]),
+      totalPoints: 40,
+    };
+
+    const grown = selectNodes({
+      root: ROOT_KEY,
+      getNode: hierarchyOf(counts),
+      priority,
+      pointBudget: 90,
+      seed: {
+        selected: initial.selected,
+        totalPoints: initial.totalPoints,
+      },
+    });
+    expect(grown.selected).toEqual(initial.selected);
+    expect(grown.totalPoints).toBe(initial.totalPoints);
+
+    const enoughForBoth = selectNodes({
+      root: ROOT_KEY,
+      getNode: hierarchyOf(counts),
+      priority,
+      pointBudget: 120,
+      seed: {
+        selected: initial.selected,
+        totalPoints: initial.totalPoints,
+      },
+    });
+    expect(enoughForBoth.selected).toEqual(new Set(Object.keys(counts)));
+    expect(enoughForBoth.totalPoints).toBe(120);
   });
 
   it("skips nodes the hierarchy does not know (unloaded pages)", () => {

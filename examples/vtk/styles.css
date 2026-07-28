@@ -73,11 +73,13 @@ h1 {
   gap: 8px;
 }
 
-button.ghost {
-  height: 26px;
-  padding: 0 10px;
-  border-color: rgba(255, 255, 255, 0.16);
-  background: rgba(255, 255, 255, 0.06);
+button.reset-view {
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid #2d86bd;
+  border-radius: 5px;
+  background: #176293;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
   font-size: 11px;
   font-weight: 650;
   letter-spacing: 0.04em;
@@ -85,47 +87,13 @@ button.ghost {
   white-space: nowrap;
 }
 
-button.ghost:hover {
-  background: rgba(255, 255, 255, 0.12);
+button.reset-view:hover {
+  background: #2075aa;
 }
 
-button.ghost:disabled {
+button.reset-view:disabled {
   opacity: 0.4;
   cursor: default;
-}
-
-.regime {
-  padding: 4px 9px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
-  font-size: 11px;
-  font-weight: 650;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-
-.regime[data-regime="interaction"] {
-  border-color: rgba(240, 170, 60, 0.45);
-  background: rgba(240, 170, 60, 0.16);
-  color: #ffcf8a;
-}
-
-.regime[data-regime="stationary"] {
-  border-color: rgba(80, 200, 140, 0.45);
-  background: rgba(80, 200, 140, 0.16);
-  color: #8ce7bb;
-}
-
-.regime[data-regime="fixed"] {
-  border-color: rgba(120, 170, 230, 0.4);
-  background: rgba(120, 170, 230, 0.14);
-  color: #a9d5ef;
-}
-
-.regime[data-regime="idle"] {
-  color: #7d8e9c;
 }
 
 .frame-rate-card {
@@ -329,6 +297,34 @@ button:hover {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0 10px;
+}
+
+.range-output {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 58px;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+}
+
+.range-output input[type="range"] {
+  height: 36px;
+  padding: 0;
+  accent-color: #48a2d7;
+}
+
+.range-output output {
+  overflow: hidden;
+  color: #a9d5ef;
+  font:
+    11px/1 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
 }
 
 .divider {
