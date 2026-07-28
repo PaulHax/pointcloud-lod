@@ -25,12 +25,16 @@ type StubNode = {
   channels?: number[];
   /** Simulates a node whose point data cannot be read. */
   unreadable?: boolean;
+  /** Make this node consume one byte range while loading. */
+  readSourceOnLoad?: { begin: number; end: number };
 };
 
 type StubAsset = {
   pointDataRecordFormat: number;
   /** Keyed by "level-x-y-z"; "0-0-0-0" is the node the shift is sampled from. */
   nodes: Record<string, StubNode>;
+  /** Make the stub consume one byte range while opening. */
+  readSourceAtOpen?: { begin: number; end: number };
 };
 
 /**
@@ -58,6 +62,14 @@ vi.mock("copc", async (importOriginal) => {
       create: async (source: never) => {
         const a = asset();
         if (a === null) return actual.Copc.create(source);
+        if (a.readSourceAtOpen !== undefined) {
+          await (
+            source as unknown as (
+              begin: number,
+              end: number,
+            ) => Promise<Uint8Array>
+          )(a.readSourceAtOpen.begin, a.readSourceAtOpen.end);
+        }
         const nodes = Object.values(a.nodes);
         return {
           header: {
@@ -104,6 +116,14 @@ vi.mock("copc", async (importOriginal) => {
         stub.viewLoads += 1;
         const spec = a.nodes[nodeKeys(a)[node.pointDataOffset]!]!;
         if (spec.unreadable) throw new Error("point data unavailable");
+        if (spec.readSourceOnLoad !== undefined) {
+          await (
+            source as unknown as (
+              begin: number,
+              end: number,
+            ) => Promise<Uint8Array>
+          )(spec.readSourceOnLoad.begin, spec.readSourceOnLoad.end);
+        }
         const channelOffset: Record<string, number> = {
           Red: 0,
           Green: 1,
@@ -153,12 +173,67 @@ const serviceRgb = (rootChannels: number[], channels: number[]): Uint8Array => {
 };
 
 afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   stub.asset = null;
   stub.viewLoads = 0;
   stub.pageLoads = 0;
 });
 
 describe("createCopcTileSource", () => {
+  it("retries a transient HTTP range failure before opening the source", async () => {
+    vi.useFakeTimers();
+    const url = "https://example.test/cloud.copc.laz";
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce(new Response(new Uint8Array(10), { status: 206 }));
+    stub.asset = {
+      pointDataRecordFormat: 0,
+      nodes: { "0-0-0-0": { pointCount: 0 } },
+      readSourceAtOpen: { begin: 10, end: 20 },
+    };
+
+    const opening = createCopcTileSource({ source: url });
+    await vi.runAllTimersAsync();
+    await expect(opening).resolves.toBeDefined();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenLastCalledWith(url, {
+      headers: { Range: "bytes=10-19" },
+    });
+  });
+
+  it("cancels a pending HTTP retry when the tile is no longer needed", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new TypeError("Failed to fetch"));
+    stub.asset = {
+      pointDataRecordFormat: 0,
+      nodes: {
+        "0-0-0-0": {
+          pointCount: 1,
+          readSourceOnLoad: { begin: 20, end: 30 },
+        },
+      },
+    };
+    const source = await createCopcTileSource({
+      source: "https://example.test/cloud.copc.laz",
+    });
+    const controller = new AbortController();
+    const loading = source.loadTile(ROOT_KEY, { signal: controller.signal });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    controller.abort();
+    await expect(loading).rejects.toMatchObject({ name: "AbortError" });
+    await vi.runAllTimersAsync();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({
+      signal: controller.signal,
+    });
+  });
+
   it("reads metadata from the COPC info VLR", async () => {
     const source = await makeSource();
     const meta = source.metadata();

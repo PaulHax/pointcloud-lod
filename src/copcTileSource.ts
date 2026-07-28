@@ -9,7 +9,7 @@
  * is out of scope here.
  */
 
-import { Copc, Getter, type Hierarchy } from "copc";
+import { Copc, type Hierarchy } from "copc";
 
 import {
   ROOT_KEY,
@@ -29,7 +29,11 @@ import type {
   TileSourceMetadata,
 } from "./tileSource";
 
-export type RangeGetter = (begin: number, end: number) => Promise<Uint8Array>;
+export type RangeGetter = (
+  begin: number,
+  end: number,
+  signal?: AbortSignal,
+) => Promise<Uint8Array>;
 
 export type CopcTileSourceOptions = {
   /** URL fetched via HTTP Range requests, or a custom byte-range getter. */
@@ -37,6 +41,90 @@ export type CopcTileSourceOptions = {
 };
 
 const ABORT_CHECK_STRIDE = 4096;
+const HTTP_RANGE_ATTEMPTS = 3;
+const HTTP_RETRY_BASE_MS = 100;
+
+const delay = (
+  milliseconds: number,
+  signal: AbortSignal | undefined,
+): Promise<void> =>
+  new Promise((resolve, reject) => {
+    signal?.throwIfAborted();
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal!.reason);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+
+/**
+ * HTTP byte ranges with bounded recovery from transport and server failures.
+ *
+ * `copc`'s HTTP getter makes one unchecked fetch. A transient S3 connection
+ * failure therefore tears down an otherwise healthy tile and reaches the UI
+ * as the browser's context-free "TypeError: Failed to fetch". Range reads are
+ * idempotent, so retry network failures, truncated bodies, throttling and 5xx
+ * responses here. Permanent HTTP responses fail immediately, and every final
+ * error names the byte range and source that could not be read.
+ */
+const httpRangeGetter =
+  (url: string): RangeGetter =>
+  async (begin, end, signal) => {
+    signal?.throwIfAborted();
+    if (begin < 0 || end < 0 || begin > end) {
+      throw new Error(`Invalid byte range ${begin}-${end}`);
+    }
+    const expectedLength = end - begin;
+    if (expectedLength === 0) return new Uint8Array();
+    let lastError: unknown = null;
+    let attemptsMade = 0;
+
+    for (let attempt = 1; attempt <= HTTP_RANGE_ATTEMPTS; attempt += 1) {
+      attemptsMade = attempt;
+      let retryable = true;
+      try {
+        const response = await fetch(url, {
+          headers: { Range: `bytes=${begin}-${end - 1}` },
+          ...(signal === undefined ? {} : { signal }),
+        });
+        if (response.status !== 206) {
+          retryable =
+            response.status === 408 ||
+            response.status === 429 ||
+            response.status >= 500;
+          throw new Error(
+            `HTTP ${response.status} ${response.statusText || "response"}`,
+          );
+        }
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        if (bytes.byteLength !== expectedLength) {
+          throw new Error(
+            `Expected ${expectedLength} bytes, received ${bytes.byteLength}`,
+          );
+        }
+        signal?.throwIfAborted();
+        return bytes;
+      } catch (error) {
+        signal?.throwIfAborted();
+        if (error instanceof Error && error.name === "AbortError") throw error;
+        lastError = error;
+        if (!retryable || attempt === HTTP_RANGE_ATTEMPTS) break;
+        await delay(HTTP_RETRY_BASE_MS * 2 ** (attempt - 1), signal);
+      }
+    }
+
+    const detail =
+      lastError instanceof Error ? lastError.message : String(lastError);
+    throw new Error(
+      `Could not fetch bytes ${begin}-${end - 1} from ${url} after ` +
+        `${attemptsMade} ${attemptsMade === 1 ? "attempt" : "attempts"}: ${detail}`,
+      { cause: lastError },
+    );
+  };
 
 /** One node's decoded points, as the copc reader hands them back. */
 type PointDataView = Awaited<ReturnType<typeof Copc.loadPointDataView>>;
@@ -65,13 +153,13 @@ const headerBounds = ({ min, max }: Copc["header"]): Bounds | undefined => {
 
 /**
  * `Copc.loadPointDataView` and `Copc.loadHierarchyPage` take no AbortSignal,
- * so cancellation here is advisory: it is checked around each copc call and,
- * for tiles, every `ABORT_CHECK_STRIDE` decoded points. The byte-range getter
- * is ours though, and it is the one place a cancellation can reach physical
- * I/O — a canceled operation issues no further range reads. Reads already in
- * flight still run to completion, which is exactly why the controller counts
- * physical operations rather than logical requests. Should copc accept a
- * signal, hand it to the two calls below and this wrapper becomes redundant.
+ * so this wrapper closes over one and hands it to every byte-range read. The
+ * built-in HTTP getter cancels both an in-flight fetch and its retry delay; a
+ * custom getter can honor the optional third argument too. Cancellation is
+ * also checked around each copc call and, for tiles, every
+ * `ABORT_CHECK_STRIDE` decoded points. The controller still counts physical
+ * operations rather than logical requests because custom getters may treat
+ * cancellation as advisory and decoding already under way remains synchronous.
  */
 const abortableGetter = (
   getter: RangeGetter,
@@ -79,8 +167,10 @@ const abortableGetter = (
 ): RangeGetter =>
   signal === undefined
     ? getter
-    : (begin, end) =>
-        signal.aborted ? Promise.reject(signal.reason) : getter(begin, end);
+    : (begin, end) => {
+        signal.throwIfAborted();
+        return getter(begin, end, signal);
+      };
 
 /**
  * Bits to drop from every RGB channel of this asset, sampled once at open.
@@ -117,7 +207,7 @@ export const createCopcTileSource = async (
 ): Promise<TileSource> => {
   const getter: RangeGetter =
     typeof options.source === "string"
-      ? Getter.http(options.source)
+      ? httpRangeGetter(options.source)
       : options.source;
 
   const copc = await Copc.create(getter);
