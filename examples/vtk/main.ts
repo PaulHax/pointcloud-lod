@@ -67,6 +67,16 @@ const resetViewButton = element<HTMLButtonElement>("#reset-view");
 const regimeBadge = element<HTMLElement>("#regime");
 const message = element<HTMLOutputElement>("#message");
 const stats = element<HTMLElement>("#stats");
+const frameRateChart = element<SVGSVGElement>("#frame-rate-chart");
+const frameRateArea = element<SVGPathElement>("#frame-rate-area");
+const frameRateLine = element<SVGPolylineElement>("#frame-rate-line");
+const frameRateLatest = element<SVGCircleElement>("#frame-rate-latest");
+const frameRateValue = element<HTMLOutputElement>("#frame-rate-value");
+const frameRateFilteredValue = element<HTMLOutputElement>(
+  "#frame-rate-filtered-value",
+);
+const frameRateTargetLine = element<SVGLineElement>("#frame-rate-target-line");
+const frameRateTarget = element<HTMLElement>("#frame-rate-target");
 
 const fullScreen = vtkFullScreenRenderWindow.newInstance({
   rootContainer: viewer,
@@ -84,6 +94,17 @@ const WORLD_UP: [number, number, number] = [0, 0, 1];
 const DOLLY_PER_VIEWPORT = 1.6;
 /** Zoom ratio per wheel notch. */
 const DOLLY_PER_NOTCH = 1.12;
+/** Closest a perspective eye may get, relative to the loaded scene. */
+const MIN_DOLLY_DISTANCE_RATIO = 1e-6;
+/** Enough coordinate increments to keep eye and focus numerically distinct. */
+const MIN_DOLLY_DISTANCE_ULPS = 1024;
+
+/** Where loading the current cloud framed it, so the view can go back. */
+let framing: {
+  center: number[];
+  radius: number;
+  bounds: [number, number, number, number, number, number];
+} | null = null;
 
 /**
  * The cursor, in the display coordinates vtk.js works in.
@@ -106,6 +127,59 @@ viewer.addEventListener("pointermove", (event: PointerEvent) => {
       (bounds.height - event.clientY + bounds.top),
   };
 });
+
+/**
+ * Dolly without letting a perspective camera collapse through its focus.
+ *
+ * vtk.js protects only at 1e-20 world units. Repeated zoom steps can reach
+ * that numerical limit, at which point its reconstructed focal point may land
+ * behind the eye and make the next pan appear reversed. The usable limit has
+ * to be relative to both the scene and the magnitude of its coordinates:
+ * point clouds range from local metres to large projected coordinates.
+ *
+ * The returned factor is what was actually applied. Drag zoom uses it to keep
+ * its reversible accumulated ratio honest when the limit clips a step.
+ */
+const dollyToPosition = (
+  requestedFactor: number,
+  position: { x: number; y: number },
+  renderer: any,
+  interactor: any,
+): number => {
+  if (Number.isNaN(requestedFactor) || requestedFactor <= 0) return 1;
+
+  const dollyCamera = renderer.getActiveCamera();
+  let appliedFactor = requestedFactor;
+  if (!dollyCamera.getParallelProjection() && requestedFactor > 1) {
+    const cameraPosition = dollyCamera.getPosition() as number[];
+    const focalPoint = dollyCamera.getFocalPoint() as number[];
+    const sceneScale = framing?.radius ?? dollyCamera.getDistance();
+    const coordinateScale = Math.max(
+      sceneScale,
+      ...cameraPosition.map(Math.abs),
+      ...focalPoint.map(Math.abs),
+    );
+    const minimumDistance = Math.max(
+      sceneScale * MIN_DOLLY_DISTANCE_RATIO,
+      coordinateScale * Number.EPSILON * MIN_DOLLY_DISTANCE_ULPS,
+      Number.MIN_VALUE,
+    );
+    const maximumFactor = Math.max(
+      dollyCamera.getDistance() / minimumDistance,
+      1,
+    );
+    appliedFactor = Math.min(requestedFactor, maximumFactor);
+  }
+
+  if (!Number.isFinite(appliedFactor) || appliedFactor === 1) return 1;
+  vtkInteractorStyleManipulator.dollyToPosition(
+    appliedFactor,
+    position,
+    renderer,
+    interactor,
+  );
+  return appliedFactor;
+};
 
 /**
  * Drag-to-zoom, toward the point the gesture started on.
@@ -149,12 +223,7 @@ const createDollyManipulator = (initialValues: object): any => {
     if (!delta) return;
     const at = position ?? pointer;
     if (!at) return;
-    vtkInteractorStyleManipulator.dollyToPosition(
-      DOLLY_PER_NOTCH ** -delta,
-      at,
-      renderer,
-      scrollInteractor,
-    );
+    dollyToPosition(DOLLY_PER_NOTCH ** -delta, at, renderer, scrollInteractor);
   };
   api.onMouseMove = (interactor, renderer, position) => {
     if (!position) return;
@@ -165,15 +234,9 @@ const createDollyManipulator = (initialValues: object): any => {
       ((position.y - start.y) / Math.max(height, 1)) * DOLLY_PER_VIEWPORT,
     );
     const step = wanted / applied;
-    applied = wanted;
     // Toward where the gesture began, so the drag pulls that point in rather
     // than whatever happens to be at the centre.
-    vtkInteractorStyleManipulator.dollyToPosition(
-      step,
-      start,
-      renderer,
-      interactor,
-    );
+    applied *= dollyToPosition(step, start, renderer, interactor);
   };
   return publicAPI;
 };
@@ -487,6 +550,162 @@ const points = (value: number): string => Math.round(value).toLocaleString();
 const millis = (value: number | null): string =>
   value === null ? "—" : `${value.toFixed(1)} ms`;
 const mib = (bytes: number): string => `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
+
+const FRAME_RATE_CHART_WIDTH = 320;
+const FRAME_RATE_CHART_HEIGHT = 80;
+const FRAME_RATE_CHART_MAX = 120;
+const FRAME_RATE_SAMPLE_CAPACITY = 90;
+const FRAME_RATE_FILTER_WEIGHT = 0.15;
+const FRAME_RATE_IDLE_MS = 250;
+const frameRateSamples: number[] = [];
+let lastFramePresentedAt: number | null = null;
+let filteredFrameIntervalMs: number | null = null;
+let frameRateLastActiveAt: number | null = null;
+let frameRateIdle = true;
+let frameRateTickQueued = false;
+let frameRateGeneration = 0;
+
+const frameRateY = (fps: number): number =>
+  FRAME_RATE_CHART_HEIGHT *
+  (1 - Math.min(Math.max(fps, 0), FRAME_RATE_CHART_MAX) / FRAME_RATE_CHART_MAX);
+
+const formatFrameRate = (fps: number): string =>
+  `${fps < 100 ? fps.toFixed(1) : Math.round(fps).toLocaleString()} fps`;
+
+/** Add one filtered cadence sample to the graph. */
+const plotFrameRate = (filteredFps: number): void => {
+  frameRateSamples.push(filteredFps);
+  if (frameRateSamples.length > FRAME_RATE_SAMPLE_CAPACITY) {
+    frameRateSamples.shift();
+  }
+
+  // Right-align a partial history so the newest frame is always at the live
+  // edge of the graph. Once full, each new sample advances the line one slot.
+  const firstSlot = FRAME_RATE_SAMPLE_CAPACITY - frameRateSamples.length;
+  const plotted = frameRateSamples.map((sample, index) => {
+    const slot = firstSlot + index;
+    return {
+      x:
+        (slot / Math.max(FRAME_RATE_SAMPLE_CAPACITY - 1, 1)) *
+        FRAME_RATE_CHART_WIDTH,
+      y: frameRateY(sample),
+    };
+  });
+  const pointsAttribute = plotted
+    .map(({ x, y }) => `${x.toFixed(1)},${y.toFixed(1)}`)
+    .join(" ");
+  const first = plotted[0]!;
+  const latest = plotted[plotted.length - 1]!;
+
+  frameRateLine.setAttribute("points", pointsAttribute);
+  frameRateArea.setAttribute(
+    "d",
+    `M ${first.x.toFixed(1)} ${FRAME_RATE_CHART_HEIGHT} ` +
+      `L ${pointsAttribute.replaceAll(",", " ")} ` +
+      `L ${latest.x.toFixed(1)} ${FRAME_RATE_CHART_HEIGHT} Z`,
+  );
+  frameRateLatest.setAttribute("cx", latest.x.toFixed(1));
+  frameRateLatest.setAttribute("cy", latest.y.toFixed(1));
+  frameRateLatest.removeAttribute("hidden");
+};
+
+/**
+ * Measure displayed frame cadence, not reciprocal render cost.
+ *
+ * A 3 ms paint means the renderer has headroom; it does not mean a 60 Hz
+ * display showed 333 frames. Multiple renders before the next animation tick
+ * are coalesced because the display can present only their final result.
+ */
+const sampleFrameRate = (presentedAt: number): void => {
+  frameRateLastActiveAt = presentedAt;
+  frameRateIdle = false;
+  const previous = lastFramePresentedAt;
+  lastFramePresentedAt = presentedAt;
+  if (previous === null) return;
+  const intervalMs = presentedAt - previous;
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) return;
+
+  filteredFrameIntervalMs =
+    filteredFrameIntervalMs === null
+      ? intervalMs
+      : filteredFrameIntervalMs * (1 - FRAME_RATE_FILTER_WEIGHT) +
+        intervalMs * FRAME_RATE_FILTER_WEIGHT;
+  const currentFps = 1000 / intervalMs;
+  const filteredFps = 1000 / filteredFrameIntervalMs;
+  plotFrameRate(filteredFps);
+  frameRateValue.value = formatFrameRate(currentFps);
+  frameRateFilteredValue.value = formatFrameRate(filteredFps);
+  frameRateChart.setAttribute(
+    "aria-label",
+    `${formatFrameRate(currentFps)} current, ` +
+      `${formatFrameRate(filteredFps)} average, plotted over the latest ` +
+      `${frameRateSamples.length} rendered frames`,
+  );
+};
+
+const recordFrameRate = (): void => {
+  if (frameRateTickQueued) return;
+  frameRateTickQueued = true;
+  const generation = frameRateGeneration;
+  requestAnimationFrame((presentedAt) => {
+    // Loading a new cloud resets the graph. A presentation callback belonging
+    // to the previous one must not put its last frame into the new history.
+    if (generation !== frameRateGeneration) return;
+    frameRateTickQueued = false;
+    sampleFrameRate(presentedAt);
+  });
+};
+
+const resetFrameRate = (): void => {
+  frameRateGeneration += 1;
+  frameRateTickQueued = false;
+  frameRateSamples.length = 0;
+  lastFramePresentedAt = null;
+  filteredFrameIntervalMs = null;
+  frameRateLastActiveAt = null;
+  frameRateIdle = true;
+  frameRateLine.setAttribute("points", "");
+  frameRateArea.setAttribute("d", "");
+  frameRateLatest.setAttribute("hidden", "");
+  frameRateValue.value = "— fps";
+  frameRateFilteredValue.value = "— fps";
+  frameRateChart.setAttribute("aria-label", "No frame-rate samples yet");
+};
+
+const updateFrameRateIdle = (now: number): void => {
+  if (
+    frameRateIdle ||
+    frameRateLastActiveAt === null ||
+    now - frameRateLastActiveAt < FRAME_RATE_IDLE_MS
+  ) {
+    return;
+  }
+  frameRateIdle = true;
+  lastFramePresentedAt = null;
+  filteredFrameIntervalMs = null;
+  plotFrameRate(0);
+  frameRateValue.value = "0.0 fps";
+  frameRateFilteredValue.value = "0.0 fps";
+  frameRateChart.setAttribute(
+    "aria-label",
+    `0.0 fps, idle, plotted over the latest ${frameRateSamples.length} samples`,
+  );
+};
+
+const updateFrameRateTarget = (frameMs: number | null): void => {
+  if (frameMs === null || !Number.isFinite(frameMs) || frameMs <= 0) {
+    frameRateTargetLine.setAttribute("hidden", "");
+    frameRateTarget.textContent = "No target";
+    return;
+  }
+  const targetFps = 1000 / frameMs;
+  const y = frameRateY(targetFps).toFixed(1);
+  frameRateTargetLine.setAttribute("y1", y);
+  frameRateTargetLine.setAttribute("y2", y);
+  frameRateTargetLine.removeAttribute("hidden");
+  frameRateTarget.textContent = `Target ${formatFrameRate(targetFps)}`;
+};
+
 /**
  * One diagnostics line, kept as label and value rather than as padded text.
  *
@@ -658,6 +877,8 @@ const renderStats = (sections: StatSection[]): void => {
 const updateDiagnostics = (): void => {
   const view = governor?.stats() ?? null;
   updateRegimeBadge(view);
+  updateFrameRateIdle(performance.now());
+  updateFrameRateTarget(view?.targetFrameTimeMs ?? null);
   renderStats(
     [
       view
@@ -687,13 +908,6 @@ const updateDiagnostics = (): void => {
  * actually changed rather than on every frame.
  */
 let clippingDirty = true;
-
-/** Where loading the current cloud framed it, so the view can go back. */
-let framing: {
-  center: number[];
-  radius: number;
-  bounds: [number, number, number, number, number, number];
-} | null = null;
 
 const scheduleRender = (): void => {
   if (frameQueued) return;
@@ -734,9 +948,10 @@ const updateMember = (): void => {
 // feeds the rendered camera to LOD, and asks whether another frame is owed.
 interactor.onRenderEvent(() => {
   const startedAt = frameStartedAt;
+  const completedAt = performance.now();
   frameStartedAt = null;
   if (startedAt !== null) {
-    lastFrameMs = syntheticFrameMs ?? performance.now() - startedAt;
+    lastFrameMs = syntheticFrameMs ?? completedAt - startedAt;
   }
   const view = cameraView();
   controller?.setCamera(view);
@@ -750,6 +965,7 @@ interactor.onRenderEvent(() => {
       hostFrameMs: lastFrameMs,
       vtkFrameMs: lastFrameMs,
     });
+    if (controller) recordFrameRate();
   }
   if (governor?.needsFrame()) scheduleRender();
 });
@@ -792,6 +1008,7 @@ const disposeCloud = (): void => {
   loadedName = "";
   loadedPointCount = 0;
   framing = null;
+  resetFrameRate();
   // Framing the next cloud is not motion the user asked for.
   lastRenderedView = null;
 };

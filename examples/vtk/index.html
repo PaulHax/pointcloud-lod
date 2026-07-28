@@ -19,6 +19,52 @@
         </div>
       </header>
 
+      <section class="frame-rate-card" aria-labelledby="frame-rate-heading">
+        <div class="frame-rate-heading">
+          <h2 id="frame-rate-heading">Frame rate</h2>
+          <div class="frame-rate-values">
+            <span>
+              <output id="frame-rate-value">— fps</output>
+              <small>current</small>
+            </span>
+            <span>
+              <output id="frame-rate-filtered-value">— fps</output>
+              <small>average</small>
+            </span>
+          </div>
+        </div>
+        <div class="frame-rate-plot">
+          <svg
+            id="frame-rate-chart"
+            viewBox="0 0 320 80"
+            preserveAspectRatio="none"
+            role="img"
+            aria-label="No frame-rate samples yet"
+          >
+            <line class="frame-rate-grid" x1="0" y1="20" x2="320" y2="20" />
+            <line class="frame-rate-grid" x1="0" y1="40" x2="320" y2="40" />
+            <line class="frame-rate-grid" x1="0" y1="60" x2="320" y2="60" />
+            <path id="frame-rate-area" d="" />
+            <polyline id="frame-rate-line" points="" />
+            <line
+              id="frame-rate-target-line"
+              x1="0"
+              y1="40"
+              x2="320"
+              y2="40"
+              hidden
+            />
+            <circle id="frame-rate-latest" cx="320" cy="80" r="2.5" hidden />
+          </svg>
+          <span class="frame-rate-scale frame-rate-scale-top">120</span>
+          <span class="frame-rate-scale frame-rate-scale-bottom">0</span>
+        </div>
+        <div class="frame-rate-caption">
+          <span id="frame-rate-target">No target</span>
+          <span>Smoothed · 90 frames</span>
+        </div>
+      </section>
+
       <label for="cloud-preset">Hosted scene</label>
       <select id="cloud-preset">
         <option value="">Custom…</option>

@@ -128,6 +128,152 @@ button.ghost:disabled {
   color: #7d8e9c;
 }
 
+.frame-rate-card {
+  margin-top: 14px;
+  padding: 11px 12px 9px;
+  border: 1px solid rgba(132, 194, 233, 0.16);
+  border-radius: 9px;
+  background: rgba(8, 17, 24, 0.72);
+}
+
+.frame-rate-heading,
+.frame-rate-caption {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.frame-rate-heading h2 {
+  margin: 0;
+  color: #91a5b5;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.frame-rate-values {
+  display: flex;
+  align-items: baseline;
+  gap: 13px;
+}
+
+.frame-rate-values > span {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.frame-rate-values output {
+  color: #8ce7bb;
+  font:
+    700 13px/1 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.frame-rate-values small {
+  color: #657a8a;
+  font-size: 9px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+#frame-rate-filtered-value {
+  color: #a9d5ef;
+}
+
+.frame-rate-plot {
+  position: relative;
+  height: 80px;
+  margin-top: 9px;
+  overflow: hidden;
+  border-radius: 5px;
+  background:
+    linear-gradient(180deg, rgba(67, 184, 131, 0.035), transparent), #091119;
+}
+
+#frame-rate-chart {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.frame-rate-grid {
+  stroke: rgba(255, 255, 255, 0.075);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+#frame-rate-area {
+  fill: rgba(79, 205, 146, 0.12);
+}
+
+#frame-rate-line {
+  fill: none;
+  stroke: #50c995;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+#frame-rate-target-line {
+  stroke: rgba(255, 202, 118, 0.78);
+  stroke-dasharray: 4 4;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+#frame-rate-latest {
+  fill: #a6f1ce;
+  stroke: #0c141c;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+#frame-rate-target-line[hidden],
+#frame-rate-latest[hidden] {
+  display: none;
+}
+
+.frame-rate-scale {
+  position: absolute;
+  left: 5px;
+  color: rgba(174, 189, 202, 0.52);
+  font:
+    9px/1 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  pointer-events: none;
+}
+
+.frame-rate-scale-top {
+  top: 4px;
+}
+
+.frame-rate-scale-bottom {
+  bottom: 4px;
+}
+
+.frame-rate-caption {
+  margin-top: 7px;
+  color: #657a8a;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+#frame-rate-target {
+  color: #d9b578;
+}
+
 label {
   display: block;
   margin: 12px 0 6px;
