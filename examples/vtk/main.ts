@@ -509,6 +509,7 @@ const cameraView = (): CameraView => {
       camera.getCompositeProjectionMatrix(width / height, -1, 1),
     ),
     position: [...camera.getPosition()] as [number, number, number],
+    viewportWidthCssPx: width,
     viewportHeightCssPx: height,
   };
   return camera.getParallelProjection()

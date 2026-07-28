@@ -31,6 +31,11 @@ import {
   type MemoryPoolMember,
 } from "./memoryPool";
 import {
+  pickPointInTiles,
+  type PickTile,
+  type PointPickResult,
+} from "./picking";
+import {
   ROOT_KEY,
   childKeys,
   keyFromString,
@@ -292,6 +297,25 @@ export type LodController = {
   setActive(active: boolean): void;
   stats(): LodControllerStats;
   /**
+   * Read-only pick against exactly the tile set last handed to the consumer
+   * (`submitted` plus each tile's hierarchy bounds) — never `resident`, which
+   * can run ahead of a pending renderer flush, and never the decoded cache.
+   * The view and cursor are in the same coordinates `setCamera` takes:
+   * whatever space the tiles live in, with the cursor in renderer-local css
+   * pixels.
+   *
+   * Returns null when the query is unavailable — inactive or disposed
+   * controller, an invalid view, unusable viewport dimensions, a singular
+   * view-projection, or a non-finite cursor. A valid sweep that supports
+   * nothing is `{status: "miss"}`, never null: only an explicit miss tells a
+   * caller its fallback is authorized.
+   */
+  pickPoint(
+    view: CameraView,
+    cursorXCssPx: number,
+    cursorYCssPx: number,
+  ): PointPickResult | null;
+  /**
    * Diagnostics: the tiles held on screen, and the set last handed to the
    * consumer. A pending flush is the only reason they differ, so once the
    * controller is quiet they agree — and `submitted` is then exactly what the
@@ -446,6 +470,7 @@ const isFiniteView = (view: CameraView): boolean => {
     scalar === undefined ||
     !finitePositive(scalar) ||
     (view.projection === "perspective" && view.fovY >= Math.PI) ||
+    !finitePositive(view.viewportWidthCssPx) ||
     !finitePositive(view.viewportHeightCssPx)
   ) {
     return false;
@@ -1527,6 +1552,7 @@ export const createLodController = (
     if (
       a.projection !== b.projection ||
       projectionScalar(a) !== projectionScalar(b) ||
+      a.viewportWidthCssPx !== b.viewportWidthCssPx ||
       a.viewportHeightCssPx !== b.viewportHeightCssPx ||
       a.position[0] !== b.position[0] ||
       a.position[1] !== b.position[1] ||
@@ -1720,6 +1746,21 @@ export const createLodController = (
           targetUndecodedTiles,
         },
       };
+    },
+
+    pickPoint(pickView, cursorXCssPx, cursorYCssPx) {
+      if (disposed || !active || !isFiniteView(pickView)) return null;
+      const tiles: PickTile[] = [];
+      for (const [keyString, tile] of submitted) {
+        if (tile.pointCount === 0) continue;
+        tiles.push({
+          origin: tile.origin,
+          positions: tile.positions,
+          pointCount: tile.pointCount,
+          bounds: hierarchy.get(keyString)?.bounds,
+        });
+      }
+      return pickPointInTiles(pickView, cursorXCssPx, cursorYCssPx, tiles);
     },
 
     activeKeys: () => ({

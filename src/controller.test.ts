@@ -43,6 +43,7 @@ const VIEW: PerspectiveCameraView = {
   viewProj: IDENTITY,
   position: [0, 0, 0],
   fovY: Math.PI / 2,
+  viewportWidthCssPx: 100,
   viewportHeightCssPx: 100,
 };
 
@@ -52,6 +53,7 @@ const ORTHOGRAPHIC_VIEW: OrthographicCameraView = {
   viewProj: IDENTITY,
   position: [0, 0, 0],
   parallelScale: 1,
+  viewportWidthCssPx: 100,
   viewportHeightCssPx: 100,
 };
 
@@ -2614,6 +2616,8 @@ describe("createLodController — numeric configuration", () => {
       { ...VIEW, fovY: 0 },
       // A field of view of a half-turn or more has no usable tangent.
       { ...VIEW, fovY: Math.PI },
+      { ...VIEW, viewportWidthCssPx: 0 },
+      { ...VIEW, viewportWidthCssPx: Number.NaN },
       { ...VIEW, viewportHeightCssPx: 0 },
       { ...VIEW, viewportHeightCssPx: Number.NaN },
       { ...VIEW, viewProj: [...IDENTITY.slice(0, 15), Number.NaN] },
@@ -2652,6 +2656,113 @@ describe("createLodController — numeric configuration", () => {
     expect(stats.memoryCeilingPoints).toBe(0);
     expect(stats.memoryBudgetBytes).toBe(0);
     expect(loadCalls).toEqual([]);
+    controller.dispose();
+  });
+});
+
+describe("createLodController — pickPoint", () => {
+  // Every fake tile carries zeroed positions at the world origin, which the
+  // identity view-projection puts at the viewport center: css (50, 50). The
+  // cursor ray there runs from (0, 0, -1) along +z, so the support depth of
+  // the origin is 1 and the picked point is the origin itself.
+  const pickCenter = (controller: LodController, view: CameraView = VIEW) =>
+    controller.pickPoint(view, 50, 50);
+
+  it("hits over the submitted tile set, on the cursor ray", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await bootAndLand(controller, deferred);
+
+    const result = pickCenter(controller);
+    expect(result?.status).toBe("hit");
+    if (result?.status !== "hit") throw new Error("unreachable");
+    expect(result.pointOnRay[0]).toBeCloseTo(0);
+    expect(result.pointOnRay[1]).toBeCloseTo(0);
+    expect(result.pointOnRay[2]).toBeCloseTo(0);
+    expect(result.distancePx).toBeCloseTo(0);
+    controller.dispose();
+  });
+
+  it("answers miss, not null, when a valid sweep supports nothing", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    // Nothing submitted yet: a valid query over an empty set is a miss.
+    await settle();
+    expect(pickCenter(controller)).toEqual({ status: "miss" });
+
+    await bootAndLand(controller, deferred);
+    // A cursor far outside every bucket misses too.
+    expect(controller.pickPoint(VIEW, 550, 50)).toEqual({ status: "miss" });
+    controller.dispose();
+  });
+
+  it("does not pick resident tiles ahead of the renderer flush", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+
+    deferred.get("0-0-0-0")!.resolve();
+    // One turn: the payload claims residency, but the batched flush that
+    // hands it to the renderer is still queued behind this continuation.
+    await Promise.resolve();
+    expect(controller.activeKeys().resident).toContain("0-0-0-0");
+    expect(controller.activeKeys().submitted).toEqual([]);
+    // What the renderer is not yet drawing must not answer a pick.
+    expect(pickCenter(controller)).toEqual({ status: "miss" });
+
+    await settle();
+    expect(controller.activeKeys().submitted).toContain("0-0-0-0");
+    expect(pickCenter(controller)?.status).toBe("hit");
+    controller.dispose();
+  });
+
+  it("does not pick tiles that fell back to the decoded cache", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await bootAndLand(controller, deferred);
+    expect(pickCenter(controller)?.status).toBe("hit");
+
+    controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
+    await settle();
+    expect(controller.stats().cachedTiles).toBeGreaterThan(0);
+    expect(controller.stats().residentTiles).toBe(0);
+    // The payloads are still decoded, but nothing is rendered: the query
+    // view still looks straight at them, and must miss anyway.
+    expect(pickCenter(controller)).toEqual({ status: "miss" });
+    controller.dispose();
+  });
+
+  it("is unavailable while inactive and again after dispose", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await bootAndLand(controller, deferred);
+
+    controller.setActive(false);
+    await settle();
+    expect(pickCenter(controller)).toBeNull();
+
+    controller.setActive(true);
+    await settle();
+    expect(pickCenter(controller)?.status).toBe("hit");
+
+    controller.dispose();
+    expect(pickCenter(controller)).toBeNull();
+  });
+
+  it("is unavailable for an invalid view or cursor, never a miss", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await bootAndLand(controller, deferred);
+
+    const unusable: CameraView[] = [
+      { ...VIEW, viewportWidthCssPx: 0 },
+      { ...VIEW, viewportHeightCssPx: Number.NaN },
+      { ...VIEW, viewProj: [...IDENTITY.slice(0, 15), Number.NaN] },
+      // All-finite but singular: the cursor ray cannot be built.
+      { ...VIEW, viewProj: IDENTITY.map(() => 0) },
+      { ...VIEW, position: [Number.NaN, 0, 0] },
+    ];
+    for (const view of unusable) {
+      expect(pickCenter(controller, view)).toBeNull();
+    }
+    expect(controller.pickPoint(VIEW, Number.NaN, 50)).toBeNull();
+    expect(controller.pickPoint(VIEW, 50, Number.NEGATIVE_INFINITY)).toBeNull();
     controller.dispose();
   });
 });

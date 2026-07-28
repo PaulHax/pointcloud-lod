@@ -5,6 +5,7 @@
  * any renderer, worker, or test without a GL context.
  */
 
+import { finitePositive } from "./numeric";
 import type { Bounds, Vec3 } from "./octree";
 
 /** Column-major 4x4 matrix, OpenGL layout (translation in indices 12..14). */
@@ -15,6 +16,8 @@ type CameraViewCommon = {
   readonly viewProj: Mat16;
   /** Camera position in world coordinates. */
   readonly position: Vec3;
+  /** Viewport width in CSS pixels. */
+  readonly viewportWidthCssPx: number;
   /** Viewport height in CSS pixels. */
   readonly viewportHeightCssPx: number;
 };
@@ -151,3 +154,195 @@ export const nodeScreenSpaceError = (
         view.viewportHeightCssPx,
         view.fovY,
       );
+
+/**
+ * A homogeneous w at or below this is unusable: the point sits at or behind
+ * the projective horizon and dividing by w yields nothing meaningful.
+ */
+export const CLIP_W_EPSILON = 1e-9;
+
+export type ProjectedPointCssPx = {
+  /** Horizontal css-pixel position, origin at the viewport's left edge. */
+  readonly xCssPx: number;
+  /** Vertical css-pixel position, origin at the viewport's top edge. */
+  readonly yCssPx: number;
+  /** Normalized device z (`clip.z / clip.w`), for near/far interval tests. */
+  readonly ndcZ: number;
+};
+
+/**
+ * Project a world point through a column-major view-projection matrix into
+ * css-pixel viewport coordinates (y down). Returns null when the viewport
+ * dimensions are unusable, any clip coordinate is non-finite, or the
+ * homogeneous w is at or below `CLIP_W_EPSILON` (at/behind the camera plane).
+ */
+export const projectPointToCssPx = (
+  viewProj: Mat16,
+  point: Vec3,
+  viewportWidthCssPx: number,
+  viewportHeightCssPx: number,
+): ProjectedPointCssPx | null => {
+  if (
+    !finitePositive(viewportWidthCssPx) ||
+    !finitePositive(viewportHeightCssPx)
+  ) {
+    return null;
+  }
+  const m = viewProj;
+  const [x, y, z] = point;
+  const clipX = m[0]! * x + m[4]! * y + m[8]! * z + m[12]!;
+  const clipY = m[1]! * x + m[5]! * y + m[9]! * z + m[13]!;
+  const clipZ = m[2]! * x + m[6]! * y + m[10]! * z + m[14]!;
+  const clipW = m[3]! * x + m[7]! * y + m[11]! * z + m[15]!;
+  if (
+    !Number.isFinite(clipX) ||
+    !Number.isFinite(clipY) ||
+    !Number.isFinite(clipZ) ||
+    !Number.isFinite(clipW) ||
+    clipW <= CLIP_W_EPSILON
+  ) {
+    return null;
+  }
+  return {
+    xCssPx: ((clipX / clipW + 1) / 2) * viewportWidthCssPx,
+    yCssPx: ((1 - clipY / clipW) / 2) * viewportHeightCssPx,
+    ndcZ: clipZ / clipW,
+  };
+};
+
+export type CursorRay = {
+  /** The cursor unprojected onto the near plane. */
+  readonly origin: Vec3;
+  /** Unit direction from the near-plane point towards the far plane. */
+  readonly direction: Vec3;
+};
+
+/** Cofactor inverse of a column-major 4x4; null when singular or non-finite. */
+const invert4 = (m: Mat16): number[] | null => {
+  const a00 = m[0]!,
+    a01 = m[1]!,
+    a02 = m[2]!,
+    a03 = m[3]!;
+  const a10 = m[4]!,
+    a11 = m[5]!,
+    a12 = m[6]!,
+    a13 = m[7]!;
+  const a20 = m[8]!,
+    a21 = m[9]!,
+    a22 = m[10]!,
+    a23 = m[11]!;
+  const a30 = m[12]!,
+    a31 = m[13]!,
+    a32 = m[14]!,
+    a33 = m[15]!;
+
+  const b00 = a00 * a11 - a01 * a10;
+  const b01 = a00 * a12 - a02 * a10;
+  const b02 = a00 * a13 - a03 * a10;
+  const b03 = a01 * a12 - a02 * a11;
+  const b04 = a01 * a13 - a03 * a11;
+  const b05 = a02 * a13 - a03 * a12;
+  const b06 = a20 * a31 - a21 * a30;
+  const b07 = a20 * a32 - a22 * a30;
+  const b08 = a20 * a33 - a23 * a30;
+  const b09 = a21 * a32 - a22 * a31;
+  const b10 = a21 * a33 - a23 * a31;
+  const b11 = a22 * a33 - a23 * a32;
+
+  const det =
+    b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+  if (!Number.isFinite(det) || det === 0) return null;
+  const d = 1 / det;
+
+  const inverse = [
+    (a11 * b11 - a12 * b10 + a13 * b09) * d,
+    (a02 * b10 - a01 * b11 - a03 * b09) * d,
+    (a31 * b05 - a32 * b04 + a33 * b03) * d,
+    (a22 * b04 - a21 * b05 - a23 * b03) * d,
+    (a12 * b08 - a10 * b11 - a13 * b07) * d,
+    (a00 * b11 - a02 * b08 + a03 * b07) * d,
+    (a32 * b02 - a30 * b05 - a33 * b01) * d,
+    (a20 * b05 - a22 * b02 + a23 * b01) * d,
+    (a10 * b10 - a11 * b08 + a13 * b06) * d,
+    (a01 * b08 - a00 * b10 - a03 * b06) * d,
+    (a30 * b04 - a31 * b02 + a33 * b00) * d,
+    (a21 * b02 - a20 * b04 - a23 * b00) * d,
+    (a11 * b07 - a10 * b09 - a12 * b06) * d,
+    (a00 * b09 - a01 * b07 + a02 * b06) * d,
+    (a31 * b01 - a30 * b03 - a32 * b00) * d,
+    (a20 * b03 - a21 * b01 + a22 * b00) * d,
+  ];
+  for (const value of inverse) {
+    if (!Number.isFinite(value)) return null;
+  }
+  return inverse;
+};
+
+/** `inverse * [ndc, 1]`, homogenized; null when w collapses or goes wild. */
+const unprojectNdc = (
+  inverse: readonly number[],
+  ndcX: number,
+  ndcY: number,
+  ndcZ: number,
+): Vec3 | null => {
+  const x =
+    inverse[0]! * ndcX + inverse[4]! * ndcY + inverse[8]! * ndcZ + inverse[12]!;
+  const y =
+    inverse[1]! * ndcX + inverse[5]! * ndcY + inverse[9]! * ndcZ + inverse[13]!;
+  const z =
+    inverse[2]! * ndcX +
+    inverse[6]! * ndcY +
+    inverse[10]! * ndcZ +
+    inverse[14]!;
+  const w =
+    inverse[3]! * ndcX +
+    inverse[7]! * ndcY +
+    inverse[11]! * ndcZ +
+    inverse[15]!;
+  if (!Number.isFinite(w) || Math.abs(w) <= CLIP_W_EPSILON) return null;
+  const point: Vec3 = [x / w, y / w, z / w];
+  for (const coordinate of point) {
+    if (!Number.isFinite(coordinate)) return null;
+  }
+  return point;
+};
+
+/**
+ * The world-space ray under a css-pixel cursor: invert the view-projection,
+ * unproject the cursor at NDC z = -1 and z = +1, and normalize `far - near`.
+ * One definition serves perspective and orthographic views alike. Returns
+ * null when the matrix is singular or non-finite, the viewport dimensions are
+ * unusable, or the cursor is non-finite.
+ */
+export const cursorRay = (
+  viewProj: Mat16,
+  cursorXCssPx: number,
+  cursorYCssPx: number,
+  viewportWidthCssPx: number,
+  viewportHeightCssPx: number,
+): CursorRay | null => {
+  if (
+    !Number.isFinite(cursorXCssPx) ||
+    !Number.isFinite(cursorYCssPx) ||
+    !finitePositive(viewportWidthCssPx) ||
+    !finitePositive(viewportHeightCssPx)
+  ) {
+    return null;
+  }
+  const inverse = invert4(viewProj);
+  if (inverse === null) return null;
+  const ndcX = (2 * cursorXCssPx) / viewportWidthCssPx - 1;
+  const ndcY = 1 - (2 * cursorYCssPx) / viewportHeightCssPx;
+  const near = unprojectNdc(inverse, ndcX, ndcY, -1);
+  const far = unprojectNdc(inverse, ndcX, ndcY, 1);
+  if (near === null || far === null) return null;
+  const dx = far[0] - near[0];
+  const dy = far[1] - near[1];
+  const dz = far[2] - near[2];
+  const length = Math.hypot(dx, dy, dz);
+  if (!Number.isFinite(length) || length <= 0) return null;
+  return {
+    origin: near,
+    direction: [dx / length, dy / length, dz / length],
+  };
+};

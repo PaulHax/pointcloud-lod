@@ -423,6 +423,29 @@ member's share is sized against memory another member owns. The memory ceiling
 stays authoritative; `maxBudget` is an optional policy, diagnostics, and
 hardware-safety bound, and omitting it leaves memory as the only ceiling.
 
+## Picking
+
+`controller.pickPoint(view, cursorXCssPx, cursorYCssPx)` resolves a cursor to
+a point **on the cursor ray** at the support depth of the frontmost rendered
+sample near the cursor — it never snaps to the vertex itself. The query runs
+only over the tile set last submitted to the renderer (WYSIWYG: what is not
+drawn cannot be picked), and answers
+
+- `{ status: "hit", pointOnRay, distancePx }` for a supported depth,
+- `{ status: "miss" }` for a valid sweep that found no sample within any
+  pick bucket, or
+- `null` when the query is unavailable (inactive/disposed controller, invalid
+  camera or viewport, singular view-projection, non-finite cursor) — never to
+  be conflated with a miss.
+
+Candidates gather in escalating css-pixel buckets around the cursor; the
+smallest non-empty bucket wins, then its minimum-depth point. The bucket radii
+(`PICK_RADII_CSS_PX` = `DEFAULT_PICK_PIXEL_RADIUS` ×
+`DEFAULT_PICK_PIXEL_RADIUS_MULTIPLIERS` = 10 × (1, 2, 10) css px) mirror
+`DEFAULT_PICK_PIXEL_RADIUS` and `DEFAULT_PICK_PIXEL_RADIUS_MULTIPLIERS` in
+telesculptor-web's `scene/ray_depth.py`; keep the two definitions in lockstep
+so a pick one side accepts is never the other side's miss.
+
 ## Architecture
 
 ```

@@ -34,6 +34,17 @@ export {
   type Plane,
 } from "./camera";
 
+// The picking machinery itself (ray building, prefilter, sweep) is internal:
+// the public query is `LodController.pickPoint`, and only its result shape and
+// the bucket radii — mirrored from telesculptor-web's `scene/ray_depth.py` —
+// are contract.
+export {
+  DEFAULT_PICK_PIXEL_RADIUS,
+  DEFAULT_PICK_PIXEL_RADIUS_MULTIPLIERS,
+  PICK_RADII_CSS_PX,
+  type PointPickResult,
+} from "./picking";
+
 export {
   createLodController,
   type LodController,

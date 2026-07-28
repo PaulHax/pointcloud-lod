@@ -582,6 +582,7 @@ const cameraView = (viewProj: number[]): PerspectiveCameraView => ({
   viewProj,
   position: [0, 0, 0],
   fovY: Math.PI / 2,
+  viewportWidthCssPx: 100,
   viewportHeightCssPx: 100,
 });
 

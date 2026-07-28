@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   boundsIntersectsFrustum,
+  cursorRay,
   distanceToBounds,
   frustumPlanes,
   nodeScreenSpaceError,
   orthographicScreenSpaceError,
   perspectiveScreenSpaceError,
+  projectPointToCssPx,
   type OrthographicCameraView,
   type PerspectiveCameraView,
 } from "./camera";
@@ -251,6 +253,7 @@ const perspectiveView: PerspectiveCameraView = {
   viewProj: IDENTITY,
   position: [0, 0, 10.5],
   fovY: Math.PI / 2,
+  viewportWidthCssPx: 1000,
   viewportHeightCssPx: 1000,
 };
 
@@ -259,6 +262,7 @@ const orthographicView: OrthographicCameraView = {
   viewProj: IDENTITY,
   position: [0, 0, 10.5],
   parallelScale: 10,
+  viewportWidthCssPx: 1000,
   viewportHeightCssPx: 1000,
 };
 
@@ -296,5 +300,121 @@ describe("nodeScreenSpaceError", () => {
       parallelScale: 2.5,
     });
     expect(zoomed).toBeCloseTo(wide * 4);
+  });
+});
+
+describe("projectPointToCssPx", () => {
+  it("maps NDC into css pixels with y down, using both viewport dimensions", () => {
+    // Identity view-projection: world coordinates are NDC directly.
+    const center = projectPointToCssPx(IDENTITY, [0, 0, 0], 200, 100);
+    expect(center).not.toBeNull();
+    expect(center!.xCssPx).toBeCloseTo(100);
+    expect(center!.yCssPx).toBeCloseTo(50);
+    expect(center!.ndcZ).toBeCloseTo(0);
+
+    // +x is right, +y is up on screen — so css y decreases as world y grows.
+    const offset = projectPointToCssPx(IDENTITY, [0.5, 0.5, 0.25], 200, 100);
+    expect(offset!.xCssPx).toBeCloseTo(150);
+    expect(offset!.yCssPx).toBeCloseTo(25);
+    expect(offset!.ndcZ).toBeCloseTo(0.25);
+  });
+
+  it("projects an off-center point through a perspective matrix", () => {
+    // fov 90°, aspect 2: at z = -10 the half-extents are 20 x 10.
+    const m = perspective(Math.PI / 2, 2, 0.1, 100);
+    const projected = projectPointToCssPx(m, [10, 5, -10], 800, 400);
+    expect(projected!.xCssPx).toBeCloseTo(600);
+    expect(projected!.yCssPx).toBeCloseTo(100);
+  });
+
+  it("refuses a point at or behind the camera plane", () => {
+    const m = perspective(Math.PI / 2, 2, 0.1, 100);
+    expect(projectPointToCssPx(m, [0, 0, 10], 800, 400)).toBeNull();
+    expect(projectPointToCssPx(m, [0, 0, 0], 800, 400)).toBeNull();
+  });
+
+  it("refuses unusable viewport dimensions and non-finite input", () => {
+    expect(projectPointToCssPx(IDENTITY, [0, 0, 0], 0, 100)).toBeNull();
+    expect(
+      projectPointToCssPx(IDENTITY, [0, 0, 0], 200, Number.NaN),
+    ).toBeNull();
+    expect(projectPointToCssPx(IDENTITY, [0, 0, 0], -200, 100)).toBeNull();
+    expect(
+      projectPointToCssPx(IDENTITY, [Number.NaN, 0, 0], 200, 100),
+    ).toBeNull();
+    const broken = [...IDENTITY.slice(0, 15), Number.NaN];
+    expect(projectPointToCssPx(broken, [0, 0, 0], 200, 100)).toBeNull();
+  });
+});
+
+describe("cursorRay", () => {
+  const roundTrips = (
+    m: number[],
+    cursor: [number, number],
+    width: number,
+    height: number,
+  ): void => {
+    const ray = cursorRay(m, cursor[0], cursor[1], width, height);
+    expect(ray).not.toBeNull();
+    expect(Math.hypot(...ray!.direction)).toBeCloseTo(1);
+    // Every point along the ray projects back onto the cursor.
+    for (const t of [1, 5]) {
+      const point: [number, number, number] = [
+        ray!.origin[0] + ray!.direction[0] * t,
+        ray!.origin[1] + ray!.direction[1] * t,
+        ray!.origin[2] + ray!.direction[2] * t,
+      ];
+      const projected = projectPointToCssPx(m, point, width, height);
+      expect(projected).not.toBeNull();
+      expect(projected!.xCssPx).toBeCloseTo(cursor[0]);
+      expect(projected!.yCssPx).toBeCloseTo(cursor[1]);
+    }
+  };
+
+  it("builds a centered perspective ray in a non-square viewport", () => {
+    const m = perspective(Math.PI / 2, 2, 0.1, 100);
+    const ray = cursorRay(m, 400, 200, 800, 400);
+    expect(ray!.origin[0]).toBeCloseTo(0);
+    expect(ray!.origin[1]).toBeCloseTo(0);
+    expect(ray!.origin[2]).toBeCloseTo(-0.1); // near plane
+    expect(ray!.direction[0]).toBeCloseTo(0);
+    expect(ray!.direction[1]).toBeCloseTo(0);
+    expect(ray!.direction[2]).toBeCloseTo(-1);
+  });
+
+  it("round-trips off-center perspective cursors", () => {
+    const m = perspective(Math.PI / 2, 2, 0.1, 100);
+    roundTrips(m, [600, 100], 800, 400);
+    roundTrips(m, [37, 311], 800, 400);
+  });
+
+  it("builds parallel orthographic rays whose origin tracks the cursor", () => {
+    // Half-height 10, aspect 2, near 1: the viewport spans x ±20, y ±10.
+    const m = orthographic(10, 2, 1, 100);
+    const ray = cursorRay(m, 600, 100, 800, 400);
+    expect(ray!.origin[0]).toBeCloseTo(10);
+    expect(ray!.origin[1]).toBeCloseTo(5);
+    expect(ray!.origin[2]).toBeCloseTo(-1); // near plane
+    expect(ray!.direction[0]).toBeCloseTo(0);
+    expect(ray!.direction[1]).toBeCloseTo(0);
+    expect(ray!.direction[2]).toBeCloseTo(-1);
+    roundTrips(m, [600, 100], 800, 400);
+  });
+
+  it("refuses singular and non-finite matrices", () => {
+    const singular = IDENTITY.map(() => 0);
+    expect(cursorRay(singular, 10, 10, 100, 100)).toBeNull();
+    const broken = [...IDENTITY.slice(0, 15), Number.NaN];
+    expect(cursorRay(broken, 10, 10, 100, 100)).toBeNull();
+  });
+
+  it("refuses unusable viewport dimensions and non-finite cursors", () => {
+    expect(cursorRay(IDENTITY, 10, 10, 0, 100)).toBeNull();
+    expect(cursorRay(IDENTITY, 10, 10, 100, Number.NaN)).toBeNull();
+    expect(cursorRay(IDENTITY, 10, 10, -100, 100)).toBeNull();
+    expect(cursorRay(IDENTITY, Number.NaN, 10, 100, 100)).toBeNull();
+    expect(
+      cursorRay(IDENTITY, 10, Number.POSITIVE_INFINITY, 100, 100),
+    ).toBeNull();
   });
 });
