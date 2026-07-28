@@ -1,0 +1,6 @@
+[build]
+command = "source ./vtkjs-fork.env && vtk_js_dir=\"$(mktemp -d)\" && git clone --filter=blob:none \"$VTKJS_FORK_REPO\" \"$vtk_js_dir\" && git -C \"$vtk_js_dir\" checkout \"$VTKJS_FORK_COMMIT\" && npm --prefix \"$vtk_js_dir\" ci && npm --prefix \"$vtk_js_dir\" run build:esm && VTK_JS_DIR=\"$vtk_js_dir/dist/esm\" npm run example:build"
+publish = "examples/vtk/dist"
+
+[build.environment]
+NODE_VERSION = "22.12.0"
