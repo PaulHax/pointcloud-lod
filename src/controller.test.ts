@@ -958,6 +958,33 @@ describe("createLodController — ready frontier and presentation", () => {
     controller.dispose();
   });
 
+  it("treats a viewport resize as a camera change, an identical view as none", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await bootAndLand(controller, deferred);
+    const generation = controller.stats().selection.generation;
+
+    // Hosts re-feed the camera every render: an identical view is a no-op.
+    controller.setCamera({ ...VIEW });
+    await settle();
+    expect(controller.stats().selection.generation).toBe(generation);
+
+    // A width-only resize changes the aspect and must re-run selection.
+    controller.setCamera({ ...VIEW, viewportWidthCssPx: 150 });
+    await settle();
+    const widened = controller.stats().selection.generation;
+    expect(widened).toBeGreaterThan(generation);
+
+    // So must a height-only resize on top of it.
+    controller.setCamera({
+      ...VIEW,
+      viewportWidthCssPx: 150,
+      viewportHeightCssPx: 150,
+    });
+    await settle();
+    expect(controller.stats().selection.generation).toBeGreaterThan(widened);
+    controller.dispose();
+  });
+
   it("keeps the ready parent terminal while a hierarchy page is unavailable", async () => {
     let resolveChildPage!: (infos: NodeInfo[]) => void;
     let resolveRootTile!: (tile: TileData) => void;

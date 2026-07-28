@@ -108,16 +108,18 @@ describe("pickPointInTiles", () => {
   });
 
   it("prefers the frontmost point of the smallest non-empty bucket", () => {
+    // The winner is neither the closest to the cursor nor the last swept:
+    // only minimum depth within the 10 px bucket selects it.
     const tiles = [
       tile([
-        [0.05, 0, 0.8], // 5 px, depth 1.8
-        [0.02, 0, -0.5], // 2 px, depth 0.5 — frontmost in the 10 px bucket
+        [0.05, 0, -0.5], // 5 px, depth 0.5 — frontmost in the 10 px bucket
+        [0.02, 0, 0.8], // 2 px, depth 1.8 — closer to the cursor, but behind
         [0.15, 0, -0.9], // 15 px, depth 0.1 — nearer, but outside the bucket
       ]),
     ];
     const result = hit(pickPointInTiles(VIEW, ...CENTER, tiles));
     expect(result.pointOnRay[2]).toBeCloseTo(-0.5);
-    expect(result.distancePx).toBeCloseTo(2, 4);
+    expect(result.distancePx).toBeCloseTo(5, 4);
   });
 
   it("escalates through the buckets and misses past the largest", () => {
@@ -186,6 +188,17 @@ describe("pickPointInTiles", () => {
     });
   });
 
+  it("expands the prefilter by the largest pick radius, not the smallest", () => {
+    // The bounds' screen AABB starts 50 px right of the cursor: past the 10
+    // and 20 px buckets, but the 100 px bucket can still catch the point, so
+    // the prefilter must keep the tile.
+    const offset = tile([[0.6, 0, 0]], {
+      bounds: { min: [0.5, -0.1, -0.1], max: [0.7, 0.1, 0.1] },
+    });
+    const result = hit(pickPointInTiles(VIEW, ...CENTER, [offset]));
+    expect(result.distancePx).toBeCloseTo(60, 4);
+  });
+
   it("keeps a tile with missing bounds conservatively pickable", () => {
     const unbounded = tile([[0, 0, 0]]);
     expect(
@@ -200,13 +213,17 @@ describe("pickPointInTiles", () => {
       viewportWidthCssPx: 800,
       viewportHeightCssPx: 400,
     };
-    // The +z corners sit behind the camera, so the screen AABB is unusable
-    // and the tile must stay a candidate.
-    const straddling = tile([[0, 0, -0.5]], {
-      bounds: { min: [-1, -1, -1], max: [1, 1, 1] },
+    // The z = 0.5 corners sit behind the camera, so no screen AABB is
+    // usable and the tile must stay a candidate outright. Dropping just the
+    // bad corners would keep the survivors' AABB, whose far z = -6 corners
+    // project 100+ px left of the cursor — perspective magnification puts
+    // this in-bounds point far outside their hull — and skip the tile.
+    const straddling = tile([[2.8, 0, -2]], {
+      bounds: { min: [2, -1, -6], max: [4, 1, 0.5] },
     });
-    const result = hit(pickPointInTiles(view, 400, 200, [straddling]));
-    expect(result.pointOnRay[2]).toBeCloseTo(-0.5);
+    const result = hit(pickPointInTiles(view, 680, 200, [straddling]));
+    expect(result.pointOnRay[2]).toBeCloseTo(-2);
+    expect(result.distancePx).toBeCloseTo(0);
   });
 
   it("returns miss, not null, for a valid sweep over nothing", () => {
@@ -258,15 +275,19 @@ describe("sweepPickPoints", () => {
 
 describe("cursorRay and the sweep agree on the pick model", () => {
   it("keeps the hit on the ray the same helpers built", () => {
+    // Independently known under the identity view: the center ray runs from
+    // (0, 0, -1) along +z, and the vertex at z = 0.5 supports depth 1.5.
     const ray = cursorRay(VIEW.viewProj, ...CENTER, 200, 100)!;
+    expect(ray.origin[0]).toBeCloseTo(0);
+    expect(ray.origin[1]).toBeCloseTo(0);
+    expect(ray.origin[2]).toBeCloseTo(-1);
+    expect(ray.direction[0]).toBeCloseTo(0);
+    expect(ray.direction[1]).toBeCloseTo(0);
+    expect(ray.direction[2]).toBeCloseTo(1);
     const result = hit(
       pickPointInTiles(VIEW, ...CENTER, [tile([[0.05, 0, 0.5]])]),
     );
-    const depth =
-      (result.pointOnRay[0] - ray.origin[0]) * ray.direction[0] +
-      (result.pointOnRay[1] - ray.origin[1]) * ray.direction[1] +
-      (result.pointOnRay[2] - ray.origin[2]) * ray.direction[2];
-    // pointOnRay reconstructs from origin + direction * depth exactly.
+    const depth = 1.5;
     for (const axis of [0, 1, 2] as const) {
       expect(result.pointOnRay[axis]).toBeCloseTo(
         ray.origin[axis] + ray.direction[axis] * depth,
