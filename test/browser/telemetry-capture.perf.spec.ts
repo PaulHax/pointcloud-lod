@@ -35,6 +35,18 @@ const cameraDistance = (camera: {
     camera.position[2]! - camera.focalPoint[2]!,
   );
 
+const cameraPitchDegrees = (camera: {
+  readonly position: readonly number[];
+  readonly focalPoint: readonly number[];
+}): number => {
+  const distance = cameraDistance(camera);
+  return (
+    (Math.asin((camera.position[2]! - camera.focalPoint[2]!) / distance) *
+      180) /
+    Math.PI
+  );
+};
+
 describe("hardware telemetry capture", { tags: ["perf"] }, () => {
   afterAll(async () => {
     await closeBrowser();
@@ -125,6 +137,34 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
         await session.markTelemetry("tight-zoom-settled");
         const afterTightZoom = await session.readCamera();
 
+        await session.markTelemetry("overview-start");
+        let overviewX = box.x + box.width / 2;
+        let overviewY = box.y + box.height / 2;
+        await session.page.mouse.move(overviewX, overviewY);
+        await session.page.mouse.down({ button: "right" });
+        for (let index = 0; index < 8; index += 1) {
+          overviewY -= 14;
+          await session.page.mouse.move(overviewX, overviewY);
+          await session.frame();
+        }
+        await session.page.mouse.up({ button: "right" });
+        await session.markTelemetry("horizontal-rotation-ended");
+
+        overviewX = box.x + box.width / 2;
+        overviewY = box.y + box.height / 2;
+        await session.page.mouse.move(overviewX, overviewY);
+        for (let index = 0; index < 40; index += 1) {
+          await session.page.mouse.wheel(0, 120);
+          await session.frame();
+        }
+        await session.markTelemetry("overview-gesture-ended");
+        await session.settle(300_000);
+        await session.render();
+        await session.frame();
+        await session.settle(300_000);
+        await session.markTelemetry("overview-settled");
+        const overviewCamera = await session.readCamera();
+
         await session.stopTelemetry();
         const trace = await session.telemetryTrace();
         await writeTrace(trace);
@@ -157,10 +197,18 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
             "marker:tight-zoom-start",
             "marker:tight-zoom-ended",
             "marker:tight-zoom-settled",
+            "marker:overview-start",
+            "marker:horizontal-rotation-ended",
+            "marker:overview-gesture-ended",
+            "marker:overview-settled",
           ]),
         );
         expect(cameraDistance(afterTightZoom)).toBeLessThan(
           cameraDistance(beforeTightZoom),
+        );
+        expect(Math.abs(cameraPitchDegrees(overviewCamera))).toBeLessThan(15);
+        expect(cameraDistance(overviewCamera)).toBeGreaterThan(
+          cameraDistance(beforeTightZoom) * 0.5,
         );
         expect(session.failures).toEqual([]);
 
