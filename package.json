@@ -50,6 +50,8 @@
     "example": "vite --config examples/vtk/vite.config.ts",
     "example:build": "vite build --config examples/vtk/vite.config.ts",
     "test:browser": "npm run example:build && vitest run --config vitest.browser.config.ts",
+    "test:perf": "npm run example:build && vitest run --config vitest.perf.config.ts",
+    "telemetry:capture": "POINTCLOUD_LOD_BROWSER_GPU=1 npm run test:perf -- test/browser/telemetry-capture.perf.spec.ts",
     "verify:chain": "node scripts/verifyChain.mjs",
     "prepare": "npm run build"
   },

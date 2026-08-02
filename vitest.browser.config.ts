@@ -12,6 +12,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: ["test/browser/**/*.spec.ts"],
+    exclude: ["test/browser/**/*.perf.spec.ts"],
     fileParallelism: false,
     // Streaming a cloud through SwiftShader is slow; the default 5 s expires
     // during an ordinary load. A real cloud is slower again by orders of

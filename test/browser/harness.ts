@@ -32,6 +32,11 @@ import {
 import type { LodControllerStats } from "../../src/controller";
 import type { RendererAdapterStats } from "../../src/rendererAdapter";
 import type { ViewGovernorStats } from "../../src/viewGovernor";
+import type {
+  TelemetryEnvironment,
+  TelemetrySummary,
+  TelemetryTrace,
+} from "../../examples/vtk/telemetry";
 import { startStaticServer, type StaticServer } from "./server";
 
 /** Failure messages in this suite carry the whole sample, pretty-printed. */
@@ -210,7 +215,15 @@ export type ExampleSession = {
   setVisible(visible: boolean): Promise<void>;
   setActive(active: boolean): Promise<void>;
   setDevicePixelRatio(ratio: number): Promise<void>;
+  setDensityFraction(fraction: number): Promise<void>;
   setSyntheticFrameMs(ms: number | null): Promise<void>;
+  startTelemetry(): Promise<void>;
+  stopTelemetry(): Promise<void>;
+  clearTelemetry(): Promise<void>;
+  markTelemetry(label: string): Promise<void>;
+  telemetryEnvironment(): Promise<TelemetryEnvironment>;
+  telemetrySummary(): Promise<TelemetrySummary>;
+  telemetryTrace(): Promise<TelemetryTrace>;
   render(): Promise<void>;
   dispose(): Promise<void>;
   /** Poll until `predicate(stats)` holds, or fail with the last stats seen. */
@@ -354,7 +367,7 @@ export const SETTLE_QUIET_MS = 400;
  * positional path `cloudsUnderTest()` gives a supplied cloud.
  */
 export const openExample = async (
-  options: { cloud?: string } = {},
+  options: { cloud?: string; telemetry?: boolean } = {},
 ): Promise<ExampleSession> => {
   const cloud = options.cloud ?? FIXTURE_URL_PATH;
   const server: StaticServer = await startStaticServer(
@@ -393,6 +406,7 @@ export const openExample = async (
   });
 
   const query = new URLSearchParams({ url: cloud });
+  if (options.telemetry) query.set("telemetry", "1");
   await page.goto(`${server.origin}/?${query}`, { waitUntil: "load" });
   await page.waitForFunction(
     () => (window as never as ExampleWindow).pointCloudExample !== undefined,
@@ -578,6 +592,14 @@ export const openExample = async (
           ).pointCloudExample.setDevicePixelRatio(value),
         ratio,
       ),
+    setDensityFraction: (fraction) =>
+      page.evaluate(
+        (value) =>
+          (
+            window as never as ExampleWindow
+          ).pointCloudExample.setDensityFraction(value),
+        fraction,
+      ),
     setSyntheticFrameMs: (ms) =>
       page.evaluate(
         (value) =>
@@ -585,6 +607,42 @@ export const openExample = async (
             window as never as ExampleWindow
           ).pointCloudExample.setSyntheticFrameMs(value),
         ms,
+      ),
+    startTelemetry: () =>
+      page.evaluate(() =>
+        (window as never as ExampleWindow).pointCloudExample.telemetry.start(),
+      ),
+    stopTelemetry: () =>
+      page.evaluate(() =>
+        (window as never as ExampleWindow).pointCloudExample.telemetry.stop(),
+      ),
+    clearTelemetry: () =>
+      page.evaluate(() =>
+        (window as never as ExampleWindow).pointCloudExample.telemetry.clear(),
+      ),
+    markTelemetry: (label) =>
+      page.evaluate(
+        (value) =>
+          (window as never as ExampleWindow).pointCloudExample.telemetry.mark(
+            value,
+          ),
+        label,
+      ),
+    telemetryEnvironment: () =>
+      page.evaluate(() =>
+        (
+          window as never as ExampleWindow
+        ).pointCloudExample.telemetry.environment(),
+      ),
+    telemetrySummary: () =>
+      page.evaluate(() =>
+        (
+          window as never as ExampleWindow
+        ).pointCloudExample.telemetry.summary(),
+      ),
+    telemetryTrace: () =>
+      page.evaluate(() =>
+        (window as never as ExampleWindow).pointCloudExample.telemetry.trace(),
       ),
     render: () =>
       page.evaluate(() =>
@@ -688,7 +746,19 @@ export type ExampleWindow = {
     setVisible(visible: boolean): void;
     setActive(active: boolean): void;
     setDevicePixelRatio(ratio: number): void;
+    setDensityFraction(fraction: number): void;
     setSyntheticFrameMs(ms: number | null): void;
+    telemetry: {
+      start(): void;
+      stop(): void;
+      clear(): void;
+      mark(label: string): void;
+      isActive(): boolean;
+      environment(): TelemetryEnvironment;
+      summary(): TelemetrySummary;
+      trace(): TelemetryTrace;
+      download(): void;
+    };
     needsFrame(): boolean;
     render(): void;
     dispose(): void;

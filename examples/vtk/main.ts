@@ -29,6 +29,7 @@ import {
   createCopcTileSource,
   createLodController,
   createViewGovernor,
+  keyToString,
   type CameraView,
   type LodController,
   type MotionReference,
@@ -43,6 +44,13 @@ import {
   createRendererAdapter,
   type RendererAdapter,
 } from "../../src/rendererAdapter";
+import {
+  captureTelemetryEnvironment,
+  createTelemetryRecorder,
+  type TelemetryEnvironment,
+  type TelemetryRecorder,
+  type TelemetryTrace,
+} from "./telemetry";
 
 const element = <T extends Element>(selector: string): T => {
   const found = document.querySelector<T>(selector);
@@ -80,6 +88,10 @@ const frameRateFilteredValue = element<HTMLOutputElement>(
 );
 const frameRateTargetLine = element<SVGLineElement>("#frame-rate-target-line");
 const frameRateTarget = element<HTMLElement>("#frame-rate-target");
+const telemetryStatus = element<HTMLOutputElement>("#telemetry-status");
+const telemetryToggle = element<HTMLButtonElement>("#telemetry-toggle");
+const telemetryDownload = element<HTMLButtonElement>("#telemetry-download");
+const telemetryClear = element<HTMLButtonElement>("#telemetry-clear");
 
 const fullScreen = vtkFullScreenRenderWindow.newInstance({
   rootContainer: viewer,
@@ -430,6 +442,18 @@ let loadGeneration = 0;
 let fixedPointDiameterCssPx = 2;
 let autoPointScale = 0.5;
 
+const telemetryEnvironment = (): TelemetryEnvironment =>
+  captureTelemetryEnvironment(
+    fullScreen.getApiSpecificRenderWindow().get3DContext() as
+      | WebGLRenderingContext
+      | WebGL2RenderingContext
+      | null,
+  );
+
+const telemetry: TelemetryRecorder = createTelemetryRecorder({
+  environment: telemetryEnvironment,
+});
+
 const setMessage = (text: string, error = false): void => {
   message.textContent = text;
   message.classList.toggle("error", error);
@@ -523,6 +547,45 @@ const cameraView = (): CameraView => {
         projection: "perspective",
         fovY: (camera.getViewAngle() * Math.PI) / 180,
       };
+};
+
+const telemetryState = (): unknown => ({
+  source: loadedName || null,
+  sourcePoints: loadedPointCount,
+  camera: {
+    selectionView: cameraView(),
+    focalPoint: [...camera.getFocalPoint()],
+    viewUp: [...camera.getViewUp()],
+  },
+  settings: {
+    budgetMode: budgetMode(),
+    fixedPointBudget: fixedPointBudget(),
+    interactionTargetMs: numberFrom(movingTargetInput),
+    stationaryTargetMs: numberFrom(stationaryTargetInput),
+    maximumPoints: numberFrom(maxPointsInput),
+    pointPresentation: pointPresentation(),
+    devicePixelRatio: currentDevicePixelRatio,
+  },
+  controller: controller?.stats() ?? null,
+  adapter: adapter?.stats() ?? null,
+  governor: governor?.stats() ?? null,
+});
+
+/** Reasons this presentation cannot describe steady-state rendering cost. */
+const frameContamination = (): string[] => {
+  const cloud = controller?.stats();
+  if (cloud === undefined) return ["no-controller"];
+  const reasons: string[] = [];
+  if (cloud.inFlight > 0 || cloud.queuedTiles > 0)
+    reasons.push("tile-work-wanted");
+  if (cloud.physicalTileOperations > 0) reasons.push("tile-work-physical");
+  if (cloud.hierarchyInFlight > 0 || cloud.queuedPages > 0)
+    reasons.push("hierarchy-work-wanted");
+  if (cloud.physicalHierarchyOperations > 0)
+    reasons.push("hierarchy-work-physical");
+  if (cloud.selection.targetUndecodedTiles > 0)
+    reasons.push("selected-tiles-undecoded");
+  return reasons;
 };
 
 // ---------------------------------------------------------------------------
@@ -649,6 +712,8 @@ const applyBudgetMode = (): void => {
     member ??= governor.register({
       id: loadedName || "cloud",
       setPointBudget: (budget) => controller?.setPointBudget(budget),
+      setDensityFraction: (fraction) =>
+        controller?.setDensityFraction(fraction),
     });
     return;
   }
@@ -812,12 +877,40 @@ const recordFrameRate = (vtkFrameMs: number): void => {
     const measuredVtkFrameMs = pendingVtkFrameMs;
     pendingVtkFrameMs = null;
     if (hostFrameMs === null || measuredVtkFrameMs === null) return;
+    const governorFrameMs = syntheticFrameMs ?? hostFrameMs;
+    const recording = telemetry.isActive();
+    const beforeAdjustment = recording
+      ? (governor?.stats().lastAdjustment ?? null)
+      : null;
+    if (recording) {
+      telemetry.recordFrame({
+        presentedAtMs: presentedAt,
+        rafIntervalMs: hostFrameMs,
+        vtkCpuMs: measuredVtkFrameMs,
+        governorFrameMs,
+        reportedToGovernor: governor !== null,
+        contamination: frameContamination(),
+        state: telemetryState(),
+      });
+    }
     governor?.recordHostFrame({
       // The presentation interval captures asynchronous rendering and missed
       // display frames. Browser tests can substitute a deterministic sample.
-      hostFrameMs: syntheticFrameMs ?? hostFrameMs,
+      hostFrameMs: governorFrameMs,
       vtkFrameMs: measuredVtkFrameMs,
     });
+    const afterAdjustment = recording
+      ? (governor?.stats().lastAdjustment ?? null)
+      : null;
+    if (
+      afterAdjustment !== null &&
+      (beforeAdjustment === null ||
+        afterAdjustment.atMs !== beforeAdjustment.atMs ||
+        afterAdjustment.reason !== beforeAdjustment.reason ||
+        afterAdjustment.toBudget !== beforeAdjustment.toBudget)
+    ) {
+      telemetry.recordState("governor-adjustment", telemetryState());
+    }
     if (governor?.needsFrame()) scheduleRender();
   });
 };
@@ -922,8 +1015,17 @@ const governorLines = (view: ViewGovernorStats): StatSection => {
           ? "not reported"
           : points(view.memoryCeilingPoints),
       ),
-      row("aggregate", points(view.aggregateBudget)),
-      row("cloud share", cloud ? points(cloud.effectiveBudget) : "no member"),
+      row("draw budget", points(view.aggregateBudget)),
+      row("resident budget", points(view.selectionBudget)),
+      row("cloud draw", cloud ? points(cloud.effectiveBudget) : "no member"),
+      row(
+        "cloud resident",
+        cloud ? points(cloud.effectiveSelectionBudget) : "no member",
+      ),
+      row(
+        "density",
+        cloud ? `${(cloud.densityFraction * 100).toFixed(0)}%` : "no member",
+      ),
       row("constraint", view.activeConstraint),
       row(
         "adjustment",
@@ -962,6 +1064,7 @@ const cloudLines = (): StatSection | null => {
         `${points(selection.targetPoints)} in ${selection.targetTiles} tiles`,
       ),
       row("point budget", points(cloud.pointBudget)),
+      row("density", `${(cloud.densityFraction * 100).toFixed(0)}%`),
       row("importance", selection.projectedImportance.toFixed(2)),
       row(
         "resident",
@@ -1030,6 +1133,24 @@ const renderStats = (sections: StatSection[]): void => {
   }
 };
 
+const updateTelemetryStatus = (): void => {
+  const summary = telemetry.summary();
+  const webgl = summary.environment.webgl;
+  const renderer =
+    webgl.unmaskedRenderer ?? webgl.renderer ?? "renderer unavailable";
+  const rendererKind = webgl.softwareRenderer ? "software" : "GPU";
+  const state = summary.active
+    ? `Recording ${summary.events.toLocaleString()} events`
+    : summary.events > 0
+      ? `Stopped ${summary.events.toLocaleString()} events`
+      : "Off";
+  telemetryStatus.value = `${state} · ${rendererKind}: ${renderer}`;
+  telemetryStatus.title = telemetryStatus.value;
+  telemetryToggle.textContent = summary.active ? "Stop" : "Start";
+  telemetryDownload.disabled = summary.events === 0;
+  telemetryClear.disabled = summary.events === 0;
+};
+
 const updateDiagnostics = (): void => {
   const view = governor?.stats() ?? null;
   updateFrameRateIdle(performance.now());
@@ -1042,6 +1163,7 @@ const updateDiagnostics = (): void => {
       cloudLines(),
     ].filter((section): section is StatSection => section !== null),
   );
+  if (telemetry.isActive()) updateTelemetryStatus();
 };
 
 // ---------------------------------------------------------------------------
@@ -1258,19 +1380,66 @@ const applyFraming = (): void => {
   clippingDirty = true;
 };
 
+const instrumentSource = (source: TileSource): TileSource => ({
+  metadata: () => source.metadata(),
+  async nodes(key, options) {
+    const finish = telemetry.isActive()
+      ? telemetry.beginWork("hierarchy", { key: keyToString(key) })
+      : null;
+    try {
+      const nodes = await source.nodes(key, options);
+      finish?.("ok", { entries: nodes.length });
+      return nodes;
+    } catch (error) {
+      finish?.(options?.signal?.aborted ? "cancelled" : "error", {
+        error: error instanceof Error ? error.name : "unknown",
+      });
+      throw error;
+    }
+  },
+  async loadTile(key, options) {
+    const finish = telemetry.isActive()
+      ? telemetry.beginWork("tile-load", { key: keyToString(key) })
+      : null;
+    try {
+      const tile = await source.loadTile(key, options);
+      finish?.("ok", {
+        points: tile.pointCount,
+        bytes: tile.positions.byteLength + (tile.rgb?.byteLength ?? 0),
+      });
+      return tile;
+    } catch (error) {
+      finish?.(options?.signal?.aborted ? "cancelled" : "error", {
+        error: error instanceof Error ? error.name : "unknown",
+      });
+      throw error;
+    }
+  },
+});
+
 const loadSource = async (
   name: string,
   sourcePromise: Promise<TileSource>,
 ): Promise<void> => {
   setMessage(`Reading ${name}…`);
+  const finishSourceOpen = telemetry.isActive()
+    ? telemetry.beginWork("source-open", { source: name })
+    : null;
   // Tear down first, then claim the generation: disposeCloud() bumps it to
   // cancel whatever was in flight, so a number taken before that call would be
   // stale the moment it was read.
   disposeCloud();
   const generation = ++loadGeneration;
   try {
-    const source = await sourcePromise;
-    if (generation !== loadGeneration) return;
+    const openedSource = await sourcePromise;
+    if (generation !== loadGeneration) {
+      finishSourceOpen?.("cancelled");
+      return;
+    }
+    finishSourceOpen?.("ok", {
+      points: openedSource.metadata().pointCount,
+    });
+    const source = instrumentSource(openedSource);
     await frameRoot(source);
     if (generation !== loadGeneration) return;
     loadedName = name;
@@ -1290,11 +1459,30 @@ const loadSource = async (
       refinementCutoffPx: 0.75,
       presentation: pointPresentation(),
       onTiles: (batch) => {
-        adapter?.applyBatch(batch);
+        const finish = telemetry.isActive()
+          ? telemetry.beginWork("renderer-batch", {
+              addedTiles: batch.added.length,
+              removedTiles: batch.removed.length,
+              addedPoints: batch.added.reduce(
+                (total, { tile }) => total + tile.pointCount,
+                0,
+              ),
+            })
+          : null;
+        try {
+          adapter?.applyBatch(batch);
+          finish?.(adapter === null ? "cancelled" : "ok");
+        } catch (error) {
+          finish?.("error", {
+            error: error instanceof Error ? error.name : "unknown",
+          });
+          throw error;
+        }
         clippingDirty = true;
       },
       onPointDiameterCssPx: (diameter) =>
         adapter?.setPointDiameterCssPx(diameter),
+      onDensityFraction: (fraction) => adapter?.setDensityFraction(fraction),
       onError: (error) => {
         console.error(error);
         setMessage(String(error), true);
@@ -1304,12 +1492,24 @@ const loadSource = async (
     applyBudgetMode();
     controller.setCamera(cameraView());
     setMessage(`${name}: ${points(loadedPointCount)} points`);
+    if (telemetry.isActive()) {
+      telemetry.recordState("source-loaded", telemetryState());
+    }
     scheduleRender();
   } catch (error) {
+    finishSourceOpen?.("error", {
+      error: error instanceof Error ? error.name : "unknown",
+    });
     if (generation !== loadGeneration) return;
     disposeCloud();
     const text = error instanceof Error ? error.message : String(error);
     setMessage(`Could not load ${name}: ${text}`, true);
+    if (telemetry.isActive()) {
+      telemetry.recordState("source-error", {
+        source: name,
+        error: text,
+      });
+    }
   }
 };
 
@@ -1400,6 +1600,39 @@ resetViewButton.addEventListener("click", () => {
 loadUrlButton.addEventListener("click", loadUrl);
 urlInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") loadUrl();
+});
+
+const startTelemetry = (): void => {
+  telemetry.start();
+  telemetry.recordState("recording-started", telemetryState());
+  updateTelemetryStatus();
+};
+
+const stopTelemetry = (): void => {
+  telemetry.recordState("recording-stopped", telemetryState());
+  telemetry.stop();
+  updateTelemetryStatus();
+};
+
+const markTelemetry = (label: string): void => {
+  const normalized = label.trim().slice(0, 128);
+  if (normalized.length === 0 || !telemetry.isActive()) return;
+  telemetry.recordState(`marker:${normalized}`, telemetryState());
+};
+
+telemetryToggle.addEventListener("click", () => {
+  if (telemetry.isActive()) stopTelemetry();
+  else startTelemetry();
+});
+
+telemetryDownload.addEventListener("click", () => telemetry.download());
+
+telemetryClear.addEventListener("click", () => {
+  telemetry.clear();
+  if (telemetry.isActive()) {
+    telemetry.recordState("recording-cleared", telemetryState());
+  }
+  updateTelemetryStatus();
 });
 
 budgetModeSelect.addEventListener("change", () => {
@@ -1497,13 +1730,13 @@ urlInput.addEventListener("input", () => {
 
 // Every browser check passes an explicit `?url=`, so the default below is the
 // interactive opening scene only and nothing under test observes it.
-const initialUrl =
-  new URLSearchParams(window.location.search).get("url") ??
-  HOSTED_SCENES[0]!.url;
+const initialParameters = new URLSearchParams(window.location.search);
+const initialUrl = initialParameters.get("url") ?? HOSTED_SCENES[0]!.url;
 urlInput.value = initialUrl;
 sceneSelect.value = HOSTED_SCENES.some((scene) => scene.url === initialUrl)
   ? initialUrl
   : "";
+if (initialParameters.get("telemetry") === "1") startTelemetry();
 loadUrl();
 
 // Driving handles for browser checks. Everything here drives the page the way
@@ -1520,6 +1753,24 @@ Object.assign(window, {
       source: loadedName || null,
       sourcePoints: loadedPointCount,
     }),
+
+    telemetry: {
+      start: startTelemetry,
+      stop: stopTelemetry,
+      clear: () => {
+        telemetry.clear();
+        if (telemetry.isActive()) {
+          telemetry.recordState("recording-cleared", telemetryState());
+        }
+        updateTelemetryStatus();
+      },
+      isActive: () => telemetry.isActive(),
+      mark: markTelemetry,
+      environment: (): TelemetryEnvironment => telemetry.summary().environment,
+      summary: () => telemetry.summary(),
+      trace: (): TelemetryTrace => telemetry.trace(),
+      download: () => telemetry.download(),
+    },
 
     /**
      * Both sides' key sets, so a check can assert they agree rather than
@@ -1658,6 +1909,10 @@ Object.assign(window, {
     setDevicePixelRatio: (ratio: number) => {
       currentDevicePixelRatio = ratio;
       adapter?.setDevicePixelRatio(ratio);
+      scheduleRender();
+    },
+    setDensityFraction: (fraction: number) => {
+      controller?.setDensityFraction(fraction);
       scheduleRender();
     },
     /** Report every frame as this duration; null restores real measurement. */

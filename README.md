@@ -179,10 +179,10 @@ With a `ViewGovernor`, the host closes a frame-time feedback loop:
 ```text
 paint frame
   → recordHostFrame({ hostFrameMs, vtkFrameMs })
-  → governor adjusts the aggregate view budget
-  → governor splits it across active controllers
-  → each controller receives setPointBudget(points)
-  → selection and streaming react
+  → governor adjusts the aggregate draw budget
+  → settled capacity stays selected and resident
+  → each controller receives selection budget + density fraction
+  → moving changes thin existing VBO prefixes; settled changes may reselect
   → needsFrame() says whether another measurement is useful
 ```
 
@@ -237,6 +237,7 @@ These methods are useful when application policy lives outside the library:
 | Control                                              | Effect                                                                                                                                                                   |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `controller.setPointBudget(points)`                  | Set the visible-point target directly. Use this instead of a governor for a fixed or externally managed budget.                                                          |
+| `controller.setDensityFraction(fraction)`            | Draw a nested prefix of every selected tile without changing selection, I/O, actors, or VBO contents.                                                                    |
 | `controller.setPresentation(...)`                    | Switch live between Auto and Fixed point presentation.                                                                                                                   |
 | `controller.setRefinementCutoffPx(pixels)`           | Stop descending when a node's projected spacing is below this threshold. Lower values allow finer traversal; the point and memory budgets still apply.                   |
 | `controller.refresh()`                               | Force immediate reselection against the current camera, useful after external state changes that do not produce a new camera value.                                      |
@@ -244,6 +245,7 @@ These methods are useful when application policy lives outside the library:
 | `governor.beginMotion(kind)`                         | Hold the adaptive budget in its moving-camera regime. Use `"explicit"` for announced gestures and `"inferred"` for playback or programmatic motion detected by the host. |
 | `adapter.setPointDiameterCssPx(pixels)`              | Set point size outside the controller. Omit `onPointDiameterCssPx` when the application owns this value so two policies do not compete.                                  |
 | `adapter.setDevicePixelRatio(ratio)`                 | Update CSS-to-framebuffer scaling without changing selection or the CSS point diameter.                                                                                  |
+| `adapter.setDensityFraction(fraction)`               | Apply progressive prefix drawing directly when policy lives outside the controller.                                                                                      |
 | `adapter.setResourceCeilingBytes(bytes)`             | Bound GPU resources retained in the adapter's actor-reuse pool. A host can feed it the controller's current `memoryBudgetBytes`.                                         |
 | `adapter.setVisible(false)`                          | Hide drawing only. Actors, GPU resources, selection, and streaming remain live for an immediate show.                                                                    |
 | `controller.setActive(false)`                        | Stop selection and tile fetches, emit removals that move actors into the bounded adapter pool, and retain decoded payloads in the bounded CPU cache.                     |
@@ -335,7 +337,55 @@ at its ESM package directory:
 VTK_JS_DIR=/path/to/vtk-js/dist/esm npm run example
 ```
 
-A `?url=` query parameter loads a cloud on startup.
+A `?url=` query parameter loads a cloud on startup. Add `&telemetry=1` to begin
+a local performance trace before that source opens.
+
+The **Local telemetry** controls record only in the current browser tab. Start,
+stop, clear, and download produce a bounded JSON trace; nothing is uploaded.
+The trace identifies the WebGL vendor and renderer (including an explicit
+software-renderer flag), viewport and device-pixel ratio, camera and control
+state, controller/adapter/governor statistics, rAF cadence, synchronous vtk
+time, long tasks, source/hierarchy/tile work, and renderer-batch handoff.
+
+Every source or renderer work transition increments a revision. A frame is
+`clean` only when that revision stayed unchanged across the complete interval
+since the previous presentation, no work remained pending, and the controller
+reported no queued, physical, or undecoded selected-tile work. This preserves
+the evidence needed to distinguish steady rendering capacity from a frame that
+overlapped streaming. The same controls are scriptable through
+`window.pointCloudExample.telemetry` (`start`, `stop`, `clear`, `environment`,
+`summary`, `trace`, `download`, and `mark`).
+
+Browser checks use SwiftShader by default and must not be treated as GPU
+benchmarks. On a WSLg machine with GPU forwarding, run the telemetry check in a
+headed hardware browser with:
+
+```bash
+POINTCLOUD_LOD_BROWSER_GPU=1 npm run test:browser -- test/browser/telemetry.spec.ts
+```
+
+That mode asserts the reported renderer is not software, so a silent fallback
+cannot pass as a hardware measurement.
+
+To capture a repeatable initial load, real pointer drag and wheel zoom, the
+settled view around them, and a final tight zoom into one section of the cloud,
+supply a cloud URL and optional artifact path:
+
+```bash
+POINTCLOUD_LOD_TELEMETRY_URL='https://example.test/cloud.copc.laz' \
+POINTCLOUD_LOD_TELEMETRY_OUT='artifacts/telemetry/cloud.json' \
+VTK_JS_DIR=/path/to/vtk-js/dist/esm \
+npm run telemetry:capture
+```
+
+The capture starts before the source opens and adds phase markers to the JSON,
+including the final tight view after it has returned to full draw density.
+It rejects software rendering and checks that the trace is structurally usable;
+it deliberately does not turn machine-specific frame times into pass/fail
+thresholds. If no output path is supplied, the timestamped trace is written
+under `artifacts/telemetry/`. It is tagged `*.perf.spec.ts`, runs only through
+the opt-in `test:perf`/`telemetry:capture` commands, and is excluded from normal
+unit and browser test runs. If no URL is supplied, the capture skips.
 
 Remote URLs must allow cross-origin `Range` requests. Raw LAS/LAZ is not
 streamable by the COPC source; convert it with a proven native COPC writer —
@@ -353,14 +403,14 @@ across its members from measured host-frame timings, so several clouds in a
 view compete for a single frame-time target instead of each chasing its own.
 
 Two regimes, two targets. A moving camera is being steered, so it gets the
-tighter **16 ms** target and trades points for responsiveness; a settled camera
-is being read, so it gets the looser **33 ms** target and spends the extra
-frame time on detail. With the default 20% hysteresis the no-change bands are
-12.8-19.2 ms while moving and 26.4-39.6 ms while settled. Both tracks start at
-**1,000,000** points (`initialBudget`) and never drop below **200,000**
-(`minBudget`). Releasing the camera never changes the picture on its own: the
-stationary track starts from exactly the density the moving regime just
-sustained and refines from there.
+tighter **16 ms** target and trades drawn points for responsiveness; a settled
+camera is being read, so it gets the looser **33 ms** target and spends the
+extra frame time on detail. With the default 20% hysteresis the no-change bands
+are 12.8-19.2 ms while moving and 26.4-39.6 ms while settled. Both tracks start
+at **1,000,000** points (`initialBudget`) and never drop below **200,000**
+(`minBudget`). The denser proven budget stays selected while moving. The
+interaction budget becomes a uniform progressive-prefix fraction, so cuts and
+settled restoration change the next draw without replacing tiles or buffers.
 
 ```js
 import { createViewGovernor } from "pointcloud-lod";
@@ -371,7 +421,7 @@ const governor = createViewGovernor();
 const member = governor.register({
   id: "cloud-1",
   setPointBudget: (points) => controller.setPointBudget(points),
-  active: true,
+  setDensityFraction: (fraction) => controller.setDensityFraction(fraction),
 });
 
 // Report every completed host frame, including non-VTK work, then ask whether
@@ -413,9 +463,10 @@ governor.dispose();
 state: the regime and what is holding it, the target frame time, the recent
 percentile estimate and sample count, the adaptive track budget, the optional
 configured maximum (`maxBudget`), the memory-derived ceiling, the aggregate
-view budget and each member's share of it, the last adjustment's time,
-direction and reason, and which of `adaptive | configured-maximum | memory |
-inactive` is the binding constraint.
+draw and resident-selection budgets, each member's draw/selection shares and
+density fraction, the last adjustment's time, direction and reason, and which
+of `adaptive | configured-maximum | memory | inactive` is the binding
+constraint.
 
 The effective budget is `min(adaptive track budget, configured maximum,
 memory-derived ceiling)`, applied to the aggregate before the split so no
@@ -483,8 +534,12 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
   Fixed presentation keeps one CSS-pixel diameter; Auto presentation derives
   the diameter from the largest projected spacing on the selected terminal
   coverage frontier, clamped to the presentation's min/max and scaled by
-  `userScale`, and emits it when selection changes. Two CSS pixels is the seed
-  it starts from before any selected frontier exists.
+  `userScale`. Progressive thinning scales that spacing by `1/sqrt(fraction)`
+  so larger points mask the reduced sample density. CPU picking examines the
+  same prefix the renderer draws. Two CSS pixels is the seed before any
+  selected frontier exists. Incoming tiles are deterministically shuffled once
+  at the source/controller boundary, keeping arbitrary COPC record order from
+  biasing early prefixes.
 - **Renderer adapter** (`createRendererAdapter`) — turns tile batches into
   vtk.js actors, one `vtkPolyData` + `vtkPointGaussianMapper` per tile
   (one gl.POINTS vertex per point, no cell topology), with an anchor base
@@ -494,16 +549,18 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
   not yet in a released vtk.js — see [Requirements](#requirements).
   CSS diameter stays separate from framebuffer density: the adapter applies
   device pixel ratio through the mapper at the final rendering boundary.
+  `setDensityFraction` changes each mapper's draw count while its complete
+  point/color VBO remains resident.
   The controller owns residency and the adapter owns actors: `setVisible` is
   a draw switch that keeps every actor alive (batches still apply while
   hidden, so showing again restores exactly the submitted set), while
   releasing a hidden cloud's tiles is the controller's `setActive(false)`.
 - **View governor** (`createViewGovernor`) — optional, one per view. Owns the
-  point budget for every controller registered to that view and adapts it from
-  measured host-frame timings, holding VTK to a fraction of the frame and
-  guaranteeing each active member a floor so one busy cloud cannot starve the
-  rest. Controllers have no adaptive loop of their own; this is the only route
-  to adaptive quality.
+  draw and resident-selection budgets for every controller registered to that
+  view and adapts drawing from measured host-frame timings, holding VTK to a
+  fraction of the frame and guaranteeing each active member a floor so one
+  busy cloud cannot starve the rest. Controllers have no adaptive loop of their
+  own; this is the only route to adaptive quality.
 
 Camera math (`frustumPlanes`, `nodeScreenSpaceError`) is pure and
 renderer-agnostic: the controller takes a view-projection matrix and camera
