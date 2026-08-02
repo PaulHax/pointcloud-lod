@@ -53,6 +53,7 @@ export type MotionReference = {
 
 export type ViewGovernorMemberOptions = {
   setPointBudget(points: number): void;
+  setDensityFraction(densityFraction: number): void;
   /** Names this cloud in the diagnostics. */
   id?: string;
 };
@@ -104,6 +105,12 @@ export type ViewGovernorMemberStats = {
    * given, so this is the governor's view of the same arithmetic.
    */
   readonly effectiveBudget: number;
+  /** Points kept selected and resident so density changes need no tile churn. */
+  readonly selectionShare: number;
+  /** Selection share capped by this member's memory ceiling. */
+  readonly effectiveSelectionBudget: number;
+  /** Effective draw budget divided by the effective selection budget. */
+  readonly densityFraction: number;
   readonly activeConstraint: BudgetConstraint;
   readonly physicalTileOperations: number;
   readonly physicalHierarchyOperations: number;
@@ -133,6 +140,8 @@ export type ViewGovernorStats = {
   readonly memoryCeilingPoints: number | null;
   /** min(track budget, configured maximum, memory ceiling). */
   readonly aggregateBudget: number;
+  /** Aggregate point budget kept selected for progressive drawing. */
+  readonly selectionBudget: number;
   readonly activeConstraint: BudgetConstraint;
   /** The current regime's most recent decision, including no-change ones. */
   readonly lastAdjustment: BudgetAdjustment | null;
@@ -170,6 +179,7 @@ export type ViewGovernor = {
 
 type MemberState = {
   setPointBudget(points: number): void;
+  setDensityFraction(densityFraction: number): void;
   readonly id: string | null;
   active: boolean;
   /** Null until the member reports; 0 is a real measurement, not "unknown". */
@@ -177,7 +187,9 @@ type MemberState = {
   memoryCeilingPoints: number | null;
   physicalTileOperations: number;
   physicalHierarchyOperations: number;
-  budget: number;
+  drawBudget: number;
+  selectionBudget: number;
+  densityFraction: number;
 };
 
 /**
@@ -314,10 +326,29 @@ export const createViewGovernor = (
    * apply here — and it applies to the aggregate, before the split, so no
    * member's share can be sized against memory another member owns.
    */
-  const aggregateBudget = (ceiling: number | null): number => {
-    const track = budget.budget(interacting());
+  const cappedTrackBudget = (
+    interactionTrack: boolean,
+    ceiling: number | null,
+  ): number => {
+    const track = budget.budget(interactionTrack);
     return ceiling === null ? track : Math.min(track, ceiling);
   };
+
+  const aggregateBudget = (ceiling: number | null): number =>
+    cappedTrackBudget(interacting(), ceiling);
+
+  /**
+   * Motion thins the selected set instead of replacing it. Usually the
+   * stationary track is denser; if the interaction track has proved it can
+   * draw more, retain enough points to honor that budget too.
+   */
+  const selectionBudget = (ceiling: number | null): number =>
+    interacting()
+      ? Math.max(
+          cappedTrackBudget(false, ceiling),
+          cappedTrackBudget(true, ceiling),
+        )
+      : cappedTrackBudget(false, ceiling);
 
   const constraintOf = (
     active: readonly MemberState[],
@@ -349,7 +380,8 @@ export const createViewGovernor = (
     // still while the track climbed for ever, so it would never report itself
     // pinned and a host watching `needsFrame()` would repaint for ever.
     budget.setCeiling(ceiling);
-    const total = aggregateBudget(ceiling);
+    const drawTotal = aggregateBudget(ceiling);
+    const selectionTotal = selectionBudget(ceiling);
     // Importance is root screen-space error in CSS px, so it is legitimately
     // below 1 for a distant cloud and exactly 0 for one that is fully culled
     // or still loading. Neither may be treated as "unknown": a member that
@@ -366,24 +398,48 @@ export const createViewGovernor = (
     const weightOf = (member: MemberState): number =>
       Math.max(member.importance ?? maxReported, floorWeight);
     const weightTotal = active.reduce((sum, m) => sum + weightOf(m), 0);
-    for (const member of members) {
-      const next = member.active
+    const shareOf = (member: MemberState, total: number): number =>
+      member.active
         ? Math.max(1, Math.floor((total * weightOf(member)) / weightTotal))
         : 0;
-      if (next === member.budget) continue;
-      // Deactivation (0) and first assignment always apply; between live
-      // budgets, jitter smaller than the dead-band is not worth the
-      // reselection it would trigger. `member.budget` keeps the applied
-      // value, so the skipped drift stays visible to the next comparison.
-      if (
-        member.budget > 0 &&
-        next > 0 &&
-        Math.abs(next - member.budget) < member.budget * DISTRIBUTE_DEADBAND
-      ) {
-        continue;
+    for (const member of members) {
+      const nextSelection = shareOf(member, selectionTotal);
+      if (nextSelection !== member.selectionBudget) {
+        // Deactivation (0) and first assignment always apply; between live
+        // budgets, jitter smaller than the dead-band is not worth the
+        // synchronous reselection it would trigger. The stored value is the
+        // applied one, so skipped drift accumulates for the next comparison.
+        const jitter =
+          member.selectionBudget > 0 &&
+          nextSelection > 0 &&
+          Math.abs(nextSelection - member.selectionBudget) <
+            member.selectionBudget * DISTRIBUTE_DEADBAND;
+        if (!jitter) {
+          member.selectionBudget = nextSelection;
+          member.setPointBudget(nextSelection);
+        }
       }
-      member.budget = next;
-      member.setPointBudget(next);
+
+      const nextDraw = shareOf(member, drawTotal);
+      const memberCeiling = member.memoryCeilingPoints;
+      const effectiveSelection =
+        memberCeiling === null
+          ? Math.max(member.selectionBudget, 0)
+          : Math.min(Math.max(member.selectionBudget, 0), memberCeiling);
+      const effectiveDraw =
+        memberCeiling === null ? nextDraw : Math.min(nextDraw, memberCeiling);
+      const nextDensity =
+        effectiveSelection > 0
+          ? Math.min(1, effectiveDraw / effectiveSelection)
+          : 0;
+      const densityJitter =
+        member.densityFraction >= 0 &&
+        Math.abs(nextDensity - member.densityFraction) < DISTRIBUTE_DEADBAND;
+      member.drawBudget = nextDraw;
+      if (!densityJitter) {
+        member.densityFraction = nextDensity;
+        member.setDensityFraction(nextDensity);
+      }
     }
   };
 
@@ -445,13 +501,16 @@ export const createViewGovernor = (
     register(memberOptions) {
       const state: MemberState = {
         setPointBudget: memberOptions.setPointBudget,
+        setDensityFraction: memberOptions.setDensityFraction,
         id: memberOptions.id ?? null,
         active: true,
         importance: null,
         memoryCeilingPoints: null,
         physicalTileOperations: 0,
         physicalHierarchyOperations: 0,
-        budget: -1,
+        drawBudget: -1,
+        selectionBudget: -1,
+        densityFraction: -1,
       };
       members.add(state);
       distribute();
@@ -603,10 +662,14 @@ export const createViewGovernor = (
       const viewCeiling = memoryCeilingPoints(active);
       const viewConstraint = constraintOf(active, viewCeiling);
       const aggregate = aggregateBudget(viewCeiling);
+      const selected = selectionBudget(viewCeiling);
       const memberStats = [...members].map(
         (member): ViewGovernorMemberStats => {
           const ceiling = member.memoryCeilingPoints;
-          const share = member.active ? Math.max(member.budget, 0) : 0;
+          const share = member.active ? Math.max(member.drawBudget, 0) : 0;
+          const selectionShare = member.active
+            ? Math.max(member.selectionBudget, 0)
+            : 0;
           return {
             id: member.id,
             active: member.active,
@@ -615,6 +678,12 @@ export const createViewGovernor = (
             memoryCeilingPoints: ceiling,
             effectiveBudget:
               ceiling === null ? share : Math.min(share, ceiling),
+            selectionShare,
+            effectiveSelectionBudget:
+              ceiling === null
+                ? selectionShare
+                : Math.min(selectionShare, ceiling),
+            densityFraction: Math.max(member.densityFraction, 0),
             activeConstraint: !member.active
               ? "inactive"
               : ceiling !== null && ceiling < share
@@ -649,6 +718,7 @@ export const createViewGovernor = (
         configuredMaxPoints,
         memoryCeilingPoints: viewCeiling,
         aggregateBudget: aggregate,
+        selectionBudget: selected,
         activeConstraint: viewConstraint,
         lastAdjustment: track.lastAdjustment,
         activeMembers: active.length,

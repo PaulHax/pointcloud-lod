@@ -29,8 +29,9 @@ import vtkActor from "@kitware/vtk.js/Rendering/Core/Actor";
 import vtkPointGaussianMapper from "@kitware/vtk.js/Rendering/Core/PointGaussianMapper";
 
 import type { TileBatch } from "./controller";
-import { finiteAbove, finiteNonNegative } from "./numeric";
+import { finiteAbove, finiteNonNegative, finiteWithin } from "./numeric";
 import { keyToString, type Vec3 } from "./octree";
+import { pointPrefixCount } from "./pointDensity";
 import { tileBytes, type TileData } from "./tileSource";
 
 const IDENTITY: readonly number[] = [
@@ -62,6 +63,8 @@ export type RendererAdapterOptions = {
   devicePixelRatio?: number;
   /** Initial visibility. Default true. Tiles added while hidden stay hidden. */
   visible?: boolean;
+  /** Initial fraction of every submitted tile's point prefix to draw. Default 1. */
+  densityFraction?: number;
 };
 
 export type RendererAdapter = {
@@ -78,6 +81,8 @@ export type RendererAdapter = {
   setBaseMatrix(matrix: ArrayLike<number> | null): void;
   setPointDiameterCssPx(diameterCssPx: number): void;
   setDevicePixelRatio(devicePixelRatio: number): void;
+  /** Draw this fraction of every submitted tile without replacing its VBO. */
+  setDensityFraction(densityFraction: number): void;
   /**
    * Draw switch only: hiding keeps every actor and its GPU resources, so
    * showing again restores exactly the submitted set — including tiles that
@@ -147,6 +152,7 @@ export type RendererAdapterStats = {
   readonly drawnTiles: number;
   readonly drawnPoints: number;
   readonly visible: boolean;
+  readonly densityFraction: number;
   readonly diameterCssPx: number;
   readonly devicePixelRatio: number;
 };
@@ -174,6 +180,12 @@ export const createRendererAdapter = (
     0,
   );
   let visible = options.visible ?? true;
+  let densityFraction = finiteWithin(
+    "densityFraction",
+    options.densityFraction ?? 1,
+    0,
+    1,
+  );
   let baseMatrix: ArrayLike<number> = IDENTITY;
   // A key lives in at most one of the two: removal moves its entry from
   // `tiles` to `pendingRelease`, and a re-addition either takes that entry
@@ -241,6 +253,9 @@ export const createRendererAdapter = (
     // The actor property remains in CSS pixels. The custom dense-point mapper
     // multiplies it by scaleFactor before assigning physical gl_PointSize.
     entry.mapper.setScaleFactor(devicePixelRatio);
+    entry.mapper.setMaximumPointCount(
+      pointPrefixCount(entry.tile.pointCount, densityFraction),
+    );
     entry.actor.getProperty().setPointSize(diameterCssPx);
     entry.actor.setVisibility(visible);
     entry.actor.setUserMatrix(tileMatrix(entry.tile.origin));
@@ -390,6 +405,24 @@ export const createRendererAdapter = (
       scheduleRender();
     },
 
+    setDensityFraction(nextDensityFraction) {
+      if (
+        disposed ||
+        !finiteNonNegative(nextDensityFraction) ||
+        nextDensityFraction > 1 ||
+        nextDensityFraction === densityFraction
+      ) {
+        return;
+      }
+      densityFraction = nextDensityFraction;
+      for (const entry of tiles.values()) {
+        entry.mapper.setMaximumPointCount(
+          pointPrefixCount(entry.tile.pointCount, densityFraction),
+        );
+      }
+      scheduleRender();
+    },
+
     setVisible(nextVisible) {
       if (disposed || nextVisible === visible) return;
       visible = nextVisible;
@@ -408,6 +441,15 @@ export const createRendererAdapter = (
     },
 
     stats() {
+      let drawnPoints = 0;
+      if (visible) {
+        for (const entry of tiles.values()) {
+          drawnPoints += pointPrefixCount(
+            entry.tile.pointCount,
+            densityFraction,
+          );
+        }
+      }
       return {
         submittedTiles: tiles.size,
         submittedPoints,
@@ -419,9 +461,10 @@ export const createRendererAdapter = (
         gpuResidentPoints: submittedPoints + pooledPoints,
         gpuResidentBytes: submittedBytes + pooledBytes,
         resourceCeilingBytes,
-        drawnTiles: visible ? tiles.size : 0,
-        drawnPoints: visible ? submittedPoints : 0,
+        drawnTiles: visible && densityFraction > 0 ? tiles.size : 0,
+        drawnPoints,
         visible,
+        densityFraction,
         diameterCssPx,
         devicePixelRatio,
       };

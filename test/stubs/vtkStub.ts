@@ -56,10 +56,12 @@ export type StubMapper = {
   setInputData: (data: unknown) => void;
   setStatic: (value: boolean) => void;
   setScaleFactor: (scale: number) => void;
+  setMaximumPointCount: (count: number) => void;
   delete: () => void;
   inputData: unknown;
   static: boolean;
   scaleFactor: number;
+  maximumPointCount: number;
   deleted: boolean;
 };
 
@@ -70,6 +72,7 @@ export const makeMapper = (): StubMapper => {
     inputData: null,
     static: false,
     scaleFactor: 1,
+    maximumPointCount: -1,
     deleted: false,
     setInputData(data) {
       mapper.inputData = data;
@@ -79,6 +82,9 @@ export const makeMapper = (): StubMapper => {
     },
     setScaleFactor(scale) {
       mapper.scaleFactor = scale;
+    },
+    setMaximumPointCount(count) {
+      mapper.maximumPointCount = count;
     },
     delete() {
       mapper.deleted = true;

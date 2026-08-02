@@ -49,7 +49,11 @@ export type NodeInfo = {
 export type TileData = {
   /** World-space origin the tile-local positions are relative to. */
   readonly origin: Vec3;
-  /** Tile-local xyz triplets, `3 * pointCount` floats. */
+  /**
+   * Tile-local xyz triplets, `3 * pointCount` floats. The controller puts
+   * these and all point attributes into deterministic progressive order before
+   * renderer submission, so drawing any prefix remains spatially representative.
+   */
   readonly positions: Float32Array;
   /** Optional per-point color, `3 * pointCount` bytes (RGB). */
   readonly rgb?: Uint8Array;

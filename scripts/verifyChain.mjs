@@ -130,6 +130,10 @@ const checkExampleBundle = () => {
       /["'`]scaleFactor["'`]\s*,\s*["'`]circle["'`]\s*,\s*["'`]worldSize["'`]/.test(
         text,
       ),
+    // Progressive density depends on this core mapper API reaching the bundle;
+    // an older/stale vtk.js build still carries every class above but would
+    // fail only when the first tile actor applies its draw cap.
+    maximumPointCount: text.includes("maximumPointCount"),
   };
   const missing = Object.entries(required)
     .filter(([, present]) => !present)

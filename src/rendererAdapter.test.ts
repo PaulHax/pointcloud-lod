@@ -32,6 +32,7 @@ const makeAdapter = (options?: {
   diameterCssPx?: number;
   devicePixelRatio?: number;
   visible?: boolean;
+  densityFraction?: number;
 }) => {
   const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
   const scheduleRender = vi.fn();
@@ -90,6 +91,7 @@ describe("createRendererAdapter", () => {
       drawnTiles: 1,
       drawnPoints: 2,
       visible: true,
+      densityFraction: 1,
       diameterCssPx: 3,
       devicePixelRatio: 2,
     });
@@ -103,6 +105,7 @@ describe("createRendererAdapter", () => {
     expect(mapperInstances[0]!.inputData).toBe(polyDataInstances[0]);
     expect(mapperInstances[0]!.static).toBe(true);
     expect(mapperInstances[0]!.scaleFactor).toBe(2);
+    expect(mapperInstances[0]!.maximumPointCount).toBe(2);
     expect(actorInstances[0]!.pointSize).toBe(3);
     // Identity base: the tile matrix is a plain translation to the origin.
     expect(actorInstances[0]!.userMatrix!.slice(12, 15)).toEqual([10, 20, 30]);
@@ -180,6 +183,79 @@ describe("createRendererAdapter", () => {
     expect(actorInstances[0]!.pointSize).toBe(2.5);
     expect(mapperInstances[0]!.scaleFactor).toBe(2);
     expect(scheduleRender).toHaveBeenCalledTimes(1);
+  });
+
+  it("changes every tile's draw prefix without actor or payload churn", () => {
+    const { adapter, renderer, scheduleRender } = makeAdapter();
+    const first = tile([0, 0, 0], 8);
+    const second = tile([1, 0, 0], 3);
+    add(adapter, { key: KEY_A, tile: first }, { key: KEY_B, tile: second });
+    const actors = [...actorInstances];
+    const polyData = [...polyDataInstances];
+
+    scheduleRender.mockClear();
+    adapter.setDensityFraction(0.25);
+    expect(mapperInstances.map((mapper) => mapper.maximumPointCount)).toEqual([
+      2, 1,
+    ]);
+    expect(adapter.stats()).toMatchObject({
+      submittedTiles: 2,
+      submittedPoints: 11,
+      drawnTiles: 2,
+      drawnPoints: 3,
+      densityFraction: 0.25,
+    });
+    expect(actorInstances).toEqual(actors);
+    expect(polyDataInstances).toEqual(polyData);
+    expect(renderer.addActor).toHaveBeenCalledTimes(2);
+    expect(renderer.removeActor).not.toHaveBeenCalled();
+    expect(scheduleRender).toHaveBeenCalledTimes(1);
+
+    adapter.setDensityFraction(1);
+    expect(mapperInstances.map((mapper) => mapper.maximumPointCount)).toEqual([
+      8, 3,
+    ]);
+    expect(adapter.stats()).toMatchObject({
+      drawnTiles: 2,
+      drawnPoints: 11,
+      densityFraction: 1,
+    });
+    expect(renderer.addActor).toHaveBeenCalledTimes(2);
+    expect(renderer.removeActor).not.toHaveBeenCalled();
+
+    adapter.setDensityFraction(0);
+    expect(mapperInstances.map((mapper) => mapper.maximumPointCount)).toEqual([
+      0, 0,
+    ]);
+    expect(adapter.stats()).toMatchObject({ drawnTiles: 0, drawnPoints: 0 });
+  });
+
+  it("validates density at construction and ignores invalid live values", () => {
+    for (const densityFraction of [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      -0.01,
+      1.01,
+    ]) {
+      expect(() => makeAdapter({ densityFraction })).toThrow(/densityFraction/);
+    }
+
+    const { adapter, scheduleRender } = makeAdapter({ densityFraction: 0.5 });
+    add(adapter, { key: KEY_A, tile: tile([0, 0, 0], 10) });
+    scheduleRender.mockClear();
+    for (const densityFraction of [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      -0.01,
+      1.01,
+    ]) {
+      adapter.setDensityFraction(densityFraction);
+    }
+    expect(adapter.stats().densityFraction).toBe(0.5);
+    expect(mapperInstances[0]!.maximumPointCount).toBe(5);
+    expect(scheduleRender).not.toHaveBeenCalled();
   });
 
   it("dispose releases everything and is idempotent", () => {

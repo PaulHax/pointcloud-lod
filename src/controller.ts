@@ -23,6 +23,7 @@ import {
   finiteAtLeast,
   finiteNonNegative,
   finitePositive,
+  finiteWithin,
   wholeAtLeast,
 } from "./numeric";
 import {
@@ -45,6 +46,8 @@ import {
   type VoxelKey,
 } from "./octree";
 import { tileBytes, type TileData, type TileSource } from "./tileSource";
+import { orderTileForProgressiveDrawing } from "./progressiveOrder";
+import { pointPrefixCount, projectedSpacingScale } from "./pointDensity";
 
 export type TileBatch = {
   readonly added: readonly { key: VoxelKey; tile: TileData }[];
@@ -93,6 +96,8 @@ export type LodControllerOptions = {
    * memory-derived point cap applies on top.
    */
   pointBudget?: number;
+  /** Initial fraction of every selected tile's progressive prefix to draw. */
+  densityFraction?: number;
   /**
    * GPU-memory budget for resident tile bytes. Pass a `MemoryPool` to share
    * one byte budget across controllers on the same GPU (each gets an even
@@ -135,6 +140,8 @@ export type LodControllerOptions = {
   presentation?: PointPresentation;
   /** Receives the one CSS-pixel diameter applied to every active tile. */
   onPointDiameterCssPx?: (diameterCssPx: number) => void;
+  /** Receives progressive draw-density changes for the renderer adapter. */
+  onDensityFraction?: (densityFraction: number) => void;
   /** Non-abort fetch/hierarchy failures land here. Default: console.warn. */
   onError?: (error: unknown) => void;
 };
@@ -183,6 +190,10 @@ export type LodControllerStats = {
   readonly hierarchyConcurrency: number;
   /** Effective visible-point budget currently driving selection. */
   readonly pointBudget: number;
+  /** Fraction of every submitted tile's progressive prefix being drawn. */
+  readonly densityFraction: number;
+  /** Points actually participating in drawing across the submitted set. */
+  readonly drawnPoints: number;
   /** This controller's byte share of its memory pool. */
   readonly memoryBudgetBytes: number;
   /** Memory-derived point ceiling the budget can never exceed. */
@@ -273,6 +284,11 @@ export type LodController = {
    * Negative and non-finite values are ignored.
    */
   setPointBudget(points: number): void;
+  /**
+   * Set the progressive prefix fraction without changing tile selection.
+   * Values outside [0, 1] and non-finite values are ignored.
+   */
+  setDensityFraction(densityFraction: number): void;
   /**
    * Swap the tile source (e.g. a new asset revision behind a new endpoint).
    * All resident tiles, caches, hierarchy state, and in-flight requests are
@@ -543,6 +559,7 @@ export const createLodController = (
     onTiles,
     scheduleRender,
     onPointDiameterCssPx = () => {},
+    onDensityFraction = () => {},
     onError = (error) => console.warn("pointcloud-lod:", error),
   } = options;
 
@@ -578,6 +595,12 @@ export const createLodController = (
     options.pointBudget ?? 2_000_000,
     1,
   );
+  let densityFraction = finiteWithin(
+    "densityFraction",
+    options.densityFraction ?? 1,
+    0,
+    1,
+  );
   let refinementCutoffPx = finiteAtLeast(
     "refinementCutoffPx",
     options.refinementCutoffPx ?? 1,
@@ -592,6 +615,7 @@ export const createLodController = (
   let view: CameraView | null = null;
   let disposed = false;
   onPointDiameterCssPx(diameterCssPx);
+  onDensityFraction(densityFraction);
 
   const emitDiameter = (next: number): void => {
     if (next === diameterCssPx) return;
@@ -1073,6 +1097,7 @@ export const createLodController = (
     if (
       presentation.mode !== "auto" ||
       view === null ||
+      densityFraction <= 0 ||
       !target.has(keyToString(ROOT_KEY))
     ) {
       return;
@@ -1128,7 +1153,10 @@ export const createLodController = (
         presentation.userScale *
           Math.min(
             presentation.maxDiameterCssPx,
-            Math.max(presentation.minDiameterCssPx, largestSpacing),
+            Math.max(
+              presentation.minDiameterCssPx,
+              largestSpacing * projectedSpacingScale(densityFraction),
+            ),
           ),
       );
     }
@@ -1136,7 +1164,12 @@ export const createLodController = (
 
   const updateReadyTerminalFrontier = (): void => {
     const currentView = view;
-    if (currentView === null || !active || !target.has(keyToString(ROOT_KEY))) {
+    if (
+      currentView === null ||
+      !active ||
+      densityFraction <= 0 ||
+      !target.has(keyToString(ROOT_KEY))
+    ) {
       selectionStats = {
         ...selectionStats,
         readyTerminalFrontier: emptyReadyTerminalFrontier(),
@@ -1168,7 +1201,7 @@ export const createLodController = (
       if (entry.pointCount === 0 || !resident.has(keyString)) return;
       if (!terminalKeys.has(keyString)) {
         terminalKeys.add(keyString);
-        values.push(sseFor(keyString));
+        values.push(sseFor(keyString) * projectedSpacingScale(densityFraction));
       }
       if (reasons.leaf) leafNodes += 1;
       if (reasons.cutoff) cutoffNodes += 1;
@@ -1276,7 +1309,7 @@ export const createLodController = (
       const key = keyFromString(keyString);
       physicalTileOperations += 1;
       source.loadTile(key, { signal: abort.signal }).then(
-        (tile) => {
+        (loadedTile) => {
           physicalTileOperations -= 1;
           // An epoch change is the only thing that takes a key's read entry
           // away while the read runs, and it also makes the payload worthless:
@@ -1287,6 +1320,7 @@ export const createLodController = (
           }
           tileReads.delete(keyString);
           tileFailures.delete(keyString);
+          const tile = orderTileForProgressiveDrawing(loadedTile, keyString);
           // Cancellation is advisory: the COPC getter takes no signal, so a
           // cancelled read still delivers. If the key was reselected while it
           // ran, this payload is exactly what the selection is waiting for.
@@ -1623,6 +1657,21 @@ export const createLodController = (
       );
     },
 
+    setDensityFraction(nextDensityFraction) {
+      if (
+        disposed ||
+        !finiteNonNegative(nextDensityFraction) ||
+        nextDensityFraction > 1 ||
+        nextDensityFraction === densityFraction
+      ) {
+        return;
+      }
+      densityFraction = nextDensityFraction;
+      onDensityFraction(nextDensityFraction);
+      updateAutoDiameter();
+      updateReadyTerminalFrontier();
+    },
+
     setSource(nextSource) {
       if (disposed) return;
       clearSettleTimer();
@@ -1707,6 +1756,10 @@ export const createLodController = (
           targetUndecodedTiles += 1;
         }
       }
+      let drawnPoints = 0;
+      for (const tile of submitted.values()) {
+        drawnPoints += pointPrefixCount(tile.pointCount, densityFraction);
+      }
       return {
         active,
         residentTiles: resident.size,
@@ -1724,6 +1777,8 @@ export const createLodController = (
         fetchConcurrency,
         hierarchyConcurrency,
         pointBudget: currentBudget(),
+        densityFraction,
+        drawnPoints,
         memoryBudgetBytes: memoryBudgetBytes(),
         memoryCeilingPoints: memoryCeilingPoints(),
         interactionDepth,
@@ -1756,7 +1811,7 @@ export const createLodController = (
         tiles.push({
           origin: tile.origin,
           positions: tile.positions,
-          pointCount: tile.pointCount,
+          pointCount: pointPrefixCount(tile.pointCount, densityFraction),
           bounds: hierarchy.get(keyString)?.bounds,
         });
       }

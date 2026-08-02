@@ -345,6 +345,35 @@ describe("createLodController", () => {
     controller.dispose();
   });
 
+  it("changes progressive density without selection, I/O, or tile batches", async () => {
+    const onDensityFraction = vi.fn();
+    const { controller, deferred, loadCalls, batches } = makeController(
+      SMALL_TREE,
+      { onDensityFraction },
+    );
+    await bootAndLand(controller, deferred);
+    const before = controller.stats();
+    const beforeLoads = [...loadCalls];
+    const beforeBatches = batches.length;
+    const beforeKeys = controller.activeKeys();
+
+    controller.setDensityFraction(0.25);
+
+    const after = controller.stats();
+    expect(after.densityFraction).toBe(0.25);
+    expect(after.drawnPoints).toBe(55);
+    expect(after.selection.generation).toBe(before.selection.generation);
+    expect(after.selection.targetRevision).toBe(
+      before.selection.targetRevision,
+    );
+    expect(after.selection.targetPoints).toBe(before.selection.targetPoints);
+    expect(controller.activeKeys()).toEqual(beforeKeys);
+    expect(loadCalls).toEqual(beforeLoads);
+    expect(batches).toHaveLength(beforeBatches);
+    expect(onDensityFraction).toHaveBeenLastCalledWith(0.25);
+    controller.dispose();
+  });
+
   it("never replaces selected tiles when only the point budget grows", async () => {
     const tree: Record<string, FakeEntry> = {
       "0-0-0-0": {
@@ -1140,6 +1169,39 @@ describe("createLodController — ready frontier and presentation", () => {
       controller.stats().selection.readyTerminalFrontier.projectedSpacingCssPx
         .max,
     ).toBeCloseTo(1);
+    controller.dispose();
+  });
+
+  it("sizes Auto points for the effective progressively thinned spacing", async () => {
+    const tree: Record<string, FakeEntry> = {
+      "0-0-0-0": { pointCount: 100, spacing: 0.08 },
+    };
+    const { controller, deferred } = makePresented(tree, {
+      presentation: {
+        mode: "auto",
+        userScale: 1,
+        minDiameterCssPx: 0.5,
+        maxDiameterCssPx: 10,
+      },
+    });
+    await settle();
+    controller.setCamera(ORTHOGRAPHIC_VIEW);
+    await settle();
+    deferred.get("0-0-0-0")!.resolve();
+    await settle();
+    expect(controller.stats().presentation.diameterCssPx).toBeCloseTo(4);
+    const generation = controller.stats().selection.generation;
+
+    controller.setDensityFraction(0.25);
+    const thinned = controller.stats();
+    expect(thinned.presentation.diameterCssPx).toBeCloseTo(8);
+    expect(
+      thinned.selection.readyTerminalFrontier.projectedSpacingCssPx.max,
+    ).toBeCloseTo(8);
+    expect(thinned.selection.generation).toBe(generation);
+
+    controller.setDensityFraction(1);
+    expect(controller.stats().presentation.diameterCssPx).toBeCloseTo(4);
     controller.dispose();
   });
 
@@ -2566,6 +2628,9 @@ describe("createLodController — numeric configuration", () => {
         /refinementCutoffPx/,
       );
     }
+    for (const value of [...NON_FINITE, -0.01, 1.01]) {
+      expect(() => make({ densityFraction: value })).toThrow(/densityFraction/);
+    }
   });
 
   it("throws for an unusable or inverted presentation contract", () => {
@@ -2614,6 +2679,10 @@ describe("createLodController — numeric configuration", () => {
       expect(controller.stats().refinementCutoffPx).toBe(
         before.refinementCutoffPx,
       );
+    }
+    for (const value of [...NON_FINITE, -0.01, 1.01]) {
+      controller.setDensityFraction(value);
+      expect(controller.stats().densityFraction).toBe(before.densityFraction);
     }
     for (const presentation of [
       { mode: "fixed", diameterCssPx: Number.NaN },
@@ -2706,6 +2775,20 @@ describe("createLodController — pickPoint", () => {
     expect(result.pointOnRay[1]).toBeCloseTo(0);
     expect(result.pointOnRay[2]).toBeCloseTo(0);
     expect(result.distancePx).toBeCloseTo(0);
+    controller.dispose();
+  });
+
+  it("never picks points outside the prefix currently being drawn", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await bootAndLand(controller, deferred);
+    expect(pickCenter(controller)?.status).toBe("hit");
+
+    controller.setDensityFraction(0);
+    expect(controller.stats().drawnPoints).toBe(0);
+    expect(pickCenter(controller)).toEqual({ status: "miss" });
+
+    controller.setDensityFraction(1);
+    expect(pickCenter(controller)?.status).toBe("hit");
     controller.dispose();
   });
 
