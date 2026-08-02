@@ -197,6 +197,35 @@ const MIN_SHARE_OF_EVEN_SPLIT = 0.25;
  */
 const DISTRIBUTE_DEADBAND = 0.01;
 
+/**
+ * How many qualifying frames in a row an emergency cut requires. With frame
+ * time measured as displayed cadence, intervals quantize to whole vsyncs: on a
+ * 60 Hz display one missed vsync reads 33.3 ms, just past the 2× threshold of
+ * the 16 ms moving target, so a single-frame trigger halves the budget on any
+ * isolated hitch — a tile upload landing, a GC pause — that says nothing about
+ * the sustainable point count. Two consecutive misses is a sustained cadence,
+ * not a hitch. The isolated frame still enters the sampled window, so a scene
+ * that hitches every other frame is answered by the damped controller.
+ */
+const EMERGENCY_CONSECUTIVE_FRAMES = 2;
+
+/**
+ * Seed for the moving track when a gesture begins from stationary rest, as a
+ * fraction of the settled budget: the machine just sustained the stationary
+ * budget at roughly twice the moving frame target, so a quarter of it is a
+ * conservative moving-density floor. The seed only ever raises the track —
+ * a moving budget the loop learned to hold higher keeps its value.
+ *
+ * This is also the moving track's recovery path. A vsync-floored display
+ * reports a healthy gesture at exactly the display cadence, which sits inside
+ * the moving target's dead-band — the track's own frames can therefore never
+ * vote to grow it, and without this seed one spurious cut would decimate every
+ * later gesture for the rest of the session. The stationary track has no such
+ * blind spot (its target is a multiple of the cadence floor), so it recovers,
+ * and each fresh gesture inherits that recovery here.
+ */
+const INTERACTION_SEED_OF_STATIONARY = 0.25;
+
 export const createViewGovernor = (
   options: ViewGovernorOptions = {},
 ): ViewGovernor => {
@@ -229,6 +258,8 @@ export const createViewGovernor = (
   let settleTimer: ReturnType<typeof setTimeout> | null = null;
   const settling = (): boolean => settleTimer !== null;
   let emergencyCooldownUntil = Number.NEGATIVE_INFINITY;
+  /** Qualifying moving frames seen in a row; see EMERGENCY_CONSECUTIVE_FRAMES. */
+  let emergencyStreak = 0;
 
   /**
    * The governor stamps cooldowns and restarts on the same timeline the host
@@ -365,14 +396,23 @@ export const createViewGovernor = (
     clearSettle();
     settleTimer = setTimeout(() => {
       settleTimer = null;
-      // Stationary refinement starts from exactly the density the moving
-      // regime just sustained, so releasing the camera changes nothing on
-      // screen, and measures it fresh: samples taken while moving describe a
+      // Stationary refinement starts from the denser of the two tracks. Its
+      // own budget is capacity this machine already proved at the stationary
+      // target, so a settle jumps straight back to that density in one
+      // reselection — the deselected tiles are usually still in the CPU cache
+      // — instead of climbing out of the moving budget one bounded increase
+      // at a time, several hundred milliseconds each. When the moving regime
+      // sustained more (it grew), that is the proven number instead. Either
+      // way the seed is measured fresh: samples taken while moving describe a
       // different regime and must not decide the next stationary step. The
       // converse holds as well, and `recordHostFrame` enforces it: the frames
       // painted inside this window are not moving frames either, so they must
       // not decide the next interaction step.
-      budget.restartAt(false, budget.budget(true), stampNow());
+      budget.restartAt(
+        false,
+        Math.max(budget.budget(false), budget.budget(true)),
+        stampNow(),
+      );
       distribute();
     }, interactionSettleMs);
   };
@@ -457,10 +497,22 @@ export const createViewGovernor = (
           // it — the moving regime would never adapt at all. Only motion that
           // begins from genuine stationary rest restarts the track: those
           // samples measured a scene and a load that have since moved on.
+          // The restart seeds from the settled track when that raises the
+          // moving budget — see INTERACTION_SEED_OF_STATIONARY — and a fresh
+          // burst starts with a clean emergency streak: a hitch in the last
+          // gesture must not pre-arm a cut in this one.
           const resuming = settling();
           clearSettle();
           if (!resuming) {
-            budget.restartAt(true, budget.budget(true), stampNow());
+            emergencyStreak = 0;
+            budget.restartAt(
+              true,
+              Math.max(
+                budget.budget(true),
+                INTERACTION_SEED_OF_STATIONARY * budget.budget(false),
+              ),
+              stampNow(),
+            );
           }
           distribute();
         }
@@ -505,6 +557,9 @@ export const createViewGovernor = (
       // long tasks and missed frames use the sampled stationary controller so
       // they cannot drive a fast grow/halve density sawtooth.
       const emergency = inMotion && (severeInput || observedMs > target * 2);
+      // The streak resets on any frame that is not a qualifying moving frame,
+      // wherever it lands: only literally consecutive misses reach the cut.
+      if (!emergency) emergencyStreak = 0;
       // A frame painted inside the settle window measures neither regime, so
       // it decides neither track. It was drawn at the interaction budget, so
       // it cannot size the stationary one; and it carries none of the cost of
@@ -522,10 +577,14 @@ export const createViewGovernor = (
       // rendering regime before allowing the normal controller to grow again:
       // inside that window a frame decides nothing, emergency or not.
       if (!settleWindowOnly && now >= emergencyCooldownUntil) {
-        if (emergency) {
+        if (emergency && ++emergencyStreak >= EMERGENCY_CONSECUTIVE_FRAMES) {
+          emergencyStreak = 0;
           budget.reduceNow(inInteractionRegime, now);
           emergencyCooldownUntil = now + emergencyCooldownMs;
         } else {
+          // A first qualifying frame is measured, not acted on: it still
+          // belongs in the window so a scene that hitches every other frame
+          // is answered by the damped controller rather than never at all.
           budget.recordFrame(observedMs, {
             interacting: inInteractionRegime,
             now,

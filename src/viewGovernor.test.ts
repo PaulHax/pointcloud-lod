@@ -193,6 +193,68 @@ describe("createViewGovernor stationary refinement", () => {
     expect(stats.lastAdjustment).toMatchObject({ reason: "seeded" });
   });
 
+  it("jumps stationary refinement back to the density it last sustained", () => {
+    const governor = createViewGovernor({
+      initialBudget: 1_000_000,
+      interactionSettleMs: 100,
+    });
+    const setBudget = vi.fn();
+    governor.register({ setPointBudget: setBudget });
+
+    // Two consecutive missed frames crash the moving budget mid-gesture.
+    const gesture = governor.beginMotion("explicit");
+    governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
+    governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
+    expect(governor.stats().trackBudget).toBe(500_000);
+
+    gesture.release();
+    vi.advanceTimersByTime(100);
+
+    // Settling re-seeds from the stationary track's own budget — capacity
+    // this machine already proved at the stationary target — not from the
+    // crashed moving budget it would otherwise spend seconds climbing out of.
+    const stats = governor.stats();
+    expect(stats.regime).toBe("stationary");
+    expect(stats.trackBudget).toBe(1_000_000);
+    expect(stats.lastAdjustment).toMatchObject({ reason: "seeded" });
+  });
+
+  it("recovers a crashed moving budget from the settled track", () => {
+    const governor = createViewGovernor({
+      initialBudget: 1_000_000,
+      interactionSettleMs: 100,
+      minSamples: 1,
+      cooldownMs: 0,
+      maxIncreaseStep: 1,
+    });
+    const setBudget = vi.fn();
+    governor.register({ setPointBudget: setBudget });
+
+    // The moving track crashes: the first miss halves through the damped
+    // path (minSamples 1), the second through the emergency cut.
+    const gesture = governor.beginMotion("explicit");
+    governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
+    governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
+    expect(governor.stats().trackBudget).toBe(250_000);
+
+    // The settled track then proves out a far higher density. The moving
+    // track's own frames can never vote it back up — a healthy gesture on a
+    // vsync-floored display reads exactly the display cadence, inside the
+    // moving dead-band — so this is the only way it recovers.
+    gesture.release();
+    vi.advanceTimersByTime(100);
+    frames(governor, 1, 3);
+    expect(governor.stats().trackBudget).toBe(8_000_000);
+
+    // A fresh gesture inherits a floor from that recovery instead of drawing
+    // the crashed density for the rest of the session.
+    governor.beginMotion("explicit");
+    const stats = governor.stats();
+    expect(stats.regime).toBe("interaction");
+    expect(stats.trackBudget).toBe(2_000_000);
+    expect(stats.lastAdjustment).toMatchObject({ reason: "seeded" });
+  });
+
   it("adapts on a host clock that is not the wall clock", () => {
     // `HostFrameMetrics.now` may be any epoch. A host that stamps frames with
     // performance.now() — the clock it already measures frame time with —
@@ -248,10 +310,11 @@ describe("createViewGovernor stationary refinement", () => {
       projectedImportance: 1,
     });
 
-    // The one stamped frame, and it is slow enough to force an emergency cut
+    // The only stamped frames, slow enough in a row to force an emergency cut
     // while the camera moves: that is what arms the cooldown.
     const gesture = governor.beginMotion("explicit");
     governor.recordHostFrame({ hostFrameMs: 400, now: 0 });
+    governor.recordHostFrame({ hostFrameMs: 400, now: 16 });
     const cut = governor.stats().trackBudget;
     expect(cut).toBeLessThan(1_000_000);
 
@@ -470,16 +533,58 @@ describe("createViewGovernor settle window", () => {
 });
 
 describe("createViewGovernor emergency response", () => {
-  it("reduces immediately on a severely missed frame while moving", () => {
+  it("reduces on the second consecutive severely missed frame", () => {
+    const governor = createViewGovernor({ initialBudget: 1_000_000 });
+    const setBudget = vi.fn();
+    governor.register({ setPointBudget: setBudget });
+    governor.beginMotion("explicit");
+    // Displayed cadence quantizes to whole vsyncs, so one missed 60 Hz frame
+    // reads as ~33 ms — past 2× the moving target. An isolated miss is a
+    // hitch (a tile upload, a GC pause), not a sustained cadence: it must be
+    // measured, never answered with a halving.
+    governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
+    expect(setBudget).not.toHaveBeenCalledWith(500_000);
+    expect(governor.stats().samples).toBe(1);
+    governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
+    expect(setBudget).toHaveBeenLastCalledWith(500_000);
+  });
+
+  it("does not cut when a healthy frame interrupts the missed ones", () => {
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
     const setBudget = vi.fn();
     governor.register({ setPointBudget: setBudget });
     governor.beginMotion("explicit");
     governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
-    expect(setBudget).toHaveBeenLastCalledWith(500_000);
+    governor.recordHostFrame({ hostFrameMs: 10, now: tick() });
+    governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
+    expect(setBudget).not.toHaveBeenCalledWith(500_000);
+    // The misses were measured, not discarded: the damped controller answers
+    // a scene that hitches every other frame.
+    expect(governor.stats().samples).toBe(3);
   });
 
-  it("halves the budget on severe input delay while moving", () => {
+  it("does not carry a missed frame across gesture bursts", () => {
+    const governor = createViewGovernor({
+      initialBudget: 1_000_000,
+      interactionSettleMs: 100,
+    });
+    const setBudget = vi.fn();
+    governor.register({ setPointBudget: setBudget });
+
+    const first = governor.beginMotion("explicit");
+    governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
+    first.release();
+    vi.advanceTimersByTime(100);
+
+    // A fresh burst from rest starts with a clean streak: its first missed
+    // frame is this gesture's isolated hitch, not the second half of a pair
+    // split across two gestures.
+    governor.beginMotion("explicit");
+    governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
+    expect(setBudget).not.toHaveBeenCalledWith(500_000);
+  });
+
+  it("halves the budget on sustained severe input delay while moving", () => {
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
     const setBudget = vi.fn();
     governor.register({ setPointBudget: setBudget });
@@ -487,14 +592,16 @@ describe("createViewGovernor emergency response", () => {
     // 5ms host frame is well under target*2, so only the input-delay signal
     // can trigger the cut — this isolates the severe-input branch.
     governor.recordHostFrame({ hostFrameMs: 5, inputDelayMs: 80, now: tick() });
+    governor.recordHostFrame({ hostFrameMs: 5, inputDelayMs: 80, now: tick() });
     expect(setBudget).toHaveBeenLastCalledWith(500_000);
   });
 
-  it("halves the budget on a severe long task while moving", () => {
+  it("halves the budget on a sustained severe long task while moving", () => {
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
     const setBudget = vi.fn();
     governor.register({ setPointBudget: setBudget });
     governor.beginMotion("inferred");
+    governor.recordHostFrame({ hostFrameMs: 5, longTaskMs: 120, now: tick() });
     governor.recordHostFrame({ hostFrameMs: 5, longTaskMs: 120, now: tick() });
     expect(setBudget).toHaveBeenLastCalledWith(500_000);
   });
@@ -560,8 +667,9 @@ describe("createViewGovernor emergency response", () => {
     const motion = governor.beginMotion("explicit");
     governor.recordHostFrame({ hostFrameMs: 5, inputDelayMs: 20, now: tick() });
     expect(setBudget).not.toHaveBeenCalledWith(500_000);
-    // The same frame with a severe delay must cut — this is what proves the
-    // mild case exercised a live branch rather than a skipped one.
+    // The same frame with a sustained severe delay must cut — this is what
+    // proves the mild case exercised a live branch rather than a skipped one.
+    governor.recordHostFrame({ hostFrameMs: 5, inputDelayMs: 80, now: tick() });
     governor.recordHostFrame({ hostFrameMs: 5, inputDelayMs: 80, now: tick() });
     expect(setBudget).toHaveBeenCalledWith(500_000);
     motion.release();
