@@ -63,12 +63,17 @@ body {
 
 h1 {
   margin: 0;
+  min-width: 0;
   font-size: 18px;
   letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .title-actions {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 8px;
 }
