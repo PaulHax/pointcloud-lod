@@ -121,6 +121,11 @@ export type RendererAdapter = {
  * owns, which is what a memory ceiling has to work from.
  */
 export type RendererAdapterStats = {
+  /**
+   * Monotonic revision of submitted resource changes. The first render after
+   * this changes may allocate or upload buffers and is not a capacity sample.
+   */
+  readonly workRevision: number;
   /** Tiles matching the controller's submitted set; drawn while visible. */
   readonly submittedTiles: number;
   readonly submittedPoints: number;
@@ -206,6 +211,7 @@ export const createRendererAdapter = (
   let submittedBytes = 0;
   let pooledPoints = 0;
   let pooledBytes = 0;
+  let workRevision = 0;
 
   const holdSubmitted = (keyString: string, entry: TileActors): void => {
     tiles.set(keyString, entry);
@@ -371,7 +377,10 @@ export const createRendererAdapter = (
       // to add a tile — which, for a cloud the host just switched off, is
       // never.
       trimPool();
-      if (changed) scheduleRender();
+      if (changed) {
+        workRevision += 1;
+        scheduleRender();
+      }
     },
 
     setBaseMatrix(matrix) {
@@ -451,6 +460,7 @@ export const createRendererAdapter = (
         }
       }
       return {
+        workRevision,
         submittedTiles: tiles.size,
         submittedPoints,
         submittedBytes,

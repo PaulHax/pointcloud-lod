@@ -32,7 +32,9 @@ const frames = (
 
 /** Take and immediately drop a motion reference, then let the view settle. */
 const moveAndSettle = (governor: ViewGovernor, settleMs: number): void => {
-  governor.beginMotion("explicit").release();
+  const motion = governor.beginMotion("explicit");
+  governor.recordCameraChange();
+  motion.release();
   vi.advanceTimersByTime(settleMs);
 };
 
@@ -115,6 +117,7 @@ describe("createViewGovernor motion references", () => {
 
     const gesture = governor.beginMotion("explicit");
     const playback = governor.beginMotion("inferred");
+    governor.recordCameraChange();
     expect(governor.stats().regime).toBe("interaction");
     expect(governor.stats().motion).toMatchObject({
       explicitReferences: 1,
@@ -145,6 +148,7 @@ describe("createViewGovernor motion references", () => {
     const governor = createViewGovernor({ interactionSettleMs: 100 });
     const held = governor.beginMotion("inferred");
     const other = governor.beginMotion("inferred");
+    governor.recordCameraChange();
     held.release();
     held.release();
     expect(governor.stats().motion.inferredReferences).toBe(1);
@@ -178,6 +182,7 @@ describe("createViewGovernor stationary refinement", () => {
     governor.register(memberOptions(setBudget));
 
     const gesture = governor.beginMotion("explicit");
+    governor.recordCameraChange();
     frames(governor, 1, 1); // fast moving frame: the moving track doubles
     expect(setBudget).toHaveBeenLastCalledWith(2_000_000);
 
@@ -204,6 +209,7 @@ describe("createViewGovernor stationary refinement", () => {
 
     // Two consecutive missed frames crash the moving budget mid-gesture.
     const gesture = governor.beginMotion("explicit");
+    governor.recordCameraChange();
     governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
     governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
     expect(governor.stats().trackBudget).toBe(500_000);
@@ -234,6 +240,7 @@ describe("createViewGovernor stationary refinement", () => {
     // The moving track crashes: the first miss halves through the damped
     // path (minSamples 1), the second through the emergency cut.
     const gesture = governor.beginMotion("explicit");
+    governor.recordCameraChange();
     governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
     governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
     expect(governor.stats().trackBudget).toBe(250_000);
@@ -280,6 +287,7 @@ describe("createViewGovernor stationary refinement", () => {
     };
 
     const gesture = governor.beginMotion("explicit");
+    governor.recordCameraChange();
     hostFrames(200);
     expect(governor.stats().regime).toBe("interaction");
     // Wedged in a foreign-epoch cooldown, this budget never moves at all.
@@ -314,6 +322,7 @@ describe("createViewGovernor stationary refinement", () => {
     // The only stamped frames, slow enough in a row to force an emergency cut
     // while the camera moves: that is what arms the cooldown.
     const gesture = governor.beginMotion("explicit");
+    governor.recordCameraChange();
     governor.recordHostFrame({ hostFrameMs: 400, now: 0 });
     governor.recordHostFrame({ hostFrameMs: 400, now: 16 });
     const cut = governor.stats().trackBudget;
@@ -451,6 +460,7 @@ describe("createViewGovernor stationary refinement", () => {
     governor.register(memberOptions(vi.fn()));
 
     const gesture = governor.beginMotion("explicit");
+    governor.recordCameraChange();
     // 30ms is slow for the 16ms moving target and squarely inside the settled
     // dead-band: if these frames leaked, the stationary track would hold.
     frames(governor, 30, 7);
@@ -475,6 +485,7 @@ describe("createViewGovernor settle window", () => {
     governor.register(memberOptions(vi.fn()));
 
     const gesture = governor.beginMotion("explicit");
+    governor.recordCameraChange();
     // 16 ms is the moving target, squarely inside the dead-band: the gesture
     // itself asks for no change, so anything that moves the budget below came
     // from the settle window.
@@ -504,6 +515,7 @@ describe("createViewGovernor settle window", () => {
     const opening: number[] = [];
     for (let cycle = 0; cycle < 5; cycle += 1) {
       const gesture = governor.beginMotion("explicit");
+      governor.recordCameraChange();
       opening.push(governor.stats().trackBudget);
       frames(governor, 16, 8); // sustained exactly on the moving target
       gesture.release();
@@ -520,7 +532,9 @@ describe("createViewGovernor settle window", () => {
     const governor = createViewGovernor(FAST_ADAPT);
     governor.register(memberOptions(vi.fn()));
 
-    governor.beginMotion("explicit").release();
+    const motion = governor.beginMotion("explicit");
+    governor.recordCameraChange();
+    motion.release();
     frames(governor, 1, 40); // discarded: still inside the settle window
     vi.advanceTimersByTime(100);
     expect(governor.stats().regime).toBe("stationary");
@@ -549,6 +563,7 @@ describe("createViewGovernor emergency response", () => {
     setDensity.mockClear();
 
     const motion = governor.beginMotion("explicit");
+    governor.recordCameraChange();
     governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
     governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
     expect(setBudget).not.toHaveBeenCalled();
@@ -609,6 +624,7 @@ describe("createViewGovernor emergency response", () => {
     governor.register(memberOptions(setBudget, setDensity));
 
     const first = governor.beginMotion("explicit");
+    governor.recordCameraChange();
     governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
     first.release();
     vi.advanceTimersByTime(100);
@@ -727,6 +743,7 @@ describe("createViewGovernor emergency response", () => {
     // accumulate, so the moving regime would never adapt at all.
     for (let burst = 0; burst < 8; burst += 1) {
       const motion = governor.beginMotion("explicit");
+      governor.recordCameraChange();
       governor.recordHostFrame({ hostFrameMs: 5, now: tick() });
       motion.release();
       vi.advanceTimersByTime(50);
@@ -793,6 +810,98 @@ describe("createViewGovernor emergency response", () => {
     // stationary dead-band even though the host frame itself was 10ms.
     governor.recordHostFrame({ hostFrameMs: 10, vtkFrameMs: 24, now: tick() });
     expect(setBudget).toHaveBeenLastCalledWith(750_000);
+  });
+});
+
+describe("createViewGovernor capacity eligibility", () => {
+  it("keeps a contaminated 500 ms frame out of lasting capacity", () => {
+    const governor = createViewGovernor({
+      initialBudget: 1_000_000,
+      minSamples: 1,
+      cooldownMs: 0,
+    });
+    governor.register(memberOptions(vi.fn()));
+
+    governor.recordCapacitySample({
+      frameMs: 500,
+      regime: "stationary",
+      eligible: false,
+      now: tick(),
+    });
+
+    expect(governor.stats()).toMatchObject({
+      trackBudget: 1_000_000,
+      samples: 0,
+      capacitySamples: { eligible: 0, rejected: 1, lastEligible: false },
+    });
+  });
+
+  it("derives fallback rejection from required core work", () => {
+    const governor = createViewGovernor({
+      initialBudget: 1_000_000,
+      minSamples: 1,
+      cooldownMs: 0,
+    });
+    const member = governor.register(memberOptions(vi.fn()));
+    member.update({ workPending: true });
+
+    governor.recordHostFrame({ hostFrameMs: 500, now: tick() });
+
+    expect(governor.stats()).toMatchObject({
+      trackBudget: 1_000_000,
+      samples: 0,
+      capacitySamples: { eligible: 0, rejected: 1, lastEligible: false },
+    });
+  });
+
+  it("still reduces capacity on a sustained clean GPU cost", () => {
+    const governor = createViewGovernor({
+      initialBudget: 1_000_000,
+      minSamples: 2,
+      cooldownMs: 0,
+    });
+    governor.register(memberOptions(vi.fn()));
+
+    for (let sample = 0; sample < 2; sample += 1) {
+      governor.recordCapacitySample({
+        frameMs: 80,
+        regime: "stationary",
+        eligible: true,
+        now: tick(),
+      });
+    }
+
+    expect(governor.stats()).toMatchObject({
+      trackBudget: 500_000,
+      capacitySamples: { eligible: 2, rejected: 0, lastEligible: true },
+    });
+  });
+
+  it("reports input, camera stability, and required work independently", () => {
+    const governor = createViewGovernor({ interactionSettleMs: 100 });
+    const member = governor.register(memberOptions(vi.fn()));
+    const motion = governor.beginMotion("explicit");
+    governor.recordCameraChange();
+    member.update({ workPending: true });
+
+    expect(governor.stats().activity).toEqual({
+      inputActive: true,
+      cameraStable: false,
+      workPending: true,
+      measurementEligible: false,
+    });
+
+    vi.advanceTimersByTime(100);
+    member.update({ workPending: false });
+    expect(governor.stats().activity).toEqual({
+      inputActive: true,
+      cameraStable: true,
+      workPending: false,
+      measurementEligible: true,
+    });
+
+    motion.release();
+    expect(governor.stats().regime).toBe("stationary");
   });
 });
 
@@ -1013,7 +1122,7 @@ describe("createViewGovernor diagnostics", () => {
     expect(setBudget).toHaveBeenLastCalledWith(0);
   });
 
-  it("explains a drawn point count without exposing internal state", () => {
+  it("explains a drawn point count while rejecting active-work samples", () => {
     const governor = createViewGovernor({
       initialBudget: 1_000_000,
       maxBudget: 4_000_000,
@@ -1039,36 +1148,31 @@ describe("createViewGovernor diagnostics", () => {
       targetFrameTimeMs: 33,
       estimateMs: null,
       samples: 0,
-      trackBudget: 1_250_000,
+      trackBudget: 1_000_000,
       configuredMaxPoints: 4_000_000,
       memoryCeilingPoints: 9_000_000,
-      aggregateBudget: 1_250_000,
-      selectionBudget: 1_250_000,
+      aggregateBudget: 1_000_000,
+      selectionBudget: 1_000_000,
       activeConstraint: "adaptive",
       activeMembers: 1,
       physicalTileOperations: 3,
       physicalHierarchyOperations: 1,
       needsFrame: true,
+      activity: { workPending: true, measurementEligible: false },
+      capacitySamples: { eligible: 0, rejected: 8, lastEligible: false },
     });
     expect(stats.motion.source).toBeNull();
-    expect(stats.lastAdjustment).toMatchObject({
-      direction: "increase",
-      reason: "below-target",
-      fromBudget: 1_000_000,
-      toBudget: 1_250_000,
-      estimateMs: 1,
-    });
-    expect(stats.lastAdjustment!.atMs).toBe(clock);
+    expect(stats.lastAdjustment).toBeNull();
     expect(stats.members).toEqual([
       {
         id: "cloud-1",
         active: true,
         projectedImportance: 2.5,
-        allocatedShare: 1_250_000,
+        allocatedShare: 1_000_000,
         memoryCeilingPoints: 9_000_000,
-        effectiveBudget: 1_250_000,
-        selectionShare: 1_250_000,
-        effectiveSelectionBudget: 1_250_000,
+        effectiveBudget: 1_000_000,
+        selectionShare: 1_000_000,
+        effectiveSelectionBudget: 1_000_000,
         densityFraction: 1,
         activeConstraint: "adaptive",
         physicalTileOperations: 3,

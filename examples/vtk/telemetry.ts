@@ -59,8 +59,16 @@ export type TelemetryFrameEvent = TelemetryBaseEvent & {
   readonly vtkCpuMs: number;
   readonly governorFrameMs: number;
   readonly gpuMs: number | null;
+  readonly gpuStatus:
+    | "unsupported"
+    | "pending"
+    | "valid"
+    | "disjoint"
+    | "error";
   /** True when this measurement was handed to the governor. */
   readonly reportedToGovernor: boolean;
+  readonly capacitySampleEligible: boolean;
+  readonly capacitySampleStatus: "pending" | "accepted" | "rejected";
   readonly workRevision: number;
   readonly pendingWork: number;
   readonly clean: boolean;
@@ -94,6 +102,9 @@ export type TelemetrySummary = {
   readonly frames: number;
   readonly cleanFrames: number;
   readonly contaminatedFrames: number;
+  readonly acceptedCapacitySamples: number;
+  readonly rejectedCapacitySamples: number;
+  readonly pendingCapacitySamples: number;
   readonly workEvents: number;
   readonly longTasks: number;
   readonly durationMs: number;
@@ -132,10 +143,20 @@ export type TelemetryRecorder = {
     readonly vtkCpuMs: number;
     readonly governorFrameMs: number;
     readonly gpuMs?: number | null;
+    readonly gpuPending?: boolean;
     readonly reportedToGovernor: boolean;
+    readonly capacitySampleEligible?: boolean;
+    readonly capacitySamplePending?: boolean;
     readonly contamination?: readonly string[];
     readonly state: unknown;
   }): TelemetryFrameEvent | null;
+  resolveGpuFrame(
+    frame: TelemetryFrameEvent,
+    result: {
+      readonly status: "valid" | "disjoint" | "error";
+      readonly gpuMs: number | null;
+    },
+  ): void;
   recordState(reason: string, state: unknown): void;
   summary(): TelemetrySummary;
   trace(): TelemetryTrace;
@@ -315,10 +336,20 @@ export const createTelemetryRecorder = (options: {
     let cleanFrames = 0;
     let workEvents = 0;
     let longTasks = 0;
+    let acceptedCapacitySamples = 0;
+    let rejectedCapacitySamples = 0;
+    let pendingCapacitySamples = 0;
     for (const event of events) {
       if (event.type === "frame") {
         frames += 1;
         if (event.clean) cleanFrames += 1;
+        if (event.capacitySampleStatus === "accepted") {
+          acceptedCapacitySamples += 1;
+        } else if (event.capacitySampleStatus === "rejected") {
+          rejectedCapacitySamples += 1;
+        } else {
+          pendingCapacitySamples += 1;
+        }
       } else if (event.type === "work") {
         workEvents += 1;
       } else if (event.type === "long-task") {
@@ -332,6 +363,9 @@ export const createTelemetryRecorder = (options: {
       frames,
       cleanFrames,
       contaminatedFrames: frames - cleanFrames,
+      acceptedCapacitySamples,
+      rejectedCapacitySamples,
+      pendingCapacitySamples,
       workEvents,
       longTasks,
       durationMs: Math.max(
@@ -446,7 +480,19 @@ export const createTelemetryRecorder = (options: {
         vtkCpuMs: input.vtkCpuMs,
         governorFrameMs: input.governorFrameMs,
         gpuMs: input.gpuMs ?? null,
+        gpuStatus:
+          input.gpuMs !== undefined && input.gpuMs !== null
+            ? "valid"
+            : input.gpuPending
+              ? "pending"
+              : "unsupported",
         reportedToGovernor: input.reportedToGovernor,
+        capacitySampleEligible: input.capacitySampleEligible ?? false,
+        capacitySampleStatus: input.capacitySamplePending
+          ? "pending"
+          : input.capacitySampleEligible
+            ? "accepted"
+            : "rejected",
         workRevision,
         pendingWork,
         clean: contamination.size === 0,
@@ -455,6 +501,24 @@ export const createTelemetryRecorder = (options: {
       });
       lastFrameRevision = workRevision;
       return event;
+    },
+
+    resolveGpuFrame(frame, result) {
+      const index = events.indexOf(frame);
+      if (index < 0) return;
+      const event = events[index];
+      if (event?.type !== "frame") return;
+      events[index] = {
+        ...event,
+        gpuMs: result.status === "valid" ? result.gpuMs : null,
+        gpuStatus: result.status,
+        capacitySampleStatus:
+          event.capacitySampleStatus !== "pending"
+            ? event.capacitySampleStatus
+            : event.capacitySampleEligible && result.status === "valid"
+              ? "accepted"
+              : "rejected",
+      };
     },
 
     recordState(reason, state) {

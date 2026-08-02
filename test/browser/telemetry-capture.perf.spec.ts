@@ -53,7 +53,7 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
   });
 
   it.skipIf(captureUrl.length === 0)(
-    "captures an initial load, user gesture, and settled view",
+    "captures overview, ROI zoom, close orbit, horizontal pan, and return",
     async () => {
       if (!usingRealGpu()) {
         throw new Error(
@@ -123,7 +123,18 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
         await session.settle(300_000);
         await session.markTelemetry("settled-after-gesture");
 
+        const beforePreZoomPan = await session.readCamera();
+        await session.markTelemetry("pre-zoom-pan-start");
+        await session.drag(
+          Array.from({ length: 8 }, () => ({ dx: 0, dy: -8 })),
+          20,
+        );
+        await session.markTelemetry("pre-zoom-pan-ended");
         const beforeTightZoom = await session.readCamera();
+        await session.page.mouse.move(
+          box.x + box.width / 2,
+          box.y + box.height / 2,
+        );
         await session.markTelemetry("tight-zoom-start");
         for (let index = 0; index < 40; index += 1) {
           await session.page.mouse.wheel(0, -120);
@@ -137,32 +148,76 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
         await session.markTelemetry("tight-zoom-settled");
         const afterTightZoom = await session.readCamera();
 
-        await session.markTelemetry("overview-start");
-        let overviewX = box.x + box.width / 2;
-        let overviewY = box.y + box.height / 2;
-        await session.page.mouse.move(overviewX, overviewY);
+        await session.markTelemetry("close-orbit-start");
+        let gestureX = box.x + box.width / 2;
+        let gestureY = box.y + box.height / 2;
+        await session.page.mouse.move(gestureX, gestureY);
         await session.page.mouse.down({ button: "right" });
         for (let index = 0; index < 8; index += 1) {
-          overviewY -= 14;
-          await session.page.mouse.move(overviewX, overviewY);
+          gestureX += 14;
+          if (index < 2) gestureY -= 14;
+          await session.page.mouse.move(gestureX, gestureY);
           await session.frame();
         }
         await session.page.mouse.up({ button: "right" });
-        await session.markTelemetry("horizontal-rotation-ended");
-
-        overviewX = box.x + box.width / 2;
-        overviewY = box.y + box.height / 2;
-        await session.page.mouse.move(overviewX, overviewY);
-        for (let index = 0; index < 40; index += 1) {
-          await session.page.mouse.wheel(0, 120);
-          await session.frame();
-        }
-        await session.markTelemetry("overview-gesture-ended");
+        await session.markTelemetry("close-orbit-ended");
         await session.settle(300_000);
         await session.render();
         await session.frame();
         await session.settle(300_000);
-        await session.markTelemetry("overview-settled");
+        await session.markTelemetry("close-orbit-settled");
+        const afterCloseOrbit = await session.readCamera();
+
+        await session.markTelemetry("horizontal-rotation-start");
+        gestureX = box.x + box.width / 2;
+        gestureY = box.y + box.height / 2;
+        await session.page.mouse.move(gestureX, gestureY);
+        await session.page.mouse.down({ button: "right" });
+        for (let index = 0; index < 6; index += 1) {
+          gestureY -= 14;
+          await session.page.mouse.move(gestureX, gestureY);
+          await session.frame();
+        }
+        await session.page.mouse.up({ button: "right" });
+        await session.markTelemetry("horizontal-rotation-ended");
+        const beforeHorizontalPan = await session.readCamera();
+
+        await session.markTelemetry("horizontal-pan-start");
+        gestureX = box.x + box.width / 2;
+        gestureY = box.y + box.height * 0.9;
+        await session.page.mouse.move(gestureX, gestureY);
+        await session.page.mouse.down();
+        for (let index = 0; index < 40; index += 1) {
+          gestureY -= 14;
+          await session.page.mouse.move(gestureX, gestureY);
+          await session.page.waitForTimeout(20);
+          await session.frame();
+        }
+        await session.page.mouse.up();
+        await session.markTelemetry("horizontal-pan-ended");
+        await session.settle(300_000);
+        await session.render();
+        await session.frame();
+        const horizontalStats = await session.settle(300_000);
+        await session.markTelemetry("horizontal-roi-settled");
+        const horizontalRoiCamera = await session.readCamera();
+
+        // The return to overview is deliberately a separate phase after the
+        // close horizontal view has settled and been measured.
+        await session.markTelemetry("return-overview-start");
+        gestureX = box.x + box.width / 2;
+        gestureY = box.y + box.height / 2;
+        await session.page.mouse.move(gestureX, gestureY);
+        for (let index = 0; index < 44; index += 1) {
+          await session.page.mouse.wheel(0, 120);
+          await session.frame();
+        }
+        await session.markTelemetry("return-overview-gesture-ended");
+        await session.settle(300_000);
+        await session.render();
+        await session.frame();
+        await session.settle(300_000);
+        await session.markTelemetry("return-overview-settled");
         const overviewCamera = await session.readCamera();
 
         await session.stopTelemetry();
@@ -186,6 +241,10 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
         expect(trace.summary.frames).toBeGreaterThan(0);
         expect(trace.summary.cleanFrames).toBeGreaterThan(0);
         expect(trace.summary.workEvents).toBeGreaterThan(0);
+        const validGpuFrames = trace.events.filter(
+          (event) => event.type === "frame" && event.gpuStatus === "valid",
+        );
+        expect(validGpuFrames.length).toBeGreaterThan(0);
         expect(markerReasons).toEqual(
           expect.arrayContaining([
             "marker:source-opened",
@@ -194,19 +253,52 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
             "marker:drag-ended",
             "marker:gesture-ended",
             "marker:settled-after-gesture",
+            "marker:pre-zoom-pan-start",
+            "marker:pre-zoom-pan-ended",
             "marker:tight-zoom-start",
             "marker:tight-zoom-ended",
             "marker:tight-zoom-settled",
-            "marker:overview-start",
+            "marker:close-orbit-start",
+            "marker:close-orbit-ended",
+            "marker:close-orbit-settled",
+            "marker:horizontal-rotation-start",
             "marker:horizontal-rotation-ended",
-            "marker:overview-gesture-ended",
-            "marker:overview-settled",
+            "marker:horizontal-pan-start",
+            "marker:horizontal-pan-ended",
+            "marker:horizontal-roi-settled",
+            "marker:return-overview-start",
+            "marker:return-overview-gesture-ended",
+            "marker:return-overview-settled",
           ]),
         );
         expect(cameraDistance(afterTightZoom)).toBeLessThan(
           cameraDistance(beforeTightZoom),
         );
-        expect(Math.abs(cameraPitchDegrees(overviewCamera))).toBeLessThan(15);
+        expect(beforeTightZoom.focalPoint[2]).toBeLessThan(
+          beforePreZoomPan.focalPoint[2]!,
+        );
+        expect(cameraDistance(afterCloseOrbit)).toBeCloseTo(
+          cameraDistance(afterTightZoom),
+          5,
+        );
+        expect(Math.abs(cameraPitchDegrees(afterCloseOrbit))).toBeGreaterThan(
+          35,
+        );
+        expect(Math.abs(cameraPitchDegrees(afterCloseOrbit))).toBeLessThan(55);
+        expect(Math.abs(cameraPitchDegrees(horizontalRoiCamera))).toBeLessThan(
+          15,
+        );
+        expect(horizontalRoiCamera.focalPoint[2]).toBeLessThan(
+          beforeHorizontalPan.focalPoint[2]!,
+        );
+        expect(cameraDistance(horizontalRoiCamera)).toBeCloseTo(
+          cameraDistance(afterTightZoom),
+          5,
+        );
+        expect(
+          horizontalStats.controller?.selection.targetTiles,
+        ).toBeGreaterThan(0);
+        expect(horizontalStats.adapter?.drawnPoints).toBeGreaterThan(0);
         expect(cameraDistance(overviewCamera)).toBeGreaterThan(
           cameraDistance(beforeTightZoom) * 0.5,
         );
@@ -217,6 +309,9 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
             frames: trace.summary.frames,
             cleanFrames: trace.summary.cleanFrames,
             contaminatedFrames: trace.summary.contaminatedFrames,
+            validGpuFrames: validGpuFrames.length,
+            acceptedCapacitySamples: trace.summary.acceptedCapacitySamples,
+            rejectedCapacitySamples: trace.summary.rejectedCapacitySamples,
             workEvents: trace.summary.workEvents,
             longTasks: trace.summary.longTasks,
             durationMs: trace.summary.durationMs,

@@ -119,6 +119,39 @@ describe("example telemetry", () => {
     ]);
   });
 
+  it("attaches asynchronous GPU timing to the original frame", () => {
+    let clock = 0;
+    const recorder = createTelemetryRecorder({
+      environment: () => ENVIRONMENT,
+      now: () => clock,
+      wallNow: () => new Date(clock),
+    });
+    recorder.start();
+    const frame = recorder.recordFrame({
+      presentedAtMs: 0,
+      rafIntervalMs: 16,
+      vtkCpuMs: 3,
+      governorFrameMs: 16,
+      gpuPending: true,
+      reportedToGovernor: true,
+      capacitySampleEligible: true,
+      capacitySamplePending: true,
+      state: null,
+    })!;
+    expect(frame.gpuStatus).toBe("pending");
+
+    recorder.resolveGpuFrame(frame, { status: "valid", gpuMs: 7.5 });
+    expect(recorder.trace().events).toContainEqual(
+      expect.objectContaining({
+        type: "frame",
+        sequence: frame.sequence,
+        gpuStatus: "valid",
+        gpuMs: 7.5,
+        capacitySampleStatus: "accepted",
+      }),
+    );
+  });
+
   it("does not let work from a cleared recording finish into the new one", () => {
     let clock = 0;
     const recorder = createTelemetryRecorder({

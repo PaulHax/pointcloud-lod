@@ -84,9 +84,11 @@ export {
 export {
   createViewGovernor,
   type BudgetConstraint,
+  type CapacitySampleMetrics,
   type HostFrameMetrics,
   type MotionReference,
   type MotionSourceKind,
+  type TransientFrameMetrics,
   type ViewGovernor,
   type ViewGovernorMember,
   type ViewGovernorMemberOptions,
@@ -95,6 +97,13 @@ export {
   type ViewGovernorOptions,
   type ViewGovernorStats,
 } from "./viewGovernor";
+
+export {
+  createGpuFrameTimer,
+  type GpuFrameTimer,
+  type GpuFrameTimerOptions,
+  type GpuTimerResult,
+} from "./gpuTimer";
 
 export {
   createHttpTileSource,

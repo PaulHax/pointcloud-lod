@@ -292,6 +292,45 @@ describe("example controls", () => {
     }
   });
 
+  it("orbits around a centered pivot after an off-center zoom", async () => {
+    const session = await openExample({ cloud: MULTIPAGE_CLOUD.urlPath });
+    try {
+      await session.setBudgetMode("fixed");
+      const initial = await session.readCamera();
+      await wheelAtViewerCenter(session, 8, 0, 0.8, 0.25);
+      const afterZoom = await session.readCamera();
+      expect(afterZoom.focalPoint).not.toEqual(initial.focalPoint);
+
+      const box = await session.page.locator("#viewer").boundingBox();
+      if (box === null) throw new Error("the viewer has no box to orbit in");
+      const x = box.x + box.width / 2;
+      const y = box.y + box.height / 2;
+      await session.page.mouse.move(x, y);
+      await session.page.mouse.down({ button: "right" });
+      const atOrbitStart = await session.readCamera();
+      await session.page.mouse.move(x + 100, y);
+      await session.frame();
+      await session.page.mouse.up({ button: "right" });
+      const afterOrbit = await session.readCamera();
+      const beforeEye = difference(
+        atOrbitStart.position,
+        atOrbitStart.focalPoint,
+      );
+      const afterEye = difference(afterOrbit.position, afterOrbit.focalPoint);
+
+      expect(afterOrbit.focalPoint).toEqual(atOrbitStart.focalPoint);
+      expect(
+        relativeGap(cameraDistance(afterOrbit), cameraDistance(atOrbitStart)),
+      ).toBeLessThan(1e-12);
+      expect(dot(beforeEye, afterEye)).toBeGreaterThan(0);
+      expect(cross(beforeEye, afterEye)[2]).toBeLessThan(0);
+      expect(afterOrbit.position).not.toEqual(atOrbitStart.position);
+      expect(session.failures).toEqual([]);
+    } finally {
+      await session.close();
+    }
+  });
+
   it("reports presented FPS and stops wheel zoom before the focal point", async () => {
     const session = await openExample({ cloud: MULTIPAGE_CLOUD.urlPath });
     try {

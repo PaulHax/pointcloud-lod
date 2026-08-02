@@ -178,7 +178,8 @@ With a `ViewGovernor`, the host closes a frame-time feedback loop:
 
 ```text
 paint frame
-  → recordHostFrame({ hostFrameMs, vtkFrameMs })
+  → recordTransientFrame({ hostFrameMs, vtkFrameMs })
+  → recordCapacitySample(clean asynchronous GPU result)
   → governor adjusts the aggregate draw budget
   → settled capacity stays selected and resident
   → each controller receives selection budget + density fraction
@@ -241,8 +242,9 @@ These methods are useful when application policy lives outside the library:
 | `controller.setPresentation(...)`                    | Switch live between Auto and Fixed point presentation.                                                                                                                   |
 | `controller.setRefinementCutoffPx(pixels)`           | Stop descending when a node's projected spacing is below this threshold. Lower values allow finer traversal; the point and memory budgets still apply.                   |
 | `controller.refresh()`                               | Force immediate reselection against the current camera, useful after external state changes that do not produce a new camera value.                                      |
-| `controller.beginInteraction()` / `endInteraction()` | Mark explicit camera interaction and control the controller's settled reselection window. Calls may be nested.                                                           |
+| `controller.beginInteraction()` / `endInteraction()` | Mark explicit camera interaction for controller diagnostics and immediate selection. Calls may be nested.                                                                |
 | `governor.beginMotion(kind)`                         | Hold the adaptive budget in its moving-camera regime. Use `"explicit"` for announced gestures and `"inferred"` for playback or programmatic motion detected by the host. |
+| `governor.recordCameraChange()`                      | Report a rendered-camera change. The governor owns the trailing camera-stability timer.                                                                                  |
 | `adapter.setPointDiameterCssPx(pixels)`              | Set point size outside the controller. Omit `onPointDiameterCssPx` when the application owns this value so two policies do not compete.                                  |
 | `adapter.setDevicePixelRatio(ratio)`                 | Update CSS-to-framebuffer scaling without changing selection or the CSS point diameter.                                                                                  |
 | `adapter.setDensityFraction(fraction)`               | Apply progressive prefix drawing directly when policy lives outside the controller.                                                                                      |
@@ -254,17 +256,17 @@ These methods are useful when application policy lives outside the library:
 
 The main dials and their tradeoffs are:
 
-| Dial                              | Primary effect                                                                              | Tune when                                                      |
-| --------------------------------- | ------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `pointBudget` or governor targets | Visible detail and render cost                                                              | First performance/quality control                              |
-| `presentation`                    | Point coverage and apparent density, not selected detail                                    | Points look porous or overly solid                             |
-| `refinementCutoffPx`              | How far hierarchy traversal is allowed to descend                                           | Storage has detail finer than the view needs                   |
-| `memory`                          | GPU-resident byte ceiling, converted to a point ceiling                                     | Multiple clouds compete for GPU memory                         |
-| `cacheBytes`                      | Decoded CPU payloads retained for fast reselection                                          | Revisiting views causes too much decoding or uses too much RAM |
-| `fetchConcurrency`                | Parallel tile fetch/decode work                                                             | The source is under-filled or decoding saturates the client    |
-| `hierarchyConcurrency`            | Parallel hierarchy-page work                                                                | Deep traversal stalls waiting for hierarchy                    |
-| `selectionDelayMs`                | Reselection rate during camera changes                                                      | Camera motion causes excess selection churn                    |
-| `interactionSettleMs`             | Controller delay for a settled reselection; governor delay for the stationary budget regime | Quality rises too early or too late after motion               |
+| Dial                              | Primary effect                                           | Tune when                                                      |
+| --------------------------------- | -------------------------------------------------------- | -------------------------------------------------------------- |
+| `pointBudget` or governor targets | Visible detail and render cost                           | First performance/quality control                              |
+| `presentation`                    | Point coverage and apparent density, not selected detail | Points look porous or overly solid                             |
+| `refinementCutoffPx`              | How far hierarchy traversal is allowed to descend        | Storage has detail finer than the view needs                   |
+| `memory`                          | GPU-resident byte ceiling, converted to a point ceiling  | Multiple clouds compete for GPU memory                         |
+| `cacheBytes`                      | Decoded CPU payloads retained for fast reselection       | Revisiting views causes too much decoding or uses too much RAM |
+| `fetchConcurrency`                | Parallel tile fetch/decode work                          | The source is under-filled or decoding saturates the client    |
+| `hierarchyConcurrency`            | Parallel hierarchy-page work                             | Deep traversal stalls waiting for hierarchy                    |
+| `selectionDelayMs`                | Reselection rate during camera changes                   | Camera motion causes excess selection churn                    |
+| `interactionSettleMs`             | Governor delay for declaring the rendered camera stable  | Quality rises too early or too late after motion               |
 
 Visibility, activity, and disposal answer different questions:
 
@@ -314,12 +316,12 @@ GPU-residency and frame-time statistics. The current moving, settling, or
 settled status is the first row of that budget chain.
 
 The page holds an explicit motion reference for the interactor's gestures and
-infers the rest by comparing the camera it hands to LOD on every painted frame,
-releasing that reference after 250 ms of stillness. It reports the displayed
-frame interval and synchronous vtk render cost through `recordHostFrame`, so
-asynchronous rendering and missed presentation frames count toward the point
-budget without renderer-specific instrumentation. The page repaints while
-`needsFrame()` is true.
+reports rendered-camera changes to the governor, which owns the single trailing
+stability timer. It uses displayed cadence for immediate pressure and
+asynchronous WebGL timer queries for lasting capacity. Controller work and
+renderer resource revisions reject frames crossed by streaming, decode, batch,
+or first-upload work. Clean displayed cadence is the fallback when hardware GPU
+timing is unavailable. The page repaints while `needsFrame()` is true.
 `window.pointCloudExample` exposes `stats()`, `setProjection()`,
 `setBudgetMode()` and `dispose()` for browser tests.
 
@@ -425,9 +427,13 @@ const member = governor.register({
   setDensityFraction: (fraction) => controller.setDensityFraction(fraction),
 });
 
-// Report every completed host frame, including non-VTK work, then ask whether
-// the view still needs painting. The governor never schedules anything itself.
-governor.recordHostFrame({ hostFrameMs, vtkFrameMs });
+// Immediate cadence protects interaction without changing lasting capacity.
+governor.recordTransientFrame({ hostFrameMs, vtkFrameMs });
+
+// Feed asynchronous GPU results to the regime that drew the frame. `eligible`
+// is false when controller workRevision, adapter workRevision, or workPending
+// shows streaming, decode, renderer-batch, or first-upload contamination.
+governor.recordCapacitySample({ frameMs: gpuMs, regime, eligible });
 if (governor.needsFrame()) scheduleRender();
 
 // Feed the split and the diagnostics from the controller's own statistics:
@@ -437,6 +443,7 @@ member.update({
   memoryCeilingPoints: stats.memoryCeilingPoints,
   physicalTileOperations: stats.physicalTileOperations,
   physicalHierarchyOperations: stats.physicalHierarchyOperations,
+  workPending: stats.workPending,
 });
 
 // Hold the moving regime while the camera moves. References compose across
@@ -445,14 +452,14 @@ member.update({
 const gesture = governor.beginMotion("explicit");
 controller.beginInteraction();
 // ...camera moves...
+governor.recordCameraChange();
 gesture.release();
 controller.endInteraction();
 
 // Motion the host cannot announce — playback, scrubbing, programmatic
 // animation — is inferred by comparing the camera actually handed to LOD from
-// frame to frame, holding one "inferred" reference for the whole burst and
-// releasing it after a quiet debounce (250 ms in the shipped integrations).
-// A scene change with an unchanged camera is not motion.
+// frame to frame and calling recordCameraChange(). A scene change with an
+// unchanged camera is not motion.
 
 // Drop a controller out of the split without disposing it:
 member.update({ active: false });

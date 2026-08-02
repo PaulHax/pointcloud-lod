@@ -108,11 +108,6 @@ export type LodControllerOptions = {
    * out-of-memory failure it has no way to sense.
    */
   memory?: MemoryPool | number;
-  /**
-   * How long the camera must be still before the stationary refinement pass
-   * runs, ms. Default 750.
-   */
-  interactionSettleMs?: number;
   /** Parallel tile fetches. Default 6. */
   fetchConcurrency?: number;
   /**
@@ -184,6 +179,14 @@ export type LodControllerStats = {
   readonly queuedPages: number;
   /** Hierarchy page operations physically running, cancelled ones included. */
   readonly physicalHierarchyOperations: number;
+  /**
+   * Monotonic revision of hierarchy, tile/decode, and renderer-batch work.
+   * Comparing consecutive presentations catches work that began and finished
+   * between them.
+   */
+  readonly workRevision: number;
+  /** Required current-view work has not drained yet. */
+  readonly workPending: boolean;
   /** The ceiling `physicalTileOperations` is held under. */
   readonly fetchConcurrency: number;
   /** The ceiling `physicalHierarchyOperations` is held under. */
@@ -274,7 +277,7 @@ export type LodController = {
   setCamera(view: CameraView): void;
   /** Enter a camera interaction. Nested calls are reference counted. */
   beginInteraction(): void;
-  /** Leave a camera interaction; the outermost end starts the settle window. */
+  /** Leave a camera interaction. Camera stability belongs to the view governor. */
   endInteraction(): void;
   /**
    * Set the visible-point budget, truncated to whole points; the memory
@@ -583,12 +586,6 @@ export const createLodController = (
     options.selectionDelayMs ?? 150,
     0,
   );
-  const interactionSettleMs = finiteAtLeast(
-    "interactionSettleMs",
-    options.interactionSettleMs ?? 750,
-    0,
-  );
-
   let source = options.source;
   let pointBudget = wholeAtLeast(
     "pointBudget",
@@ -623,13 +620,16 @@ export const createLodController = (
     onPointDiameterCssPx(next);
   };
 
-  let explicitInteractionSeen = false;
   let interactionDepth = 0;
   const currentBudget = (): number =>
     active ? Math.min(pointBudget, memoryCeilingPoints()) : 0;
 
   // Bumped on setSource/dispose; every async continuation checks it.
   let epoch = 0;
+  let workRevision = 0;
+  const markWork = (): void => {
+    workRevision += 1;
+  };
 
   const hierarchy = new Map<string, HierarchyEntry>();
 
@@ -979,6 +979,7 @@ export const createLodController = (
       if (batch.added.length === 0 && batch.removed.length === 0) return;
       submitted = new Map(resident);
       onTiles(batch);
+      markWork();
       scheduleRender();
     });
   };
@@ -1011,9 +1012,11 @@ export const createLodController = (
       pagesInFlight.set(keyString, abort);
       const requestEpoch = epoch;
       physicalHierarchyOperations += 1;
+      markWork();
       source.nodes(keyFromString(keyString), { signal: abort.signal }).then(
         (infos) => {
           physicalHierarchyOperations -= 1;
+          markWork();
           if (pagesInFlight.get(keyString) === abort) {
             pagesInFlight.delete(keyString);
           }
@@ -1047,6 +1050,7 @@ export const createLodController = (
         },
         (error) => {
           physicalHierarchyOperations -= 1;
+          markWork();
           if (pagesInFlight.get(keyString) === abort) {
             pagesInFlight.delete(keyString);
           }
@@ -1308,9 +1312,11 @@ export const createLodController = (
       const requestEpoch = epoch;
       const key = keyFromString(keyString);
       physicalTileOperations += 1;
+      markWork();
       source.loadTile(key, { signal: abort.signal }).then(
         (loadedTile) => {
           physicalTileOperations -= 1;
+          markWork();
           // An epoch change is the only thing that takes a key's read entry
           // away while the read runs, and it also makes the payload worthless:
           // it came from a source nobody is displaying any more.
@@ -1335,6 +1341,7 @@ export const createLodController = (
         },
         (error) => {
           physicalTileOperations -= 1;
+          markWork();
           if (disposed || requestEpoch !== epoch) {
             pump();
             return;
@@ -1493,32 +1500,12 @@ export const createLodController = (
 
   let lastSelection = Number.NEGATIVE_INFINITY;
   let selectionTimer: ReturnType<typeof setTimeout> | null = null;
-  // Fires once the camera has been still for interactionSettleMs, so the
-  // stationary refinement pass runs even when the host renders on demand and
-  // goes quiet after the last interaction frame.
-  let settleTimer: ReturnType<typeof setTimeout> | null = null;
 
   const clearSelectionTimer = (): void => {
     if (selectionTimer !== null) {
       clearTimeout(selectionTimer);
       selectionTimer = null;
     }
-  };
-
-  const clearSettleTimer = (): void => {
-    if (settleTimer !== null) {
-      clearTimeout(settleTimer);
-      settleTimer = null;
-    }
-  };
-
-  const armSettleTimer = (): void => {
-    clearSettleTimer();
-    settleTimer = setTimeout(() => {
-      settleTimer = null;
-      if (disposed) return;
-      runSelection();
-    }, interactionSettleMs);
   };
 
   const requestSelection = (): void => {
@@ -1615,20 +1602,13 @@ export const createLodController = (
       view = nextView;
       sseByKey.clear();
       if (!active) return;
-      // The settle timer is the fallback for hosts that drive the camera
-      // without begin/endInteraction.
-      if (!explicitInteractionSeen && presentation.mode === "auto") {
-        armSettleTimer();
-      }
       requestSelection();
     },
 
     beginInteraction() {
       if (disposed) return;
-      explicitInteractionSeen = true;
       interactionDepth += 1;
       if (interactionDepth !== 1) return;
-      clearSettleTimer();
       // Bypass camera debounce before the first expensive moving frame.
       runSelection();
     },
@@ -1636,8 +1616,6 @@ export const createLodController = (
     endInteraction() {
       if (disposed || interactionDepth === 0) return;
       interactionDepth -= 1;
-      if (interactionDepth !== 0) return;
-      armSettleTimer();
     },
 
     setPointBudget(points) {
@@ -1674,7 +1652,6 @@ export const createLodController = (
 
     setSource(nextSource) {
       if (disposed) return;
-      clearSettleTimer();
       if (presentation.mode === "auto") {
         emitDiameter(INITIAL_AUTO_DIAMETER_CSS_PX);
       }
@@ -1722,7 +1699,6 @@ export const createLodController = (
       }
 
       clearSelectionTimer();
-      clearSettleTimer();
       poolMember?.release();
       poolMember = null;
       // No new work while hidden. Hierarchy pages already in flight are left
@@ -1752,7 +1728,11 @@ export const createLodController = (
       const cachedBytes = cache.totalBytes();
       let targetUndecodedTiles = 0;
       for (const keyString of target) {
-        if (!resident.has(keyString) && !cache.has(keyString)) {
+        if (
+          hierarchy.get(keyString)?.pointCount !== 0 &&
+          !resident.has(keyString) &&
+          !cache.has(keyString)
+        ) {
           targetUndecodedTiles += 1;
         }
       }
@@ -1760,6 +1740,12 @@ export const createLodController = (
       for (const tile of submitted.values()) {
         drawnPoints += pointPrefixCount(tile.pointCount, densityFraction);
       }
+      const workPending =
+        physicalTileOperations > 0 ||
+        physicalHierarchyOperations > 0 ||
+        queue.length > 0 ||
+        pageQueue.length > 0 ||
+        targetUndecodedTiles > 0;
       return {
         active,
         residentTiles: resident.size,
@@ -1774,6 +1760,8 @@ export const createLodController = (
         hierarchyInFlight: pagesInFlight.size,
         queuedPages: pageQueue.length,
         physicalHierarchyOperations,
+        workRevision,
+        workPending,
         fetchConcurrency,
         hierarchyConcurrency,
         pointBudget: currentBudget(),
@@ -1826,7 +1814,6 @@ export const createLodController = (
     dispose() {
       if (disposed) return;
       clearSelectionTimer();
-      clearSettleTimer();
       interactionDepth = 0;
       // The consumer still owns everything the last flush handed it —
       // including tiles a flush this teardown cancels was about to remove.

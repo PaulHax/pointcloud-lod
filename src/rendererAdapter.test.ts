@@ -78,6 +78,7 @@ describe("createRendererAdapter", () => {
     add(adapter, { key: KEY_A, tile: data });
 
     expect(adapter.stats()).toEqual({
+      workRevision: 1,
       submittedTiles: 1,
       submittedPoints: 2,
       submittedBytes: 94,

@@ -27,10 +27,12 @@ import {
   DEFAULTS,
   ROOT_KEY,
   createCopcTileSource,
+  createGpuFrameTimer,
   createLodController,
   createViewGovernor,
   keyToString,
   type CameraView,
+  type GpuTimerResult,
   type LodController,
   type MotionReference,
   type PointPresentation,
@@ -48,6 +50,7 @@ import {
   captureTelemetryEnvironment,
   createTelemetryRecorder,
   type TelemetryEnvironment,
+  type TelemetryFrameEvent,
   type TelemetryRecorder,
   type TelemetryTrace,
 } from "./telemetry";
@@ -240,6 +243,10 @@ const dollyToPosition = (
 /**
  * World-up orbit with pitch constrained before either pole.
  *
+ * The focal point is explicitly reprojected onto the screen-center ray when
+ * an orbit begins. Zoom-to-cursor may translate it, but orbit never inherits
+ * an off-center pivot from another interaction.
+ *
  * vtk.js's world-up trackball keeps the horizon level but lets elevation pass
  * through ±90°. At the pole the screen-right axis is undefined; crossing it
  * reverses the horizontal basis and makes the next orbit or pan feel flipped.
@@ -258,7 +265,36 @@ const createOrbitManipulator = (initialValues: object): any => {
     onButtonDown: (i: any, r: any, p: { x: number; y: number }) => void;
     onMouseMove: (i: any, r: any, p: { x: number; y: number } | null) => void;
   };
-  api.onButtonDown = (_interactor, _renderer, position) => {
+  api.onButtonDown = (interactor, renderer, position) => {
+    const orbitCamera = renderer.getActiveCamera();
+    const focalPoint = orbitCamera.getFocalPoint() as number[];
+    const style = interactor.getInteractorStyle();
+    const displayFocal = style.computeWorldToDisplay(
+      renderer,
+      focalPoint[0],
+      focalPoint[1],
+      focalPoint[2],
+    ) as number[];
+    const viewport = renderer.getViewport() as number[];
+    const [viewWidth, viewHeight] = interactor.getView().getSize() as number[];
+    const centeredFocal = style.computeDisplayToWorld(
+      renderer,
+      ((viewport[0]! + viewport[2]!) * viewWidth!) / 2,
+      ((viewport[1]! + viewport[3]!) * viewHeight!) / 2,
+      displayFocal[2],
+    ) as number[];
+    if (centeredFocal.slice(0, 3).every(Number.isFinite)) {
+      orbitCamera.setFocalPoint(
+        centeredFocal[0],
+        centeredFocal[1],
+        centeredFocal[2],
+      );
+      style.setCenterOfRotation(
+        centeredFocal[0],
+        centeredFocal[1],
+        centeredFocal[2],
+      );
+    }
     previous = position;
   };
   api.onMouseMove = (interactor, renderer, position) => {
@@ -398,8 +434,6 @@ interactorStyle.addMouseManipulator(
 );
 interactor.setInteractorStyle(interactorStyle);
 
-/** How long the camera must hold still before inferred motion is released. */
-const MOTION_DEBOUNCE_MS = 250;
 /**
  * Relative, so the same threshold works for a cloud in metres and one in
  * degrees: recomputing the camera product every frame jitters in the last
@@ -419,8 +453,6 @@ let governor: ViewGovernor | null = null;
 let governorKey: string | null = null;
 let member: ViewGovernorMember | null = null;
 let explicitMotion: MotionReference | null = null;
-let inferredMotion: MotionReference | null = null;
-let inferredMotionTimer: ReturnType<typeof setTimeout> | null = null;
 let lastRenderedView: CameraView | null = null;
 let loadedName = "";
 let loadedPointCount = 0;
@@ -452,6 +484,22 @@ const telemetryEnvironment = (): TelemetryEnvironment =>
 
 const telemetry: TelemetryRecorder = createTelemetryRecorder({
   environment: telemetryEnvironment,
+});
+
+const webGlContext = fullScreen.getApiSpecificRenderWindow().get3DContext() as
+  | WebGLRenderingContext
+  | WebGL2RenderingContext
+  | null;
+const webGl2Context =
+  webGlContext !== null && "createQuery" in webGlContext
+    ? (webGlContext as WebGL2RenderingContext)
+    : null;
+const timerContext = telemetryEnvironment().webgl.softwareRenderer
+  ? null
+  : webGl2Context;
+let handleGpuTimerResult: (result: GpuTimerResult) => void = () => {};
+const gpuTimer = createGpuFrameTimer(timerContext, {
+  onResult: (result) => handleGpuTimerResult(result),
 });
 
 const setMessage = (text: string, error = false): void => {
@@ -571,11 +619,38 @@ const telemetryState = (): unknown => ({
   governor: governor?.stats() ?? null,
 });
 
+type CoreWorkSnapshot = {
+  readonly controllerRevision: number;
+  readonly rendererRevision: number;
+};
+
+let lastPresentedCoreWork: CoreWorkSnapshot | null = null;
+
 /** Reasons this presentation cannot describe steady-state rendering cost. */
 const frameContamination = (): string[] => {
   const cloud = controller?.stats();
-  if (cloud === undefined) return ["no-controller"];
+  const rendererState = adapter?.stats();
+  if (cloud === undefined || rendererState === undefined) {
+    lastPresentedCoreWork = null;
+    return ["no-controller"];
+  }
   const reasons: string[] = [];
+  const current = {
+    controllerRevision: cloud.workRevision,
+    rendererRevision: rendererState.workRevision,
+  };
+  if (lastPresentedCoreWork === null) {
+    reasons.push("first-core-frame");
+  } else {
+    if (
+      current.controllerRevision !== lastPresentedCoreWork.controllerRevision
+    ) {
+      reasons.push("controller-work-overlap");
+    }
+    if (current.rendererRevision !== lastPresentedCoreWork.rendererRevision) {
+      reasons.push("renderer-resource-change");
+    }
+  }
   if (cloud.inFlight > 0 || cloud.queuedTiles > 0)
     reasons.push("tile-work-wanted");
   if (cloud.physicalTileOperations > 0) reasons.push("tile-work-physical");
@@ -585,18 +660,17 @@ const frameContamination = (): string[] => {
     reasons.push("hierarchy-work-physical");
   if (cloud.selection.targetUndecodedTiles > 0)
     reasons.push("selected-tiles-undecoded");
+  if (cloud.workPending) reasons.push("required-work-pending");
+  lastPresentedCoreWork = current;
   return reasons;
 };
 
 // ---------------------------------------------------------------------------
 // Camera-motion inference
 //
-// The same policy the trame bridge applies at its rendered-camera boundary
-// (`classifyCameraMotion` in pointCloudLod.js): compare the camera actually
-// handed to LOD against the previous one, ignore floating-point jitter, hold
-// one inferred reference for the whole burst, and release it after a quiet
-// debounce. The bridge's copy is bound to its per-view registry bookkeeping,
-// so it cannot be imported; this is that rule with one view's worth of state.
+// Compare the camera actually handed to LOD against the previous one and
+// ignore floating-point jitter. The governor owns the one trailing stability
+// timer, so the host reports changes instead of maintaining another debounce.
 // ---------------------------------------------------------------------------
 
 const movedBeyondJitter = (previous: number, next: number): boolean =>
@@ -649,19 +723,7 @@ const classifyCameraMotion = (view: CameraView): void => {
   const moved = cameraMoved(lastRenderedView, view);
   lastRenderedView = view;
   if (!moved || !governor) return;
-  // One reference per burst, never one per frame: the governor restarts its
-  // moving track whenever the first reference is taken, so a per-frame
-  // reference would keep resetting the window it needs to learn from.
-  if (!inferredMotion) inferredMotion = governor.beginMotion("inferred");
-  if (inferredMotionTimer !== null) clearTimeout(inferredMotionTimer);
-  inferredMotionTimer = setTimeout(() => {
-    inferredMotionTimer = null;
-    inferredMotion?.release();
-    inferredMotion = null;
-    // The settled regime cannot refine quality it never measures, so hand it
-    // one frame to start from.
-    scheduleRender();
-  }, MOTION_DEBOUNCE_MS);
+  governor.recordCameraChange();
 };
 
 // ---------------------------------------------------------------------------
@@ -737,6 +799,7 @@ const syncGovernor = (): void => {
   }
   const key = wanted === null ? null : JSON.stringify(wanted);
   if (key === governorKey) return;
+  const cameraWasStable = governor?.stats().activity.cameraStable ?? true;
   member?.release();
   member = null;
   governor?.dispose();
@@ -749,10 +812,7 @@ const syncGovernor = (): void => {
     explicitMotion.release();
     explicitMotion = governor?.beginMotion("explicit") ?? null;
   }
-  if (inferredMotion) {
-    inferredMotion.release();
-    inferredMotion = governor?.beginMotion("inferred") ?? null;
-  }
+  if (!cameraWasStable) governor?.recordCameraChange();
   applyBudgetMode();
 };
 
@@ -860,11 +920,91 @@ const sampleFrameRate = (presentedAt: number): number | null => {
 
 /** Coalesce the synchronous costs of paints landing in one presentation. */
 let pendingVtkFrameMs: number | null = null;
-const recordFrameRate = (vtkFrameMs: number): void => {
+let pendingGpuQueryIds: number[] = [];
+
+type GpuPresentation = {
+  readonly remaining: Set<number>;
+  readonly frameEvent: TelemetryFrameEvent | null;
+  readonly measuredGovernor: ViewGovernor | null;
+  readonly regime: "interaction" | "stationary";
+  readonly eligible: boolean;
+  readonly presentedAt: number;
+  readonly fallbackFrameMs: number;
+  status: "valid" | "disjoint" | "error";
+  gpuMs: number;
+};
+
+const gpuPresentations = new Map<number, GpuPresentation>();
+const earlyGpuResults = new Map<number, GpuTimerResult>();
+const ignoredGpuQueryIds = new Set<number>();
+
+const adjustmentChanged = (
+  before: ViewGovernorStats["lastAdjustment"],
+  after: ViewGovernorStats["lastAdjustment"],
+): boolean =>
+  after !== null &&
+  (before === null ||
+    after.atMs !== before.atMs ||
+    after.reason !== before.reason ||
+    after.toBudget !== before.toBudget);
+
+const finishGpuPresentation = (presentation: GpuPresentation): void => {
+  const valid = presentation.status === "valid";
+  if (presentation.frameEvent !== null) {
+    telemetry.resolveGpuFrame(presentation.frameEvent, {
+      status: presentation.status,
+      gpuMs: valid ? presentation.gpuMs : null,
+    });
+  }
+  const measuredGovernor = presentation.measuredGovernor;
+  if (measuredGovernor !== null) {
+    const before = measuredGovernor.stats().lastAdjustment;
+    measuredGovernor.recordCapacitySample({
+      frameMs: valid ? presentation.gpuMs : presentation.fallbackFrameMs,
+      regime: presentation.regime,
+      eligible: presentation.eligible && valid,
+      now: presentation.presentedAt,
+    });
+    const after = measuredGovernor.stats().lastAdjustment;
+    if (adjustmentChanged(before, after)) {
+      telemetry.recordState("governor-adjustment", telemetryState());
+    }
+    if (measuredGovernor.needsFrame()) scheduleRender();
+  }
+};
+
+const applyGpuResult = (
+  presentation: GpuPresentation,
+  result: GpuTimerResult,
+): void => {
+  gpuPresentations.delete(result.id);
+  presentation.remaining.delete(result.id);
+  if (result.status !== "valid") presentation.status = result.status;
+  else if (result.gpuMs !== null) {
+    presentation.gpuMs += result.gpuMs;
+  }
+  if (presentation.remaining.size === 0) finishGpuPresentation(presentation);
+};
+
+handleGpuTimerResult = (result) => {
+  if (ignoredGpuQueryIds.delete(result.id)) return;
+  const presentation = gpuPresentations.get(result.id);
+  if (presentation === undefined) {
+    earlyGpuResults.set(result.id, result);
+    return;
+  }
+  applyGpuResult(presentation, result);
+};
+
+const recordFrameRate = (
+  vtkFrameMs: number,
+  gpuQueryId: number | null,
+): void => {
   pendingVtkFrameMs =
     pendingVtkFrameMs === null
       ? vtkFrameMs
       : Math.max(pendingVtkFrameMs, vtkFrameMs);
+  if (gpuQueryId !== null) pendingGpuQueryIds.push(gpuQueryId);
   if (frameRateTickQueued) return;
   frameRateTickQueued = true;
   const generation = frameRateGeneration;
@@ -875,43 +1015,81 @@ const recordFrameRate = (vtkFrameMs: number): void => {
     frameRateTickQueued = false;
     const hostFrameMs = sampleFrameRate(presentedAt);
     const measuredVtkFrameMs = pendingVtkFrameMs;
+    const queryIds = pendingGpuQueryIds;
     pendingVtkFrameMs = null;
-    if (hostFrameMs === null || measuredVtkFrameMs === null) return;
+    pendingGpuQueryIds = [];
+    if (hostFrameMs === null || measuredVtkFrameMs === null) {
+      for (const id of queryIds) {
+        earlyGpuResults.delete(id);
+        ignoredGpuQueryIds.add(id);
+      }
+      return;
+    }
     const governorFrameMs = syntheticFrameMs ?? hostFrameMs;
     const recording = telemetry.isActive();
-    const beforeAdjustment = recording
-      ? (governor?.stats().lastAdjustment ?? null)
-      : null;
-    if (recording) {
-      telemetry.recordFrame({
-        presentedAtMs: presentedAt,
-        rafIntervalMs: hostFrameMs,
-        vtkCpuMs: measuredVtkFrameMs,
-        governorFrameMs,
-        reportedToGovernor: governor !== null,
-        contamination: frameContamination(),
-        state: telemetryState(),
+    const contamination = frameContamination();
+    const measuredGovernor = governor;
+    const governorStats = measuredGovernor?.stats() ?? null;
+    const capacityEligible =
+      contamination.length === 0 &&
+      governorStats?.activity.measurementEligible === true;
+    const useGpuCapacity =
+      gpuTimer.supported && queryIds.length > 0 && syntheticFrameMs === null;
+    const beforeAdjustment = measuredGovernor?.stats().lastAdjustment ?? null;
+    if (useGpuCapacity) {
+      measuredGovernor?.recordTransientFrame({
+        hostFrameMs: governorFrameMs,
+        vtkFrameMs: measuredVtkFrameMs,
+        now: presentedAt,
+      });
+    } else {
+      measuredGovernor?.recordHostFrame({
+        hostFrameMs: governorFrameMs,
+        vtkFrameMs: measuredVtkFrameMs,
+        capacitySampleEligible: capacityEligible,
+        now: presentedAt,
       });
     }
-    governor?.recordHostFrame({
-      // The presentation interval captures asynchronous rendering and missed
-      // display frames. Browser tests can substitute a deterministic sample.
-      hostFrameMs: governorFrameMs,
-      vtkFrameMs: measuredVtkFrameMs,
-    });
-    const afterAdjustment = recording
-      ? (governor?.stats().lastAdjustment ?? null)
+    const frameEvent = recording
+      ? telemetry.recordFrame({
+          presentedAtMs: presentedAt,
+          rafIntervalMs: hostFrameMs,
+          vtkCpuMs: measuredVtkFrameMs,
+          governorFrameMs,
+          gpuPending: gpuTimer.supported && queryIds.length > 0,
+          reportedToGovernor: measuredGovernor !== null,
+          capacitySampleEligible: capacityEligible,
+          capacitySamplePending: useGpuCapacity,
+          contamination,
+          state: telemetryState(),
+        })
       : null;
-    if (
-      afterAdjustment !== null &&
-      (beforeAdjustment === null ||
-        afterAdjustment.atMs !== beforeAdjustment.atMs ||
-        afterAdjustment.reason !== beforeAdjustment.reason ||
-        afterAdjustment.toBudget !== beforeAdjustment.toBudget)
-    ) {
+    const afterAdjustment = measuredGovernor?.stats().lastAdjustment ?? null;
+    if (adjustmentChanged(beforeAdjustment, afterAdjustment)) {
       telemetry.recordState("governor-adjustment", telemetryState());
     }
-    if (governor?.needsFrame()) scheduleRender();
+
+    if (gpuTimer.supported && queryIds.length > 0) {
+      const presentation: GpuPresentation = {
+        remaining: new Set(queryIds),
+        frameEvent,
+        measuredGovernor: useGpuCapacity ? measuredGovernor : null,
+        regime: governorStats?.regime ?? "stationary",
+        eligible: capacityEligible,
+        presentedAt,
+        fallbackFrameMs: Math.max(governorFrameMs, measuredVtkFrameMs),
+        status: "valid",
+        gpuMs: 0,
+      };
+      for (const id of queryIds) gpuPresentations.set(id, presentation);
+      for (const id of queryIds) {
+        const early = earlyGpuResults.get(id);
+        if (early === undefined) continue;
+        earlyGpuResults.delete(id);
+        applyGpuResult(presentation, early);
+      }
+    }
+    if (measuredGovernor?.needsFrame()) scheduleRender();
   });
 };
 
@@ -919,6 +1097,9 @@ const resetFrameRate = (): void => {
   frameRateGeneration += 1;
   frameRateTickQueued = false;
   pendingVtkFrameMs = null;
+  for (const id of pendingGpuQueryIds) ignoredGpuQueryIds.add(id);
+  pendingGpuQueryIds = [];
+  lastPresentedCoreWork = null;
   frameRateSamples.length = 0;
   lastFramePresentedAt = null;
   filteredFrameIntervalMs = null;
@@ -988,11 +1169,13 @@ const governorLines = (view: ViewGovernorStats): StatSection => {
     rows: [
       row(
         "status",
-        view.motion.settling
-          ? "settling"
-          : view.regime === "interaction"
-            ? "moving"
-            : "settled",
+        view.activity.inputActive
+          ? "moving"
+          : !view.activity.cameraStable
+            ? "stabilizing"
+            : view.activity.workPending
+              ? "refining"
+              : "settled",
       ),
       row("motion", view.motion.source ?? "none"),
       row(
@@ -1002,6 +1185,11 @@ const governorLines = (view: ViewGovernorStats): StatSection => {
       ),
       row("target", millis(view.targetFrameTimeMs)),
       row("estimate", `${millis(view.estimateMs)} of ${view.samples}`),
+      row(
+        "capacity samples",
+        `${view.capacitySamples.eligible} clean, ` +
+          `${view.capacitySamples.rejected} rejected`,
+      ),
       row("track budget", points(view.trackBudget)),
       row(
         "maximum",
@@ -1185,6 +1373,18 @@ const updateDiagnostics = (): void => {
  * actually changed rather than on every frame.
  */
 let clippingDirty = true;
+let activeGpuQueryId: number | null = null;
+
+const beginGpuFrame = (): void => {
+  activeGpuQueryId = gpuTimer.begin();
+};
+
+const endGpuFrame = (): number | null => {
+  const id = activeGpuQueryId;
+  activeGpuQueryId = null;
+  gpuTimer.end();
+  return id;
+};
 
 const scheduleRender = (): void => {
   if (frameQueued) return;
@@ -1197,9 +1397,14 @@ const scheduleRender = (): void => {
       renderer.resetCameraClippingRange();
     }
     frameStartedAt = performance.now();
+    beginGpuFrame();
     interactor.render();
     // Nothing painted (a render was already in progress): drop the stamp so it
     // cannot be charged to the next frame.
+    if (frameStartedAt !== null) {
+      const unusedQuery = endGpuFrame();
+      if (unusedQuery !== null) ignoredGpuQueryIds.add(unusedQuery);
+    }
     frameStartedAt = null;
   });
 };
@@ -1217,6 +1422,7 @@ const updateMember = (): void => {
     memoryCeilingPoints: cloud.memoryCeilingPoints,
     physicalTileOperations: cloud.physicalTileOperations,
     physicalHierarchyOperations: cloud.physicalHierarchyOperations,
+    workPending: cloud.workPending,
   });
 };
 
@@ -1228,6 +1434,7 @@ const updateMember = (): void => {
 interactor.onRenderEvent(() => {
   const startedAt = frameStartedAt;
   const completedAt = performance.now();
+  const gpuQueryId = endGpuFrame();
   frameStartedAt = null;
   if (startedAt !== null) {
     lastFrameMs = syntheticFrameMs ?? completedAt - startedAt;
@@ -1237,7 +1444,7 @@ interactor.onRenderEvent(() => {
   updateMember();
   classifyCameraMotion(view);
   if (startedAt !== null) {
-    if (controller) recordFrameRate(lastFrameMs);
+    if (controller) recordFrameRate(lastFrameMs, gpuQueryId);
   }
   if (governor?.needsFrame()) scheduleRender();
 });
@@ -1250,6 +1457,7 @@ interactor.onStartAnimation(() => {
 
 interactor.onAnimation(() => {
   frameStartedAt = performance.now();
+  beginGpuFrame();
 });
 
 interactor.onEndAnimation(() => {
@@ -1265,6 +1473,7 @@ interactor.onEndAnimation(() => {
   // The interactor paints once more immediately after this event; that paint
   // is a real frame and gets timed like any other.
   frameStartedAt = performance.now();
+  beginGpuFrame();
 });
 
 // ---------------------------------------------------------------------------

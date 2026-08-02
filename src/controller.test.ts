@@ -308,6 +308,19 @@ const AUTO_LEAF: Record<string, FakeEntry> = {
 };
 
 describe("createLodController", () => {
+  it("reports required work and revisions independently of telemetry", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    const duringHierarchy = controller.stats();
+    expect(duringHierarchy.workPending).toBe(true);
+    expect(duringHierarchy.workRevision).toBeGreaterThan(0);
+
+    await bootAndLand(controller, deferred);
+    const settled = controller.stats();
+    expect(settled.workPending).toBe(false);
+    expect(settled.workRevision).toBeGreaterThan(duringHierarchy.workRevision);
+    controller.dispose();
+  });
+
   it("selects within the budget with a parent-closed set", async () => {
     const { controller, loadCalls, deferred, batches } = makeController(
       SMALL_TREE,
@@ -826,7 +839,6 @@ describe("createLodController — ready frontier and presentation", () => {
     return {
       diameters,
       ...makeController(tree, {
-        interactionSettleMs: 300,
         onPointDiameterCssPx: (value) => diameters.push(value),
         ...overrides,
       }),
@@ -1711,7 +1723,7 @@ describe("createLodController — budget and memory ceiling", () => {
     tree: Record<string, FakeEntry>,
     pointBudget: number,
     memory?: number,
-  ) => makeController(tree, { pointBudget, interactionSettleMs: 300, memory });
+  ) => makeController(tree, { pointBudget, memory });
 
   it("applies a budget drop immediately during interaction", async () => {
     const { controller, deferred } = makeBudgeted(SMALL_TREE, 1000);
@@ -2620,9 +2632,6 @@ describe("createLodController — numeric configuration", () => {
     for (const value of [...NON_FINITE, -1, -1e9]) {
       expect(() => make({ selectionDelayMs: value })).toThrow(
         /selectionDelayMs/,
-      );
-      expect(() => make({ interactionSettleMs: value })).toThrow(
-        /interactionSettleMs/,
       );
       expect(() => make({ refinementCutoffPx: value })).toThrow(
         /refinementCutoffPx/,
