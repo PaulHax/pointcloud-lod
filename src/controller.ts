@@ -130,7 +130,11 @@ export type LodControllerOptions = {
   hierarchyConcurrency?: number;
   /** CPU cache for deselected tiles, bytes. Default 256 MiB. */
   cacheBytes?: number;
-  /** Trailing debounce for camera-driven reselection, ms. Default 150. */
+  /**
+   * Trailing debounce for camera-driven reselection, ms. Default 150.
+   * A camera-deselected tile read receives the same short grace before abort,
+   * allowing a quick view reversal to adopt work already in progress.
+   */
   selectionDelayMs?: number;
   /**
    * Nodes whose projected point spacing is below this many pixels are not
@@ -886,26 +890,46 @@ export const createLodController = (
   let selectionGeneration = 0;
   let selectionStats = emptySelectionStats(0, 0);
   let budgetSkipped: ReadonlySet<string> = new Set<string>();
+  type TileRead = {
+    readonly abort: AbortController;
+    wanted: boolean;
+    cancelTimer: ReturnType<typeof setTimeout> | null;
+  };
+
   /**
-   * The one physical read a key may have running. It is created when the read
-   * starts and removed only when the promise settles, cancelled or not: while
-   * the entry is here nobody may start a rival read of the same key, and a
-   * reselect adopts this operation by flipping `wanted` back on.
-   *
-   * Adoption salvages the read only where cancellation was advisory — a source
-   * that ignores the signal, or one that had already finished by the time it
-   * fired. An `AbortSignal` cannot be un-aborted, so a source that honours it
-   * (a `fetch`, or the COPC decode past its next abort check) still rejects,
-   * and the error path re-queues the key at the head. Deferring the abort to
-   * make adoption always work would be worse than it sounds: the read holds
-   * its concurrency slot until it settles either way, so a read nobody wants
-   * would go on occupying a slot the camera's current tiles need.
+   * The one physical read a key may have running. Camera deselection gives it
+   * one selection interval to be adopted again before aborting. That bounds
+   * how long stale work can occupy a slot while avoiding a cancel/refetch pair
+   * when an orbit or pan crosses back over a recent tile. Lifecycle changes
+   * retain their existing immediate-cancellation semantics.
    */
-  const tileReads = new Map<
-    string,
-    { readonly abort: AbortController; wanted: boolean }
-  >();
+  const tileReads = new Map<string, TileRead>();
   let queue: string[] = [];
+
+  const clearReadCancellation = (read: TileRead): void => {
+    if (read.cancelTimer === null) return;
+    clearTimeout(read.cancelTimer);
+    read.cancelTimer = null;
+  };
+
+  const cancelRead = (read: TileRead, immediately = false): void => {
+    read.wanted = false;
+    if (immediately || selectionDelayMs === 0) {
+      clearReadCancellation(read);
+      read.abort.abort();
+      return;
+    }
+    if (read.cancelTimer !== null) return;
+    read.cancelTimer = setTimeout(() => {
+      read.cancelTimer = null;
+      if (!read.wanted) read.abort.abort();
+    }, selectionDelayMs);
+  };
+
+  const adoptRead = (read: TileRead): void => {
+    read.wanted = true;
+    clearReadCancellation(read);
+  };
 
   // Cancellation is advisory wherever it matters: `abort()` marks a result
   // unwanted, but the COPC getter takes no signal, so the range read and the
@@ -1324,7 +1348,8 @@ export const createLodController = (
         continue;
       }
       const abort = new AbortController();
-      tileReads.set(keyString, { abort, wanted: true });
+      const read: TileRead = { abort, wanted: true, cancelTimer: null };
+      tileReads.set(keyString, read);
       const requestEpoch = epoch;
       const key = keyFromString(keyString);
       physicalTileOperations += 1;
@@ -1340,6 +1365,7 @@ export const createLodController = (
             pump();
             return;
           }
+          clearReadCancellation(read);
           tileReads.delete(keyString);
           tileFailures.delete(keyString);
           const tile = orderTileForProgressiveDrawing(loadedTile, keyString);
@@ -1362,6 +1388,7 @@ export const createLodController = (
             pump();
             return;
           }
+          clearReadCancellation(read);
           tileReads.delete(keyString);
           if (!isAbortError(error)) {
             recordFailure(tileFailures, keyString);
@@ -1478,13 +1505,12 @@ export const createLodController = (
       releaseResident(keyString);
     }
 
-    // Cancel fetches that no longer matter. The read keeps its physical slot
-    // until it settles: dropping it here would let a reselect race a second
-    // read of the same key against work that is still running.
+    // Give camera-deselected reads one selection interval to be adopted again.
+    // The read keeps its physical slot until it settles: dropping its entry
+    // would let a reselect race a second read against work still running.
     for (const [keyString, read] of tileReads) {
       if (target.has(keyString)) continue;
-      read.wanted = false;
-      read.abort.abort();
+      cancelRead(read);
     }
 
     // Reuse cached tiles immediately; queue the rest, coarse levels first.
@@ -1497,7 +1523,7 @@ export const createLodController = (
         // its cancellation the payload claims residency when it lands; if the
         // source really stopped, the abort path re-queues this key at the
         // head. Either way there is never a second read of the same bytes.
-        read.wanted = true;
+        adoptRead(read);
         continue;
       }
       const entry = hierarchy.get(keyString);
@@ -1554,8 +1580,7 @@ export const createLodController = (
     // the swap would re-queue a key of the old source against the new one.
     clearRetryTimers();
     for (const read of tileReads.values()) {
-      read.wanted = false;
-      read.abort.abort();
+      cancelRead(read, true);
     }
     tileReads.clear();
     for (const abort of pagesInFlight.values()) abort.abort();
@@ -1725,8 +1750,7 @@ export const createLodController = (
       // Hiding cancels tile reads but keeps their physical slots: a hide/show
       // pair must adopt the read that is still running, not race it.
       for (const read of tileReads.values()) {
-        read.wanted = false;
-        read.abort.abort();
+        cancelRead(read, true);
       }
 
       if (target.size > 0) targetRevision += 1;

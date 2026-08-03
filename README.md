@@ -265,7 +265,7 @@ The main dials and their tradeoffs are:
 | `cacheBytes`                      | Decoded CPU payloads retained for fast reselection       | Revisiting views causes too much decoding or uses too much RAM |
 | `fetchConcurrency`                | Parallel tile fetch/decode work                          | The source is under-filled or decoding saturates the client    |
 | `hierarchyConcurrency`            | Parallel hierarchy-page work                             | Deep traversal stalls waiting for hierarchy                    |
-| `selectionDelayMs`                | Reselection rate during camera changes                   | Camera motion causes excess selection churn                    |
+| `selectionDelayMs`                | Reselection rate and recent-read cancellation grace      | Camera motion causes selection or cancel/refetch churn         |
 | `interactionSettleMs`             | Governor delay for declaring the rendered camera stable  | Quality rises too early or too late after motion               |
 
 Visibility, activity, and disposal answer different questions:

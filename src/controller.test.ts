@@ -521,6 +521,64 @@ describe("createLodController", () => {
     controller.dispose();
   });
 
+  it("adopts a recent camera-deselected fetch before aborting it", async () => {
+    vi.useFakeTimers();
+    const { controller, deferred, loadCalls } = makeController(
+      { "0-0-0-0": { pointCount: 100 } },
+      { selectionDelayMs: 150 },
+    );
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    expect(loadCalls).toEqual(["0-0-0-0"]);
+
+    // The trailing away-selection marks the read unwanted, then gives it one
+    // selection interval in which a quick view reversal can adopt it.
+    controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
+    await vi.advanceTimersByTimeAsync(150);
+    expect(deferred.get("0-0-0-0")!.aborted).toBe(false);
+    expect(controller.stats()).toMatchObject({
+      inFlight: 0,
+      physicalTileOperations: 1,
+    });
+
+    controller.setCamera(VIEW);
+    controller.refresh();
+    await vi.advanceTimersByTimeAsync(150);
+    expect(deferred.get("0-0-0-0")!.aborted).toBe(false);
+    expect(loadCalls).toEqual(["0-0-0-0"]);
+
+    deferred.get("0-0-0-0")!.resolve();
+    await settle();
+    expect(controller.stats()).toMatchObject({
+      residentTiles: 1,
+      inFlight: 0,
+      physicalTileOperations: 0,
+    });
+    controller.dispose();
+  });
+
+  it("aborts a camera-deselected fetch after its grace expires", async () => {
+    vi.useFakeTimers();
+    const { controller, deferred } = makeController(
+      { "0-0-0-0": { pointCount: 100 } },
+      { selectionDelayMs: 150 },
+    );
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+
+    controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
+    await vi.advanceTimersByTimeAsync(150);
+    await vi.advanceTimersByTimeAsync(149);
+    expect(deferred.get("0-0-0-0")!.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(deferred.get("0-0-0-0")!.aborted).toBe(true);
+    await settle();
+    expect(controller.stats().physicalTileOperations).toBe(0);
+    controller.dispose();
+  });
+
   it("adopts a canceled fetch when the same key is reselected", async () => {
     // Aborting is advisory: the COPC getter takes no signal, so a canceled
     // request still resolves. Looking back must adopt that live read rather
