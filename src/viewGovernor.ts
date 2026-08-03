@@ -207,11 +207,11 @@ export type ViewGovernor = {
    * Whether the host must schedule another frame. Poll it after reporting a
    * frame: the governor never schedules anything itself.
    *
-   * True while the camera moves, while the stationary track is still moving
-   * its budget (or has not measured enough to decide), and while any member
-   * still has physical tile or hierarchy work running. False once selection
-   * and loading converge and the budget lands inside the dead-band — at which
-   * point repainting would show exactly the same pixels.
+   * True while the camera moves, or while an uncontaminated adaptive track
+   * still needs samples to settle its budget. Required tile or hierarchy work
+   * makes samples ineligible but does not by itself make the current pixels
+   * dirty; the controller or renderer must request a frame when completion
+   * changes presentation. False while a stable view is merely waiting.
    */
   needsFrame(): boolean;
   stats(): ViewGovernorStats;
@@ -553,7 +553,7 @@ export const createViewGovernor = (
   };
 
   const needsFrame = (): boolean =>
-    !disposed && (interacting() || !converged() || pendingWork());
+    !disposed && (interacting() || (!pendingWork() && !converged()));
 
   const recordTransientFrame = (metrics: TransientFrameMetrics): void => {
     if (disposed || !finiteNonNegative(metrics?.hostFrameMs)) return;

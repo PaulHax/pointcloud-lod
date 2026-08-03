@@ -378,6 +378,8 @@ export const openExample = async (
     telemetry?: boolean;
     files?: Readonly<Record<string, string>>;
     network?: NetworkProfile;
+    /** Install request routing or page instrumentation before navigation. */
+    preparePage?: (page: Page) => void | Promise<void>;
   } = {},
 ): Promise<ExampleSession> => {
   const cloud = options.cloud ?? FIXTURE_URL_PATH;
@@ -397,6 +399,7 @@ export const openExample = async (
     options.network,
   );
   const page = await (await browser()).newPage();
+  await options.preparePage?.(page);
   const failures: string[] = [];
   page.on("pageerror", (error) => failures.push(`pageerror: ${error.message}`));
   page.on("console", (message: ConsoleMessage) => {
@@ -445,8 +448,9 @@ export const openExample = async (
       if (predicate(last)) return last;
       await page.waitForTimeout(POLL_INTERVAL_MS);
     }
+    const message = await page.locator("#message").textContent();
     throw new Error(
-      `timed out waiting for ${describe}\nlast stats: ${shown(last)}`,
+      `timed out waiting for ${describe}\nmessage: ${message}\nlast stats: ${shown(last)}`,
     );
   };
 
@@ -691,31 +695,21 @@ export const openExample = async (
       // before the change and call it converged.
       await session.frame();
       const deadline = Date.now() + timeoutMs;
-      let quietSince: number | null = null;
-      let lastGeneration = -1;
       let last: ExampleStats | null = null;
       while (Date.now() < deadline) {
         last = await stats();
         const cloud = last.controller;
         const drained =
           cloud !== null &&
+          !cloud.selectionPending &&
           cloud.physicalTileOperations === 0 &&
           cloud.physicalHierarchyOperations === 0 &&
           cloud.queuedTiles === 0 &&
           cloud.queuedPages === 0 &&
           (last.governor === null || !last.governor.needsFrame);
-        const generation = cloud?.selection.generation ?? -1;
-        if (!drained || generation !== lastGeneration) {
-          lastGeneration = generation;
-          quietSince = drained ? Date.now() : null;
-        } else if (quietSince === null) {
-          quietSince = Date.now();
-        }
-        // Selection is debounced, so "no work outstanding" is only convergence
-        // once it has also stopped producing new selections.
-        if (quietSince !== null && Date.now() - quietSince >= SETTLE_QUIET_MS) {
-          return last;
-        }
+        // The controller reports its trailing selection timer directly, so
+        // convergence does not need to be inferred from a wall-clock pause.
+        if (drained) return last;
         await page.waitForTimeout(POLL_INTERVAL_MS);
       }
       throw new Error(

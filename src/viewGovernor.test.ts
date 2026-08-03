@@ -415,7 +415,7 @@ describe("createViewGovernor stationary refinement", () => {
     expect(governor.stats().aggregateBudget).toBe(settled);
   });
 
-  it("keeps asking for frames while tiles and pages are still landing", () => {
+  it("does not ask for unchanged frames solely because work is pending", () => {
     const governor = createViewGovernor(FAST_ADAPT);
     const member = governor.register(memberOptions(vi.fn()));
     moveAndSettle(governor, 100);
@@ -423,14 +423,34 @@ describe("createViewGovernor stationary refinement", () => {
     expect(governor.needsFrame()).toBe(false);
 
     member.update({ physicalTileOperations: 2 });
-    expect(governor.needsFrame()).toBe(true);
+    expect(governor.needsFrame()).toBe(false);
     member.update({
       physicalTileOperations: 0,
       physicalHierarchyOperations: 1,
     });
-    expect(governor.needsFrame()).toBe(true);
+    expect(governor.needsFrame()).toBe(false);
     member.update({ physicalHierarchyOperations: 0 });
     expect(governor.needsFrame()).toBe(false);
+  });
+
+  it("resumes an unconverged track when required work drains", () => {
+    const governor = createViewGovernor(FAST_ADAPT);
+    const member = governor.register(memberOptions(vi.fn()));
+    moveAndSettle(governor, 100);
+
+    expect(governor.needsFrame()).toBe(true);
+    member.update({ workPending: true });
+    expect(governor.needsFrame()).toBe(false);
+
+    governor.recordHostFrame({ hostFrameMs: 1, now: tick() });
+    expect(governor.stats().capacitySamples).toMatchObject({
+      eligible: 0,
+      rejected: 1,
+    });
+    expect(governor.needsFrame()).toBe(false);
+
+    member.update({ workPending: false });
+    expect(governor.needsFrame()).toBe(true);
   });
 
   it("returns to the moving track the moment motion resumes", () => {
@@ -1157,7 +1177,7 @@ describe("createViewGovernor diagnostics", () => {
       activeMembers: 1,
       physicalTileOperations: 3,
       physicalHierarchyOperations: 1,
-      needsFrame: true,
+      needsFrame: false,
       activity: { workPending: true, measurementEligible: false },
       capacitySamples: { eligible: 0, rejected: 8, lastEligible: false },
     });

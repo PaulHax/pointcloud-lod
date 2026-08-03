@@ -86,6 +86,12 @@ export type LodControllerOptions = {
    */
   scheduleRender: () => void;
   /**
+   * Coalesced notification that asynchronous work state changed. Unlike
+   * `scheduleRender`, this does not imply that presentation changed. Hosts
+   * may use it to refresh convergence or diagnostics without repainting.
+   */
+  onWorkChange?: () => void;
+  /**
    * Whether hierarchy I/O, selection, and renderer submission start enabled.
    * Default true. An initially inactive controller retains camera updates and
    * starts from the latest view when activated.
@@ -187,6 +193,8 @@ export type LodControllerStats = {
   readonly workRevision: number;
   /** Required current-view work has not drained yet. */
   readonly workPending: boolean;
+  /** A trailing camera-driven selection pass is still scheduled. */
+  readonly selectionPending: boolean;
   /** The ceiling `physicalTileOperations` is held under. */
   readonly fetchConcurrency: number;
   /** The ceiling `physicalHierarchyOperations` is held under. */
@@ -561,6 +569,7 @@ export const createLodController = (
   const {
     onTiles,
     scheduleRender,
+    onWorkChange = () => {},
     onPointDiameterCssPx = () => {},
     onDensityFraction = () => {},
     onError = (error) => console.warn("pointcloud-lod:", error),
@@ -627,8 +636,15 @@ export const createLodController = (
   // Bumped on setSource/dispose; every async continuation checks it.
   let epoch = 0;
   let workRevision = 0;
+  let workChangeScheduled = false;
   const markWork = (): void => {
     workRevision += 1;
+    if (workChangeScheduled) return;
+    workChangeScheduled = true;
+    queueMicrotask(() => {
+      workChangeScheduled = false;
+      if (!disposed) onWorkChange();
+    });
   };
 
   const hierarchy = new Map<string, HierarchyEntry>();
@@ -1762,6 +1778,7 @@ export const createLodController = (
         physicalHierarchyOperations,
         workRevision,
         workPending,
+        selectionPending: selectionTimer !== null,
         fetchConcurrency,
         hierarchyConcurrency,
         pointBudget: currentBudget(),

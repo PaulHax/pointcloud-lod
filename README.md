@@ -446,14 +446,17 @@ governor.recordCapacitySample({ frameMs: gpuMs, regime, eligible });
 if (governor.needsFrame()) scheduleRender();
 
 // Feed the split and the diagnostics from the controller's own statistics:
-const stats = controller.stats();
-member.update({
-  projectedImportance: stats.selection.projectedImportance,
-  memoryCeilingPoints: stats.memoryCeilingPoints,
-  physicalTileOperations: stats.physicalTileOperations,
-  physicalHierarchyOperations: stats.physicalHierarchyOperations,
-  workPending: stats.workPending,
-});
+const updateMember = () => {
+  const stats = controller.stats();
+  member.update({
+    projectedImportance: stats.selection.projectedImportance,
+    memoryCeilingPoints: stats.memoryCeilingPoints,
+    physicalTileOperations: stats.physicalTileOperations,
+    physicalHierarchyOperations: stats.physicalHierarchyOperations,
+    workPending: stats.workPending,
+  });
+};
+updateMember();
 
 // Hold the moving regime while the camera moves. References compose across
 // sources and the regime ends only when the last one is released, so an
@@ -475,6 +478,11 @@ member.update({ active: false });
 member.release();
 governor.dispose();
 ```
+
+Pass a callback that runs `updateMember()` as the controller's `onWorkChange`
+when constructing it. If that update makes `governor.needsFrame()` true, call
+`scheduleRender()`. Pending I/O alone does not dirty the current pixels, but
+its completion may make clean capacity measurement useful again.
 
 `governor.stats()` explains any drawn point count without reading internal
 state: the regime and what is holding it, the target frame time, the recent

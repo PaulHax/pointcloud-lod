@@ -198,7 +198,9 @@ describe("example controls", () => {
         box.x + box.width / 2 + 40,
         box.y + box.height / 2,
       );
-      await session.page.waitForTimeout(150);
+      await session.page.waitForFunction(
+        () => document.querySelector("#stats dd")?.textContent === "moving",
+      );
       expect(
         await session.page.locator("#stats dd").first().textContent(),
       ).toBe("moving");
@@ -411,7 +413,10 @@ describe("example controls", () => {
       // Dragging right pans the scene with the pointer: the camera translates
       // left along its screen-right axis, and eye-to-focus distance is
       // unchanged. Crossing the focus reverses this sign.
-      await session.page.waitForTimeout(250);
+      await session.until(
+        "the wheel interaction to end before panning",
+        (stats) => stats.controller?.interactionDepth === 0,
+      );
       const beforePan = await session.readCamera();
       const direction = difference(beforePan.focalPoint, beforePan.position);
       const screenRight = cross(direction, beforePan.viewUp);

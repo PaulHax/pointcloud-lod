@@ -321,6 +321,32 @@ describe("createLodController", () => {
     controller.dispose();
   });
 
+  it("reports a debounced selection until the trailing pass runs", async () => {
+    vi.useFakeTimers();
+    try {
+      const { controller } = makeController(SMALL_TREE, {
+        selectionDelayMs: 150,
+      });
+      await settle();
+      controller.setCamera(VIEW);
+      await settle();
+      const generation = controller.stats().selection.generation;
+
+      controller.setCamera({ ...VIEW, position: [1, 0, 0] });
+      expect(controller.stats().selectionPending).toBe(true);
+      expect(controller.stats().selection.generation).toBe(generation);
+
+      await vi.advanceTimersByTimeAsync(150);
+      expect(controller.stats().selectionPending).toBe(false);
+      expect(controller.stats().selection.generation).toBeGreaterThan(
+        generation,
+      );
+      controller.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("selects within the budget with a parent-closed set", async () => {
     const { controller, loadCalls, deferred, batches } = makeController(
       SMALL_TREE,
@@ -728,13 +754,17 @@ describe("createLodController", () => {
   });
 
   it("coalesces same-tick arrivals into one batch and one render", async () => {
-    const { controller, deferred, batches, scheduleRender } =
-      makeController(SMALL_TREE);
+    const onWorkChange = vi.fn();
+    const { controller, deferred, batches, scheduleRender } = makeController(
+      SMALL_TREE,
+      { onWorkChange },
+    );
     await settle();
     controller.setCamera(VIEW);
     await settle();
 
     scheduleRender.mockClear();
+    onWorkChange.mockClear();
     batches.length = 0;
     for (const d of deferred.values()) d.resolve();
     await settle();
@@ -742,6 +772,9 @@ describe("createLodController", () => {
     expect(batches).toHaveLength(1);
     expect(batches[0]!.added).toHaveLength(3);
     expect(scheduleRender).toHaveBeenCalledTimes(1);
+    // One coalesced notification for all completed reads, then one for the
+    // applied renderer batch. Neither turns into a per-tile render request.
+    expect(onWorkChange).toHaveBeenCalledTimes(2);
     controller.dispose();
   });
 
