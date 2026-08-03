@@ -66,6 +66,38 @@ const delay = (
   });
 
 /**
+ * Length of a shorter response that is proven to end at the file's EOF.
+ *
+ * Range servers clamp an oversized final range to the resource length. That
+ * is complete data, not a truncated transfer, but only `Content-Range` can
+ * distinguish it from a connection that ended early. Unknown totals and
+ * partial subranges therefore remain failures.
+ */
+const eofClampedLength = (
+  contentRange: string | null,
+  requestedBegin: number,
+  requestedEnd: number,
+): number | null => {
+  const match = /^bytes\s+(\d+)-(\d+)\/(\d+)$/i.exec(
+    contentRange?.trim() ?? "",
+  );
+  if (match === null) return null;
+  const first = Number(match[1]);
+  const last = Number(match[2]);
+  const total = Number(match[3]);
+  if (![first, last, total].every(Number.isSafeInteger)) return null;
+  if (
+    first !== requestedBegin ||
+    last < first ||
+    last + 1 !== total ||
+    last >= requestedEnd - 1
+  ) {
+    return null;
+  }
+  return last - first + 1;
+};
+
+/**
  * HTTP byte ranges with bounded recovery from transport and server failures.
  *
  * `copc`'s HTTP getter makes one unchecked fetch. A transient S3 connection
@@ -105,7 +137,15 @@ const httpRangeGetter =
           );
         }
         const bytes = new Uint8Array(await response.arrayBuffer());
-        if (bytes.byteLength !== expectedLength) {
+        const clampedLength = eofClampedLength(
+          response.headers.get("content-range"),
+          begin,
+          end,
+        );
+        if (
+          bytes.byteLength !== expectedLength &&
+          bytes.byteLength !== clampedLength
+        ) {
           throw new Error(
             `Expected ${expectedLength} bytes, received ${bytes.byteLength}`,
           );

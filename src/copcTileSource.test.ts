@@ -205,6 +205,52 @@ describe("createCopcTileSource", () => {
     });
   });
 
+  it("accepts a shorter final range when Content-Range proves EOF", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(new Uint8Array(5), {
+        status: 206,
+        headers: { "Content-Range": "bytes 10-14/15" },
+      }),
+    );
+    stub.asset = {
+      pointDataRecordFormat: 0,
+      nodes: { "0-0-0-0": { pointCount: 0 } },
+      readSourceAtOpen: { begin: 10, end: 20 },
+    };
+
+    await expect(
+      createCopcTileSource({ source: "https://example.test/small.copc.laz" }),
+    ).resolves.toBeDefined();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("retries and rejects a short range that does not reach EOF", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(() =>
+      Promise.resolve(
+        new Response(new Uint8Array(5), {
+          status: 206,
+          headers: { "Content-Range": "bytes 10-14/20" },
+        }),
+      ),
+    );
+    stub.asset = {
+      pointDataRecordFormat: 0,
+      nodes: { "0-0-0-0": { pointCount: 0 } },
+      readSourceAtOpen: { begin: 10, end: 20 },
+    };
+
+    const opening = createCopcTileSource({
+      source: "https://example.test/truncated.copc.laz",
+    });
+    const rejected = expect(opening).rejects.toThrow(
+      "Expected 10 bytes, received 5",
+    );
+    await vi.runAllTimersAsync();
+    await rejected;
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it("cancels a pending HTTP retry when the tile is no longer needed", async () => {
     vi.useFakeTimers();
     const fetchMock = vi
