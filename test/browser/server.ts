@@ -50,6 +50,41 @@ export type StaticServer = {
   close(): Promise<void>;
 };
 
+export type NetworkProfile = {
+  /** URL paths whose file responses should be delayed. */
+  readonly paths: readonly string[];
+  /** Fixed delay before response headers, modelling request latency. */
+  readonly latencyMs: number;
+  /** Per-request transfer rate. The browser still receives real range bodies. */
+  readonly bytesPerSecond: number;
+};
+
+const waitForResponse = (
+  milliseconds: number,
+  response: import("node:http").ServerResponse,
+): Promise<boolean> =>
+  new Promise((done) => {
+    if (milliseconds <= 0) {
+      done(!response.destroyed);
+      return;
+    }
+    const timer = setTimeout(() => {
+      response.removeListener("close", closed);
+      done(!response.destroyed);
+    }, milliseconds);
+    const closed = (): void => {
+      clearTimeout(timer);
+      done(false);
+    };
+    response.once("close", closed);
+  });
+
+/** Deterministic body delay for a shaped response of `bytes` bytes. */
+export const transferDelayMs = (
+  bytes: number,
+  bytesPerSecond: number,
+): number => Math.ceil((bytes / bytesPerSecond) * 1000);
+
 /**
  * Serve `roots` under their given URL prefixes. Every root is resolved and
  * every request is checked against it, so a `..` in a URL cannot walk out of
@@ -62,7 +97,19 @@ export const startStaticServer = async (
    * should not be exposed — or whose name should not appear in a URL.
    */
   files: Readonly<Record<string, string>> = {},
+  network?: NetworkProfile,
 ): Promise<StaticServer> => {
+  if (
+    network !== undefined &&
+    (!Number.isFinite(network.latencyMs) ||
+      network.latencyMs < 0 ||
+      !Number.isFinite(network.bytesPerSecond) ||
+      network.bytesPerSecond <= 0)
+  ) {
+    throw new Error(
+      "network latency must be non-negative and transfer rate must be positive",
+    );
+  }
   const resolved = Object.entries(roots).map(
     ([prefix, dir]) => [prefix, resolve(dir)] as const,
   );
@@ -113,6 +160,7 @@ export const startStaticServer = async (
       }
 
       const range = parseRange(request.headers.range, size);
+      const shaped = network?.paths.includes(urlPath) ? network : undefined;
       const headers: Record<string, string> = {
         "content-type": contentType(path),
         // Without this the reader cannot discover it may range-read at all.
@@ -121,15 +169,44 @@ export const startStaticServer = async (
       };
 
       if (range === null) {
+        if (
+          shaped !== undefined &&
+          !(await waitForResponse(shaped.latencyMs, response))
+        )
+          return;
         response.writeHead(200, { ...headers, "content-length": String(size) });
+        response.flushHeaders();
+        if (
+          shaped !== undefined &&
+          !(await waitForResponse(
+            transferDelayMs(size, shaped.bytesPerSecond),
+            response,
+          ))
+        )
+          return;
         createReadStream(path).pipe(response);
         return;
       }
+      if (
+        shaped !== undefined &&
+        !(await waitForResponse(shaped.latencyMs, response))
+      )
+        return;
+      const rangeLength = range.end - range.start + 1;
       response.writeHead(206, {
         ...headers,
-        "content-length": String(range.end - range.start + 1),
+        "content-length": String(rangeLength),
         "content-range": `bytes ${range.start}-${range.end}/${size}`,
       });
+      response.flushHeaders();
+      if (
+        shaped !== undefined &&
+        !(await waitForResponse(
+          transferDelayMs(rangeLength, shaped.bytesPerSecond),
+          response,
+        ))
+      )
+        return;
       createReadStream(path, { start: range.start, end: range.end }).pipe(
         response,
       );

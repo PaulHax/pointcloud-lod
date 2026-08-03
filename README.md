@@ -369,9 +369,9 @@ POINTCLOUD_LOD_BROWSER_GPU=1 npm run test:browser -- test/browser/telemetry.spec
 That mode asserts the reported renderer is not software, so a silent fallback
 cannot pass as a hardware measurement.
 
-To capture a repeatable initial load, real pointer drag and wheel zoom, the
-settled view around them, a tight zoom into one section, and a final
-near-horizontal overview, supply a cloud URL and optional artifact path:
+To capture a repeatable initial load, picked ROI, rapid wheel zoom, long close
+orbit sweep, near-horizontal local pan, and return to overview, supply a cloud URL
+and optional artifact path:
 
 ```bash
 POINTCLOUD_LOD_TELEMETRY_URL='https://example.test/cloud.copc.laz' \
@@ -381,8 +381,17 @@ npm run telemetry:capture
 ```
 
 The capture starts before the source opens and adds phase markers to the JSON,
-including the tight view and the restored broad view after each has returned to
-full draw density.
+including the tight and restored broad views after each has settled.
+By default, the first run caches the complete COPC under
+`artifacts/telemetry/cache/`; later runs replay real range requests from that
+local file with deterministic 40 ms request latency and an 80 Mbps per-request
+transfer rate. This removes changing WAN conditions while preserving range
+traffic, concurrency, cancellation, decoding, and rendering. Adjust the replay
+with `POINTCLOUD_LOD_TELEMETRY_LATENCY_MS` and
+`POINTCLOUD_LOD_TELEMETRY_MBPS`, force a new download with
+`POINTCLOUD_LOD_TELEMETRY_REFRESH=1`, or select the original remote behavior
+with `POINTCLOUD_LOD_TELEMETRY_NETWORK=live`.
+
 It rejects software rendering and checks that the trace is structurally usable;
 it deliberately does not turn machine-specific frame times into pass/fail
 thresholds. If no output path is supplied, the timestamped trace is written

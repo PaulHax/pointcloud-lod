@@ -4,9 +4,17 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 
 import type { TelemetryTrace } from "../../examples/vtk/telemetry";
-import { closeBrowser, openExample, usingRealGpu } from "./harness";
+import {
+  closeBrowser,
+  openExample,
+  usingRealGpu,
+  type CameraReading,
+  type ExampleSession,
+} from "./harness";
+import { ensureReplayCloud, REPLAY_URL_PATH } from "./networkReplay";
 
 const captureUrl = (process.env.POINTCLOUD_LOD_TELEMETRY_URL ?? "").trim();
+const INPUT_INTERVAL_MS = 12;
 const configuredOutput = (
   process.env.POINTCLOUD_LOD_TELEMETRY_OUT ?? ""
 ).trim();
@@ -19,6 +27,64 @@ const outputPath = configuredOutput
     ? configuredOutput
     : resolve(process.cwd(), configuredOutput)
   : resolve(process.cwd(), "artifacts/telemetry", defaultName);
+
+const networkMode = (
+  process.env.POINTCLOUD_LOD_TELEMETRY_NETWORK ?? "replay"
+).trim();
+if (networkMode !== "replay" && networkMode !== "live") {
+  throw new Error(
+    "POINTCLOUD_LOD_TELEMETRY_NETWORK must be either replay or live",
+  );
+}
+
+const finiteEnvironmentNumber = (
+  name: string,
+  fallback: number,
+  minimum: number,
+): number => {
+  const raw = process.env[name]?.trim();
+  const value = raw === undefined || raw === "" ? fallback : Number(raw);
+  if (!Number.isFinite(value) || value < minimum) {
+    throw new Error(`${name} must be a finite number >= ${minimum}`);
+  }
+  return value;
+};
+
+const replayLatencyMs = finiteEnvironmentNumber(
+  "POINTCLOUD_LOD_TELEMETRY_LATENCY_MS",
+  40,
+  0,
+);
+const replayMbps = finiteEnvironmentNumber(
+  "POINTCLOUD_LOD_TELEMETRY_MBPS",
+  80,
+  Number.MIN_VALUE,
+);
+const replayCacheDirectory = resolve(
+  process.env.POINTCLOUD_LOD_TELEMETRY_CACHE_DIR?.trim() ||
+    "artifacts/telemetry/cache",
+);
+
+const captureSource = async (): Promise<Parameters<typeof openExample>[0]> => {
+  if (networkMode === "live") {
+    return { cloud: captureUrl, telemetry: true };
+  }
+  const file = await ensureReplayCloud(
+    captureUrl,
+    replayCacheDirectory,
+    (process.env.POINTCLOUD_LOD_TELEMETRY_REFRESH ?? "") !== "",
+  );
+  return {
+    cloud: REPLAY_URL_PATH,
+    telemetry: true,
+    files: { [REPLAY_URL_PATH]: file },
+    network: {
+      paths: [REPLAY_URL_PATH],
+      latencyMs: replayLatencyMs,
+      bytesPerSecond: (replayMbps * 1_000_000) / 8,
+    },
+  };
+};
 
 const writeTrace = async (trace: TelemetryTrace): Promise<void> => {
   await mkdir(dirname(outputPath), { recursive: true });
@@ -47,6 +113,185 @@ const cameraPitchDegrees = (camera: {
   );
 };
 
+const distanceBetween = (
+  left: readonly number[],
+  right: readonly number[],
+): number =>
+  Math.hypot(left[0]! - right[0]!, left[1]! - right[1]!, left[2]! - right[2]!);
+
+const subtract = (
+  left: readonly number[],
+  right: readonly number[],
+): [number, number, number] => [
+  left[0]! - right[0]!,
+  left[1]! - right[1]!,
+  left[2]! - right[2]!,
+];
+
+const dot = (left: readonly number[], right: readonly number[]): number =>
+  left.reduce((sum, value, axis) => sum + value * right[axis]!, 0);
+
+const cross = (
+  left: readonly number[],
+  right: readonly number[],
+): [number, number, number] => [
+  left[1]! * right[2]! - left[2]! * right[1]!,
+  left[2]! * right[0]! - left[0]! * right[2]!,
+  left[0]! * right[1]! - left[1]! * right[0]!,
+];
+
+const normalised = (value: readonly number[]): [number, number, number] => {
+  const length = Math.hypot(...value);
+  if (!Number.isFinite(length) || length === 0) {
+    throw new Error("cannot normalise a zero-length camera vector");
+  }
+  return [value[0]! / length, value[1]! / length, value[2]! / length];
+};
+
+type Projection = {
+  readonly clientX: number;
+  readonly clientY: number;
+  readonly normalisedX: number;
+  readonly normalisedY: number;
+  readonly depth: number;
+};
+
+type ViewerBox = {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+};
+
+/** Project a world point through the current perspective camera into CSS. */
+const projectPoint = (
+  camera: CameraReading,
+  point: readonly number[],
+  box: ViewerBox,
+): Projection => {
+  if (camera.parallelProjection) {
+    throw new Error(
+      "the telemetry camera path requires perspective projection",
+    );
+  }
+  const forward = normalised(subtract(camera.focalPoint, camera.position));
+  const right = normalised(cross(forward, camera.viewUp));
+  const up = normalised(cross(right, forward));
+  const eyeToPoint = subtract(point, camera.position);
+  const depth = dot(eyeToPoint, forward);
+  const halfHeight = depth * Math.tan((camera.viewAngle * Math.PI) / 360);
+  const normalisedX =
+    dot(eyeToPoint, right) / (halfHeight * (box.width / box.height));
+  const normalisedY = dot(eyeToPoint, up) / halfHeight;
+  return {
+    clientX: box.x + ((normalisedX + 1) * box.width) / 2,
+    clientY: box.y + ((1 - normalisedY) * box.height) / 2,
+    normalisedX,
+    normalisedY,
+    depth,
+  };
+};
+
+const dragLine = async (
+  session: ExampleSession,
+  start: { readonly x: number; readonly y: number },
+  end: { readonly x: number; readonly y: number },
+  button: "left" | "right",
+): Promise<void> => {
+  const length = Math.hypot(end.x - start.x, end.y - start.y);
+  const steps = Math.max(1, Math.ceil(length / 16));
+  await session.page.mouse.move(start.x, start.y);
+  await session.page.mouse.down({ button });
+  for (let step = 1; step <= steps; step += 1) {
+    const fraction = step / steps;
+    await session.page.mouse.move(
+      start.x + (end.x - start.x) * fraction,
+      start.y + (end.y - start.y) * fraction,
+    );
+    await session.page.waitForTimeout(INPUT_INTERVAL_MS);
+  }
+  await session.page.mouse.up({ button });
+};
+
+const centerPointWithPan = async (
+  session: ExampleSession,
+  box: ViewerBox,
+  target: readonly [number, number, number],
+): Promise<void> => {
+  const beforeCamera = await session.readCamera();
+  const before = projectPoint(beforeCamera, target, box);
+  if (
+    before.depth <= 0 ||
+    Math.abs(before.normalisedX) >= 0.9 ||
+    Math.abs(before.normalisedY) >= 0.9
+  ) {
+    throw new Error(
+      `camera target is outside the usable view: ${JSON.stringify(before)}`,
+    );
+  }
+  const depthRatio = before.depth / cameraDistance(beforeCamera);
+  const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  await dragLine(
+    session,
+    { x: before.clientX, y: before.clientY },
+    {
+      // vtk.js converts pointer travel into a translation on the focal plane.
+      // A sampled target in front of or behind that plane crosses the screen
+      // faster or slower by this exact perspective depth ratio.
+      x: before.clientX + (center.x - before.clientX) * depthRatio,
+      y: before.clientY + (center.y - before.clientY) * depthRatio,
+    },
+    "left",
+  );
+  const panned = await session.readCamera();
+  const afterProjection = projectPoint(panned, target, box);
+  if (
+    Math.abs(afterProjection.normalisedX) > 0.12 ||
+    Math.abs(afterProjection.normalisedY) > 0.12
+  ) {
+    throw new Error(
+      `pan did not center its world target: ${JSON.stringify(afterProjection)}`,
+    );
+  }
+
+  // A screen pan establishes direction but cannot infer surface depth. The
+  // coarse sample supplies that missing datum. Translate eye and focus by the
+  // same residual so orientation and eye-to-focus distance remain unchanged,
+  // while subsequent orbit is exactly about an actual point.
+  const residual = subtract(target, panned.focalPoint);
+  await session.place({
+    position: panned.position.map((value, axis) => value + residual[axis]!),
+    focalPoint: target,
+  });
+  await session.frame();
+};
+
+const pickBelowFocus = async (
+  session: ExampleSession,
+  box: ViewerBox,
+  preferredYRatio: number,
+): Promise<readonly [number, number, number]> => {
+  const camera = await session.readCamera();
+  const focalDepth = cameraDistance(camera);
+  for (const yRatio of [preferredYRatio, 0.6, 0.7, 0.55, 0.75]) {
+    for (const xRatio of [0.5, 0.45, 0.55]) {
+      const result = await session.pickPoint(
+        box.width * xRatio,
+        box.height * yRatio,
+      );
+      if (result?.status !== "hit") continue;
+      const depthRatio =
+        distanceBetween(result.pointOnRay, camera.position) / focalDepth;
+      if (depthRatio >= 0.4 && depthRatio <= 2.5) {
+        return result.pointOnRay;
+      }
+    }
+  }
+  throw new Error(
+    "no nearby drawn point supports a target below the current focus",
+  );
+};
+
 describe("hardware telemetry capture", { tags: ["perf"] }, () => {
   afterAll(async () => {
     await closeBrowser();
@@ -61,10 +306,7 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
         );
       }
 
-      const session = await openExample({
-        cloud: captureUrl,
-        telemetry: true,
-      });
+      const session = await openExample(await captureSource());
       try {
         const environment = await session.telemetryEnvironment();
         if (environment.webgl.softwareRenderer) {
@@ -78,6 +320,12 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
         }
         expect((await session.telemetrySummary()).active).toBe(true);
 
+        await session.markTelemetry(
+          networkMode === "live"
+            ? "network-live"
+            : `network-replay-${replayLatencyMs}ms-${replayMbps}mbps`,
+        );
+
         await session.markTelemetry("source-opened");
         await session.settle(300_000);
         // Prove the converged view can produce a clean presentation, then
@@ -89,32 +337,30 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
         await session.settle(300_000);
         await session.markTelemetry("initial-settled");
 
-        await session.markTelemetry("gesture-start");
-        await session.drag(
-          [
-            { dx: 18, dy: -6 },
-            { dx: 18, dy: -5 },
-            { dx: 18, dy: -4 },
-            { dx: 18, dy: -2 },
-            { dx: 18, dy: 2 },
-            { dx: 18, dy: 4 },
-            { dx: 18, dy: 5 },
-            { dx: 18, dy: 6 },
-          ],
-          20,
-        );
-        await session.markTelemetry("drag-ended");
-
         const box = await session.page.locator("#viewer").boundingBox();
-        if (box === null) throw new Error("the viewer has no box to zoom in");
-        await session.page.mouse.move(
-          box.x + box.width / 2,
-          box.y + box.height / 2,
-        );
+        if (box === null)
+          throw new Error("the viewer has no box to interact in");
+        const viewerCenter = {
+          x: box.x + box.width / 2,
+          y: box.y + box.height / 2,
+        };
+
+        // Pick a support depth from the point prefixes actually being drawn.
+        // Pan its projection to the view centre, then use that sampled depth
+        // as the orbit focus. No endpoint comes from a fixed pixel drag.
+        const roiTarget = await pickBelowFocus(session, box, 0.62);
+        await session.markTelemetry("gesture-start");
+        await session.markTelemetry("roi-pan-start");
+        await centerPointWithPan(session, box, roiTarget);
+        await session.markTelemetry("roi-pan-ended");
+        await session.markTelemetry("roi-centered");
+
+        await session.page.mouse.move(viewerCenter.x, viewerCenter.y);
         for (let index = 0; index < 4; index += 1) {
           await session.page.mouse.wheel(0, -120);
-          await session.frame();
+          await session.page.waitForTimeout(INPUT_INTERVAL_MS);
         }
+        await session.frame();
         await session.markTelemetry("gesture-ended");
 
         await session.settle(300_000);
@@ -123,23 +369,13 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
         await session.settle(300_000);
         await session.markTelemetry("settled-after-gesture");
 
-        const beforePreZoomPan = await session.readCamera();
-        await session.markTelemetry("pre-zoom-pan-start");
-        await session.drag(
-          Array.from({ length: 8 }, () => ({ dx: 0, dy: -8 })),
-          20,
-        );
-        await session.markTelemetry("pre-zoom-pan-ended");
-        const beforeTightZoom = await session.readCamera();
-        await session.page.mouse.move(
-          box.x + box.width / 2,
-          box.y + box.height / 2,
-        );
+        await session.page.mouse.move(viewerCenter.x, viewerCenter.y);
         await session.markTelemetry("tight-zoom-start");
         for (let index = 0; index < 40; index += 1) {
           await session.page.mouse.wheel(0, -120);
-          await session.frame();
+          await session.page.waitForTimeout(INPUT_INTERVAL_MS);
         }
+        await session.frame();
         await session.markTelemetry("tight-zoom-ended");
         await session.settle(300_000);
         await session.render();
@@ -148,18 +384,35 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
         await session.markTelemetry("tight-zoom-settled");
         const afterTightZoom = await session.readCamera();
 
+        // Establish an oblique close view, then sweep broadly around its ROI.
+        // The half turn is a repeatable workload length, not a camera-control
+        // requirement: it exchanges tiles across the frustum and changes
+        // which parts of the cloud are near and far from the camera.
         await session.markTelemetry("close-orbit-start");
-        let gestureX = box.x + box.width / 2;
-        let gestureY = box.y + box.height / 2;
-        await session.page.mouse.move(gestureX, gestureY);
-        await session.page.mouse.down({ button: "right" });
-        for (let index = 0; index < 8; index += 1) {
-          gestureX += 14;
-          if (index < 2) gestureY -= 14;
-          await session.page.mouse.move(gestureX, gestureY);
-          await session.frame();
-        }
-        await session.page.mouse.up({ button: "right" });
+        const obliquePitch = 45;
+        const orbitSweepDegrees = -180;
+        await dragLine(
+          session,
+          viewerCenter,
+          {
+            x: viewerCenter.x,
+            y:
+              viewerCenter.y +
+              ((obliquePitch - cameraPitchDegrees(afterTightZoom)) / 360) *
+                box.height,
+          },
+          "right",
+        );
+        await session.markTelemetry("close-orbit-oblique");
+        await dragLine(
+          session,
+          viewerCenter,
+          {
+            x: viewerCenter.x - (orbitSweepDegrees / 360) * box.width,
+            y: viewerCenter.y,
+          },
+          "right",
+        );
         await session.markTelemetry("close-orbit-ended");
         await session.settle(300_000);
         await session.render();
@@ -169,56 +422,50 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
         const afterCloseOrbit = await session.readCamera();
 
         await session.markTelemetry("horizontal-rotation-start");
-        gestureX = box.x + box.width / 2;
-        gestureY = box.y + box.height / 2;
-        await session.page.mouse.move(gestureX, gestureY);
-        await session.page.mouse.down({ button: "right" });
-        for (let index = 0; index < 6; index += 1) {
-          gestureY -= 14;
-          await session.page.mouse.move(gestureX, gestureY);
-          await session.frame();
-        }
-        await session.page.mouse.up({ button: "right" });
+        const horizontalPitch = 4;
+        await dragLine(
+          session,
+          viewerCenter,
+          {
+            x: viewerCenter.x,
+            y:
+              viewerCenter.y +
+              ((horizontalPitch - cameraPitchDegrees(afterCloseOrbit)) / 360) *
+                box.height,
+          },
+          "right",
+        );
         await session.markTelemetry("horizontal-rotation-ended");
-        const beforeHorizontalPan = await session.readCamera();
 
+        // Pick another support depth below the horizontal focal point and drag
+        // that projected point to centre. This is the close-view pan the
+        // previous fixed 560 px gesture failed to express.
+        await session.frame();
+        const horizontalTarget = await pickBelowFocus(session, box, 0.6);
         await session.markTelemetry("horizontal-pan-start");
-        gestureX = box.x + box.width / 2;
-        gestureY = box.y + box.height * 0.9;
-        await session.page.mouse.move(gestureX, gestureY);
-        await session.page.mouse.down();
-        for (let index = 0; index < 40; index += 1) {
-          gestureY -= 14;
-          await session.page.mouse.move(gestureX, gestureY);
-          await session.page.waitForTimeout(20);
-          await session.frame();
-        }
-        await session.page.mouse.up();
+        await centerPointWithPan(session, box, horizontalTarget);
         await session.markTelemetry("horizontal-pan-ended");
         await session.settle(300_000);
         await session.render();
         await session.frame();
         const horizontalStats = await session.settle(300_000);
         await session.markTelemetry("horizontal-roi-settled");
-        const horizontalRoiCamera = await session.readCamera();
 
         // The return to overview is deliberately a separate phase after the
         // close horizontal view has settled and been measured.
         await session.markTelemetry("return-overview-start");
-        gestureX = box.x + box.width / 2;
-        gestureY = box.y + box.height / 2;
-        await session.page.mouse.move(gestureX, gestureY);
+        await session.page.mouse.move(viewerCenter.x, viewerCenter.y);
         for (let index = 0; index < 44; index += 1) {
           await session.page.mouse.wheel(0, 120);
-          await session.frame();
+          await session.page.waitForTimeout(INPUT_INTERVAL_MS);
         }
+        await session.frame();
         await session.markTelemetry("return-overview-gesture-ended");
         await session.settle(300_000);
         await session.render();
         await session.frame();
         await session.settle(300_000);
         await session.markTelemetry("return-overview-settled");
-        const overviewCamera = await session.readCamera();
 
         await session.stopTelemetry();
         const trace = await session.telemetryTrace();
@@ -250,15 +497,16 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
             "marker:source-opened",
             "marker:initial-settled",
             "marker:gesture-start",
-            "marker:drag-ended",
+            "marker:roi-pan-start",
+            "marker:roi-pan-ended",
+            "marker:roi-centered",
             "marker:gesture-ended",
             "marker:settled-after-gesture",
-            "marker:pre-zoom-pan-start",
-            "marker:pre-zoom-pan-ended",
             "marker:tight-zoom-start",
             "marker:tight-zoom-ended",
             "marker:tight-zoom-settled",
             "marker:close-orbit-start",
+            "marker:close-orbit-oblique",
             "marker:close-orbit-ended",
             "marker:close-orbit-settled",
             "marker:horizontal-rotation-start",
@@ -271,37 +519,10 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
             "marker:return-overview-settled",
           ]),
         );
-        expect(cameraDistance(afterTightZoom)).toBeLessThan(
-          cameraDistance(beforeTightZoom),
-        );
-        expect(beforeTightZoom.focalPoint[2]).toBeLessThan(
-          beforePreZoomPan.focalPoint[2]!,
-        );
-        expect(cameraDistance(afterCloseOrbit)).toBeCloseTo(
-          cameraDistance(afterTightZoom),
-          5,
-        );
-        expect(Math.abs(cameraPitchDegrees(afterCloseOrbit))).toBeGreaterThan(
-          35,
-        );
-        expect(Math.abs(cameraPitchDegrees(afterCloseOrbit))).toBeLessThan(55);
-        expect(Math.abs(cameraPitchDegrees(horizontalRoiCamera))).toBeLessThan(
-          15,
-        );
-        expect(horizontalRoiCamera.focalPoint[2]).toBeLessThan(
-          beforeHorizontalPan.focalPoint[2]!,
-        );
-        expect(cameraDistance(horizontalRoiCamera)).toBeCloseTo(
-          cameraDistance(afterTightZoom),
-          5,
-        );
         expect(
           horizontalStats.controller?.selection.targetTiles,
         ).toBeGreaterThan(0);
         expect(horizontalStats.adapter?.drawnPoints).toBeGreaterThan(0);
-        expect(cameraDistance(overviewCamera)).toBeGreaterThan(
-          cameraDistance(beforeTightZoom) * 0.5,
-        );
         expect(session.failures).toEqual([]);
 
         process.stdout.write(
@@ -315,6 +536,14 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
             workEvents: trace.summary.workEvents,
             longTasks: trace.summary.longTasks,
             durationMs: trace.summary.durationMs,
+            network:
+              networkMode === "live"
+                ? { mode: "live" }
+                : {
+                    mode: "replay",
+                    latencyMs: replayLatencyMs,
+                    mbpsPerRequest: replayMbps,
+                  },
           })}\nTELEMETRY_ARTIFACT ${outputPath}\n`,
         );
       } finally {

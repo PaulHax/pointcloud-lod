@@ -30,6 +30,7 @@ import {
 // `RendererAdapterStats` comes from its own module: index.ts deliberately does
 // not re-export it.
 import type { LodControllerStats } from "../../src/controller";
+import type { PointPickResult } from "../../src/picking";
 import type { RendererAdapterStats } from "../../src/rendererAdapter";
 import type { ViewGovernorStats } from "../../src/viewGovernor";
 import type {
@@ -37,7 +38,11 @@ import type {
   TelemetrySummary,
   TelemetryTrace,
 } from "../../examples/vtk/telemetry";
-import { startStaticServer, type StaticServer } from "./server";
+import {
+  startStaticServer,
+  type NetworkProfile,
+  type StaticServer,
+} from "./server";
 
 /** Failure messages in this suite carry the whole sample, pretty-printed. */
 export const shown = (value: unknown): string => JSON.stringify(value, null, 2);
@@ -203,6 +208,7 @@ export type ExampleSession = {
   /** Load another cloud into the running page; resolves when it has opened. */
   load(url: string): Promise<void>;
   readCamera(): Promise<CameraReading>;
+  pickPoint(xCssPx: number, yCssPx: number): Promise<PointPickResult | null>;
   place(next: {
     position?: readonly number[];
     focalPoint?: readonly number[];
@@ -367,7 +373,12 @@ export const SETTLE_QUIET_MS = 400;
  * positional path `cloudsUnderTest()` gives a supplied cloud.
  */
 export const openExample = async (
-  options: { cloud?: string; telemetry?: boolean } = {},
+  options: {
+    cloud?: string;
+    telemetry?: boolean;
+    files?: Readonly<Record<string, string>>;
+    network?: NetworkProfile;
+  } = {},
 ): Promise<ExampleSession> => {
   const cloud = options.cloud ?? FIXTURE_URL_PATH;
   const server: StaticServer = await startStaticServer(
@@ -378,7 +389,12 @@ export const openExample = async (
     },
     // Every cloud is reachable from every session, so a scenario can switch
     // sources without standing up a second server.
-    Object.assign({}, ...cloudsUnderTest().map((entry) => entry.files)),
+    Object.assign(
+      {},
+      ...cloudsUnderTest().map((entry) => entry.files),
+      options.files,
+    ),
+    options.network,
   );
   const page = await (await browser()).newPage();
   const failures: string[] = [];
@@ -529,6 +545,15 @@ export const openExample = async (
     readCamera: () =>
       page.evaluate(() =>
         (window as never as ExampleWindow).pointCloudExample.camera.read(),
+      ),
+    pickPoint: (xCssPx, yCssPx) =>
+      page.evaluate(
+        ({ x, y }) =>
+          (window as never as ExampleWindow).pointCloudExample.camera.pick(
+            x,
+            y,
+          ),
+        { x: xCssPx, y: yCssPx },
       ),
     place: (next) =>
       page.evaluate(
@@ -737,6 +762,7 @@ export type ExampleWindow = {
     load(url: string): Promise<void>;
     camera: {
       read(): CameraReading;
+      pick(xCssPx: number, yCssPx: number): PointPickResult | null;
       place(next: Record<string, unknown>): void;
       azimuth(degrees: number): void;
       dolly(factor: number): void;

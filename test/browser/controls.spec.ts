@@ -37,6 +37,14 @@ const cameraPitchDegrees = (reading: CameraReading): number => {
   return (Math.asin(offset[2]! / Math.hypot(...offset)) * 180) / Math.PI;
 };
 
+const cameraYawDegrees = (reading: CameraReading): number => {
+  const offset = difference(reading.position, reading.focalPoint);
+  return (Math.atan2(offset[1]!, offset[0]!) * 180) / Math.PI;
+};
+
+const signedAngleDifference = (after: number, before: number): number =>
+  ((((after - before) % 360) + 540) % 360) - 180;
+
 const relativeGap = (left: number, right: number): number =>
   Math.abs(left - right) /
   Math.max(Math.abs(left), Math.abs(right), Number.MIN_VALUE);
@@ -292,7 +300,7 @@ describe("example controls", () => {
     }
   });
 
-  it("orbits around a centered pivot after an off-center zoom", async () => {
+  it("keeps a centered pivot throughout a long orbit", async () => {
     const session = await openExample({ cloud: MULTIPAGE_CLOUD.urlPath });
     try {
       await session.setBudgetMode("fixed");
@@ -308,22 +316,41 @@ describe("example controls", () => {
       await session.page.mouse.move(x, y);
       await session.page.mouse.down({ button: "right" });
       const atOrbitStart = await session.readCamera();
-      await session.page.mouse.move(x + 100, y);
-      await session.frame();
+      const path = [atOrbitStart];
+      const steps = 24;
+      for (let step = 1; step <= steps; step += 1) {
+        await session.page.mouse.move(x + (box.width / 2) * (step / steps), y);
+        await session.frame();
+        path.push(await session.readCamera());
+      }
       await session.page.mouse.up({ button: "right" });
-      const afterOrbit = await session.readCamera();
-      const beforeEye = difference(
-        atOrbitStart.position,
-        atOrbitStart.focalPoint,
-      );
-      const afterEye = difference(afterOrbit.position, afterOrbit.focalPoint);
+      const afterOrbit = path.at(-1)!;
+      const orbitRadius = cameraDistance(atOrbitStart);
+      let pathYawDegrees = 0;
+
+      for (let index = 1; index < path.length; index += 1) {
+        const previous = path[index - 1]!;
+        const current = path[index]!;
+        const yawStep = signedAngleDifference(
+          cameraYawDegrees(current),
+          cameraYawDegrees(previous),
+        );
+        pathYawDegrees += yawStep;
+
+        // The camera's focal point defines the screen-centre ray. Keeping it
+        // fixed while preserving a positive radius proves that the eye moves
+        // around the centred pivot rather than through or beyond it.
+        expect(current.focalPoint).toEqual(atOrbitStart.focalPoint);
+        expect(cameraDistance(current)).toBeGreaterThan(0);
+        expect(relativeGap(cameraDistance(current), orbitRadius)).toBeLessThan(
+          1e-12,
+        );
+        expect(yawStep).toBeLessThan(0);
+        expect(Math.abs(yawStep)).toBeLessThan(10);
+      }
 
       expect(afterOrbit.focalPoint).toEqual(atOrbitStart.focalPoint);
-      expect(
-        relativeGap(cameraDistance(afterOrbit), cameraDistance(atOrbitStart)),
-      ).toBeLessThan(1e-12);
-      expect(dot(beforeEye, afterEye)).toBeGreaterThan(0);
-      expect(cross(beforeEye, afterEye)[2]).toBeLessThan(0);
+      expect(Math.abs(pathYawDegrees)).toBeGreaterThan(120);
       expect(afterOrbit.position).not.toEqual(atOrbitStart.position);
       expect(session.failures).toEqual([]);
     } finally {

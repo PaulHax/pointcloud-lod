@@ -2055,6 +2055,9 @@ Object.assign(window, {
         viewAngle: camera.getViewAngle(),
         parallelProjection: !!camera.getParallelProjection(),
       }),
+      /** Pick a support depth from exactly the point prefixes being drawn. */
+      pick: (xCssPx: number, yCssPx: number) =>
+        controller?.pickPoint(cameraView(), xCssPx, yCssPx) ?? null,
       /** Absolute placement, for a check that needs a known camera. */
       place: (next: {
         position?: readonly number[];
