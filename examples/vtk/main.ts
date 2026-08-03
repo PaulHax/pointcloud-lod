@@ -29,6 +29,7 @@ import {
   createCopcWorkerTileSource,
   createGpuFrameTimer,
   createLodController,
+  createViewBudgetCoordinator,
   createViewGovernor,
   keyToString,
   type CameraView,
@@ -41,6 +42,8 @@ import {
   type ViewGovernorMember,
   type ViewGovernorOptions,
   type ViewGovernorStats,
+  type ViewBudgetCoordinator,
+  type ViewBudgetMember,
 } from "../../src";
 import {
   createRendererAdapter,
@@ -453,6 +456,8 @@ let loadedSource: TileSource | null = null;
 let governor: ViewGovernor | null = null;
 let governorKey: string | null = null;
 let member: ViewGovernorMember | null = null;
+let fixedBudget: ViewBudgetCoordinator | null = null;
+let fixedMember: ViewBudgetMember | null = null;
 let explicitMotion: MotionReference | null = null;
 let lastRenderedView: CameraView | null = null;
 let loadedName = "";
@@ -764,14 +769,14 @@ const readGovernorOptions = (): ViewGovernorOptions | null => {
 };
 
 /**
- * Which number the controller draws to, reconciled as a whole: adaptive means
- * the governor owns it, anything else means the panel does. Registering
- * distributes, so the governor's allocation reaches the controller inside this
- * call rather than a frame later.
+ * Both policies use one view-wide allocator. Adaptive quality supplies targets
+ * through the governor; fixed quality supplies the panel's target directly.
  */
 const applyBudgetMode = (): void => {
   if (!controller) return;
   if (budgetMode() === "adaptive" && governor) {
+    fixedMember?.release();
+    fixedMember = null;
     member ??= governor.register({
       id: loadedName || "cloud",
       setPointBudget: (budget) => controller?.setPointBudget(budget),
@@ -782,7 +787,15 @@ const applyBudgetMode = (): void => {
   }
   member?.release();
   member = null;
-  controller.setPointBudget(fixedPointBudget());
+  fixedBudget ??= createViewBudgetCoordinator({
+    pointBudget: fixedPointBudget(),
+  });
+  fixedBudget.setPointBudget(fixedPointBudget());
+  fixedMember ??= fixedBudget.register({
+    id: loadedName || "cloud",
+    setPointBudget: (budget) => controller?.setPointBudget(budget),
+    setDensityFraction: (fraction) => controller?.setDensityFraction(fraction),
+  });
 };
 
 const syncGovernor = (): void => {
@@ -1425,6 +1438,11 @@ const updateMember = (): void => {
     physicalHierarchyOperations: cloud.physicalHierarchyOperations,
     workPending: cloud.workPending,
   });
+  fixedMember?.update({
+    active: true,
+    projectedImportance: cloud.selection.projectedImportance,
+    memoryCeilingPoints: cloud.memoryCeilingPoints,
+  });
 };
 
 // Every paint the interactor drives ends here — ours and the ones its own
@@ -1489,6 +1507,8 @@ const disposeCloud = (): void => {
   loadGeneration += 1;
   member?.release();
   member = null;
+  fixedMember?.release();
+  fixedMember = null;
   controller?.dispose();
   adapter?.dispose();
   loadedSource?.dispose?.();

@@ -211,7 +211,7 @@ must not paint synchronously from either callback. That lets a newly resident
 tile, the frontier-derived diameter, and the renderer batch land before the
 same frame.
 
-#### Point-budget flow: adaptive or direct
+#### Point-budget flow: adaptive or fixed
 
 With a `ViewGovernor`, the host closes a frame-time feedback loop:
 
@@ -226,12 +226,14 @@ paint frame
   → needsFrame() says whether another measurement is useful
 ```
 
-The governor is optional. It never reads the renderer or schedules a frame on
-its own. The host reports completed frames, camera-motion references, member
-importance, memory ceilings, and outstanding physical work. See
-[Adaptive quality](#adaptive-quality) for the complete wiring.
+The governor is optional. It chooses targets from frame timing, then hands them
+to the same view-budget coordinator fixed quality uses. It never reads the
+renderer or schedules a frame on its own. The host reports completed frames,
+camera-motion references, member importance, memory ceilings, and outstanding
+physical work. See [Adaptive quality](#adaptive-quality) for the complete
+wiring.
 
-For a fixed budget, omit the governor and set the controller directly:
+For one cloud, a fixed budget can still be set directly:
 
 ```js
 controller.setPointBudget(1_500_000);
@@ -278,6 +280,8 @@ These methods are useful when application policy lives outside the library:
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `controller.setPointBudget(points)`                  | Set the visible-point target directly. Use this instead of a governor for a fixed or externally managed budget.                                                          |
 | `controller.setDensityFraction(fraction)`            | Redistribute that fraction of selected points into parent-closed, importance-ranked tile prefixes without changing selection, I/O, actors, or VBO contents.              |
+| `budget.setPointBudget(points)`                      | Set one fixed aggregate target for every controller registered with a `ViewBudgetCoordinator`.                                                                           |
+| `budget.setDensityFraction(fraction)`                | Thin or restore the aggregate draw target without changing the coordinator's selected-point target.                                                                      |
 | `controller.setPresentation(...)`                    | Switch live between Auto and Fixed point presentation.                                                                                                                   |
 | `controller.setRefinementCutoffPx(pixels)`           | Stop descending when a node's projected spacing is below this threshold. Lower values allow finer traversal; the point and memory budgets still apply.                   |
 | `controller.refresh()`                               | Force immediate reselection against the current camera, useful after external state changes that do not produce a new camera value.                                      |
@@ -463,12 +467,38 @@ point count but silently rewrote RGB point format 7 as non-RGB format 6.
 The controller is a complete fixed-budget viewer without a governor. Fixed
 quality does not disable demand rendering, screen-space prioritization,
 progressive point order, a worker-backed COPC source, decoded and GPU reuse,
-memory ceilings, or per-tile draw plans; only frame-time learning and view-wide
-budget distribution are absent.
+memory ceilings, or per-tile draw plans; only frame-time learning is absent.
 
 ```js
 controller.setPointBudget(5_000_000);
 ```
+
+Use a view-budget coordinator when a slider represents one target for the
+whole view, including views with several clouds:
+
+```js
+import { createViewBudgetCoordinator } from "pointcloud-lod";
+
+const budget = createViewBudgetCoordinator({ pointBudget: 2_000_000 });
+const member = budget.register({
+  id: "cloud-1",
+  setPointBudget: (points) => controller.setPointBudget(points),
+  setDensityFraction: (fraction) => controller.setDensityFraction(fraction),
+});
+
+// One application detail slider changes one aggregate view target.
+budget.setPointBudget(detailSliderPoints);
+
+const stats = controller.stats();
+member.update({
+  projectedImportance: stats.selection.projectedImportance,
+  memoryCeilingPoints: stats.memoryCeilingPoints,
+});
+```
+
+The coordinator applies the memory ceiling to the aggregate before splitting
+it by projected importance. Its statistics distinguish the requested target
+from the effective draw and selection budgets.
 
 An application that wants a simple interaction policy can lower only the draw
 allowance while input is active. This keeps the fixed selection resident and
@@ -476,9 +506,9 @@ uses the same importance-ranked tile prefixes as adaptive mode:
 
 ```js
 controller.beginInteraction();
-controller.setDensityFraction(0.6);
+budget.setDensityFraction(0.6);
 // ...camera input...
-controller.setDensityFraction(1);
+budget.setDensityFraction(1);
 controller.endInteraction();
 ```
 
@@ -489,9 +519,9 @@ most predictable configuration.
 
 A controller on its own draws to whatever fixed budget you set. To adapt
 quality to what the machine can actually paint, add a view governor: one per
-view, shared by every controller drawing into that view. It splits one budget
-across its members from measured host-frame timings, so several clouds in a
-view compete for a single frame-time target instead of each chasing its own.
+view, shared by every controller drawing into that view. It drives the same
+view-budget coordinator from measured host-frame timings, so several clouds in
+a view compete for a single frame-time target instead of each chasing its own.
 
 Two regimes, two targets. A moving camera is being steered, so it gets the
 tighter **16 ms** target and trades drawn points for responsiveness; a settled

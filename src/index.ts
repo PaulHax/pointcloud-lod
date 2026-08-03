@@ -68,6 +68,18 @@ export {
   type MemoryPoolOptions,
 } from "./memoryPool";
 
+export {
+  createViewBudgetCoordinator,
+  type ViewBudgetConstraint,
+  type ViewBudgetCoordinator,
+  type ViewBudgetCoordinatorOptions,
+  type ViewBudgetMember,
+  type ViewBudgetMemberOptions,
+  type ViewBudgetMemberStats,
+  type ViewBudgetMemberUpdate,
+  type ViewBudgetStats,
+} from "./viewBudget";
+
 // The adaptive budget loop is the view governor's internal. Only the types
 // that appear in the governor's own surface are re-exported.
 export {
