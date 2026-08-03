@@ -29,7 +29,7 @@ npm install github:PaulHax/pointcloud-lod#<commit-sha>
 
 ### Requirements
 
-The package has two entry points, and only one of them needs vtk.js:
+The package has three entry points, and only one of them needs vtk.js:
 
 - **`pointcloud-lod`** — tile sources, LOD controller, and camera math. No
   vtk.js dependency; runs standalone (e.g. in a worker or a test).
@@ -46,6 +46,10 @@ The package has two entry points, and only one of them needs vtk.js:
   git checkout "$VTKJS_FORK_COMMIT"
   npm ci && npm run build:esm
   ```
+
+- **`pointcloud-lod/copc-worker`** — the optional COPC worker endpoint. Pair it
+  with `createCopcWorkerTileSource` to keep range reads, LAZ decoding, and
+  point extraction off the interaction/render thread.
 
 vtk.js is deliberately not declared as a peer dependency: no published version
 satisfies the adapter, so any semver range would be false.
@@ -106,11 +110,44 @@ adapter.setDevicePixelRatio(window.devicePixelRatio);
 // leaves GPU resources alive with nothing left to reclaim them.
 controller.dispose();
 adapter.dispose();
+source.dispose?.();
 ```
 
 For servers that reproject or transform points per tile, use
 `createHttpTileSource({ endpoint, metadata })` instead of the COPC source; it
 speaks a compact binary tile protocol (`PCT1`).
+
+In an interactive browser, put the COPC source behind one module worker. The
+worker owns its laz-perf instance, accepts concurrent range reads, and transfers
+decoded position/color buffers back without copying. For example, make the
+worker entry:
+
+```js
+// copc.worker.js
+import { serveCopcTileSourceWorker } from "pointcloud-lod/copc-worker";
+
+serveCopcTileSourceWorker();
+```
+
+Then create the source from the main thread (serve `laz-perf.wasm` at the URL
+you provide):
+
+```js
+import { createCopcWorkerTileSource } from "pointcloud-lod";
+
+const source = await createCopcWorkerTileSource({
+  source: "https://host/cloud.copc.laz", // Blob/File also works
+  createWorker: () =>
+    new Worker(new URL("./copc.worker.js", import.meta.url), {
+      type: "module",
+    }),
+  lazPerfWasmUrl: new URL("./laz-perf.wasm", document.baseURI).href,
+});
+```
+
+The source owns that worker; call `source.dispose()` after disposing its
+controller. Cancellation still settles only when the worker's physical read or
+decode ends, so controller concurrency remains bounded.
 
 ### Application flows and primary controls
 
@@ -282,10 +319,10 @@ removed.
 ### vtk.js example
 
 The runnable example in [`examples/vtk`](./examples/vtk/) loads either a local
-`.copc.laz` file (read through `File.slice()` range reads) or a COPC URL (HTTP
-Range), frames it automatically, and streams it through the same three pieces
-an application wires: one controller, one renderer adapter, and one view
-governor for the view.
+`.copc.laz` file (read through `Blob.slice()` in its source worker) or a COPC
+URL (HTTP Range from that worker), frames it automatically, and streams it
+through the same three pieces an application wires: one controller, one
+renderer adapter, and one view governor for the view.
 
 The example defaults to Auto presentation at `0.5×`, using half the estimated
 point spacing as its diameter. Its sidebar can switch to a constant Fixed
@@ -539,6 +576,9 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
   - `createCopcTileSource` reads [COPC](https://copc.io/) files directly
     over HTTP Range requests (via the `copc` package), so any static file
     host works with no tile server at all;
+  - `createCopcWorkerTileSource` exposes the same contract while a dedicated
+    worker performs COPC I/O, LAZ decoding, and extraction; final typed arrays
+    transfer to the controller without a copy;
   - `createHttpTileSource` speaks a small revision-scoped hierarchy/tile
     HTTP protocol with a compact binary tile format (`PCT1`: Float64 tile
     origin + tile-local Float32 positions + Uint8 RGB) for servers that

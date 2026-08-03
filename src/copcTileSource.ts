@@ -38,6 +38,10 @@ export type RangeGetter = (
 export type CopcTileSourceOptions = {
   /** URL fetched via HTTP Range requests, or a custom byte-range getter. */
   source: string | RangeGetter;
+  /** An initialized laz-perf module, used by worker-hosted sources. */
+  lazPerf?: NonNullable<
+    Parameters<typeof Copc.loadPointDataView>[3]
+  >["lazPerf"];
 };
 
 const ABORT_CHECK_STRIDE = 4096;
@@ -297,7 +301,9 @@ export const createCopcTileSource = async (
   const rootNode = nodeMap.get(rootKeyString);
   if (hasRgb && rootNode !== undefined && rootNode.pointCount > 0) {
     try {
-      rootView = await Copc.loadPointDataView(getter, copc, rootNode);
+      rootView = await Copc.loadPointDataView(getter, copc, rootNode, {
+        lazPerf: options.lazPerf,
+      });
       rgbShift = rgbShiftOf(rootView);
     } catch (error) {
       // Fall back to no shift, for the reason `rgbShiftOf` gives above.
@@ -353,6 +359,7 @@ export const createCopcTileSource = async (
           abortableGetter(getter, signal),
           copc,
           node,
+          { lazPerf: options.lazPerf },
         );
       }
       signal?.throwIfAborted();

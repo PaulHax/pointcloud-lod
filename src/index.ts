@@ -119,6 +119,11 @@ export {
   type RangeGetter,
 } from "./copcTileSource";
 
+export {
+  createCopcWorkerTileSource,
+  type CopcWorkerTileSourceOptions,
+} from "./copcWorkerTileSource";
+
 // The vtk.js renderer adapter is deliberately NOT re-exported here. It imports
 // vtk.js at module scope, so re-exporting it would make this entry point throw
 // for consumers that only want the octree/controller core. Import it from

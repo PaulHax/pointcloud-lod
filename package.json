@@ -38,6 +38,10 @@
     "./vtk": {
       "types": "./dist/rendererAdapter.d.ts",
       "import": "./dist/rendererAdapter.js"
+    },
+    "./copc-worker": {
+      "types": "./dist/copcWorker.d.ts",
+      "import": "./dist/copcWorker.js"
     }
   },
   "scripts": {
@@ -56,7 +60,8 @@
     "prepare": "npm run build"
   },
   "dependencies": {
-    "copc": "^0.0.8"
+    "copc": "^0.0.8",
+    "laz-perf": "^0.0.7"
   },
   "devDependencies": {
     "@semantic-release/github": "^11.0.0",

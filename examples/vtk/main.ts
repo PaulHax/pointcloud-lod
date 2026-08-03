@@ -1,12 +1,12 @@
 /**
  * pointcloud-lod vtk.js example.
  *
- * Streams any COPC dataset — a local file through `File.slice()` range reads,
- * a remote URL through HTTP Range — using the same three pieces the trame
- * bridge wires together: one LOD controller per cloud, one renderer adapter,
- * and one view governor owning the point budget for the whole view. Every
- * knob (budget mode, frame-time targets, maximum points, projection) is a
- * runtime control, so a different cloud needs no code change.
+ * Streams any COPC dataset through a source worker — a local file through
+ * `Blob.slice()` range reads, a remote URL through HTTP Range — using the same
+ * three pieces the trame bridge wires together: one LOD controller per cloud,
+ * one renderer adapter, and one view governor owning the point budget for the
+ * whole view. Every knob (budget mode, frame-time targets, maximum points,
+ * projection) is a runtime control, so a different cloud needs no code change.
  *
  * The governor never schedules a frame: this page paints, times the paint,
  * reports it, and asks `needsFrame()` whether another one is owed. That is the
@@ -26,7 +26,7 @@ import macro from "@kitware/vtk.js/macros";
 import {
   DEFAULTS,
   ROOT_KEY,
-  createCopcTileSource,
+  createCopcWorkerTileSource,
   createGpuFrameTimer,
   createLodController,
   createViewGovernor,
@@ -449,6 +449,7 @@ type Projection = "perspective" | "orthographic";
 
 let controller: LodController | null = null;
 let adapter: RendererAdapter | null = null;
+let loadedSource: TileSource | null = null;
 let governor: ViewGovernor | null = null;
 let governorKey: string | null = null;
 let member: ViewGovernorMember | null = null;
@@ -1490,8 +1491,10 @@ const disposeCloud = (): void => {
   member = null;
   controller?.dispose();
   adapter?.dispose();
+  loadedSource?.dispose?.();
   controller = null;
   adapter = null;
+  loadedSource = null;
   loadedName = "";
   loadedPointCount = 0;
   framing = null;
@@ -1591,6 +1594,7 @@ const applyFraming = (): void => {
 
 const instrumentSource = (source: TileSource): TileSource => ({
   metadata: () => source.metadata(),
+  dispose: () => source.dispose?.(),
   async nodes(key, options) {
     const finish = telemetry.isActive()
       ? telemetry.beginWork("hierarchy", { key: keyToString(key) })
@@ -1643,12 +1647,14 @@ const loadSource = async (
     const openedSource = await sourcePromise;
     if (generation !== loadGeneration) {
       finishSourceOpen?.("cancelled");
+      openedSource.dispose?.();
       return;
     }
     finishSourceOpen?.("ok", {
       points: openedSource.metadata().pointCount,
     });
     const source = instrumentSource(openedSource);
+    loadedSource = source;
     await frameRoot(source);
     if (generation !== loadGeneration) return;
     loadedName = name;
@@ -1726,11 +1732,17 @@ const loadSource = async (
   }
 };
 
-const localFileSource = (file: File): Promise<TileSource> =>
-  createCopcTileSource({
-    source: async (begin, end) =>
-      new Uint8Array(await file.slice(begin, end).arrayBuffer()),
+const copcSource = (source: string | Blob): Promise<TileSource> =>
+  createCopcWorkerTileSource({
+    source,
+    createWorker: () =>
+      new Worker(new URL("./copc.worker.ts", import.meta.url), {
+        type: "module",
+      }),
+    lazPerfWasmUrl: new URL("/laz-perf.wasm", window.location.href).href,
   });
+
+const localFileSource = (file: File): Promise<TileSource> => copcSource(file);
 
 /**
  * Keep the address bar showing the cloud on screen, so the page can be
@@ -1751,7 +1763,7 @@ const loadUrl = (): void => {
     return;
   }
   showInAddressBar(url);
-  void loadSource(url, createCopcTileSource({ source: url }));
+  void loadSource(url, copcSource(url));
 };
 
 // ---------------------------------------------------------------------------
@@ -2042,7 +2054,7 @@ Object.assign(window, {
     /** Resolves once the source has opened and its first selection has run. */
     load: (url: string): Promise<void> => {
       urlInput.value = url;
-      return loadSource(url, createCopcTileSource({ source: url }));
+      return loadSource(url, copcSource(url));
     },
 
     camera: {

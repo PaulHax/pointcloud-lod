@@ -88,4 +88,6 @@ export type TileSource = {
   nodes(key: VoxelKey, opts?: LoadOptions): Promise<NodeInfo[]>;
   /** Fetch and decode one node's points. */
   loadTile(key: VoxelKey, opts?: LoadOptions): Promise<TileData>;
+  /** Release source-owned resources such as a decoding worker. The host owns this lifetime. */
+  dispose?(): void;
 };
