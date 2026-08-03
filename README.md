@@ -431,6 +431,19 @@ with `POINTCLOUD_LOD_TELEMETRY_LATENCY_MS` and
 `POINTCLOUD_LOD_TELEMETRY_REFRESH=1`, or select the original remote behavior
 with `POINTCLOUD_LOD_TELEMETRY_NETWORK=live`.
 
+The same scenario can compare the optional governor with the conventional
+fixed-budget policy:
+
+```bash
+POINTCLOUD_LOD_TELEMETRY_BUDGET_MODE=fixed \
+POINTCLOUD_LOD_TELEMETRY_POINT_BUDGET=5000000 \
+POINTCLOUD_LOD_TELEMETRY_INTERACTION_DENSITY=0.6 \
+npm run telemetry:capture
+```
+
+The defaults are `adaptive`, 2,000,000 points, and full interaction density.
+The point and interaction-density values affect only fixed mode.
+
 It rejects software rendering and checks that the trace is structurally usable;
 it deliberately does not turn machine-specific frame times into pass/fail
 thresholds. If no output path is supplied, the timestamped trace is written
@@ -444,6 +457,33 @@ PDAL's `writers.copc` or `untwine` — which is also what server-side preparatio
 pipelines should run. No JavaScript/browser COPC writer is used or accepted
 here, not even as a development dependency: the one evaluated preserved the
 point count but silently rewrote RGB point format 7 as non-RGB format 6.
+
+### Fixed quality
+
+The controller is a complete fixed-budget viewer without a governor. Fixed
+quality does not disable demand rendering, screen-space prioritization,
+progressive point order, a worker-backed COPC source, decoded and GPU reuse,
+memory ceilings, or per-tile draw plans; only frame-time learning and view-wide
+budget distribution are absent.
+
+```js
+controller.setPointBudget(5_000_000);
+```
+
+An application that wants a simple interaction policy can lower only the draw
+allowance while input is active. This keeps the fixed selection resident and
+uses the same importance-ranked tile prefixes as adaptive mode:
+
+```js
+controller.beginInteraction();
+controller.setDensityFraction(0.6);
+// ...camera input...
+controller.setDensityFraction(1);
+controller.endInteraction();
+```
+
+This two-state policy is optional. A constant fixed budget is the smallest and
+most predictable configuration.
 
 ### Adaptive quality
 

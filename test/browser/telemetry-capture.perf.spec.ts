@@ -64,6 +64,29 @@ const replayCacheDirectory = resolve(
   process.env.POINTCLOUD_LOD_TELEMETRY_CACHE_DIR?.trim() ||
     "artifacts/telemetry/cache",
 );
+const budgetMode = (
+  process.env.POINTCLOUD_LOD_TELEMETRY_BUDGET_MODE ?? "adaptive"
+).trim();
+if (budgetMode !== "adaptive" && budgetMode !== "fixed") {
+  throw new Error(
+    "POINTCLOUD_LOD_TELEMETRY_BUDGET_MODE must be either adaptive or fixed",
+  );
+}
+const fixedPointBudget = finiteEnvironmentNumber(
+  "POINTCLOUD_LOD_TELEMETRY_POINT_BUDGET",
+  2_000_000,
+  1,
+);
+const fixedInteractionDensity = finiteEnvironmentNumber(
+  "POINTCLOUD_LOD_TELEMETRY_INTERACTION_DENSITY",
+  1,
+  0,
+);
+if (fixedInteractionDensity > 1) {
+  throw new Error(
+    "POINTCLOUD_LOD_TELEMETRY_INTERACTION_DENSITY must be at most 1",
+  );
+}
 
 const captureSource = async (): Promise<Parameters<typeof openExample>[0]> => {
   if (networkMode === "live") {
@@ -308,6 +331,13 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
 
       const session = await openExample(await captureSource());
       try {
+        if (budgetMode === "fixed") {
+          await session.setBudgetMode("fixed");
+          await session.page
+            .locator("#point-budget")
+            .fill(String(Math.floor(fixedPointBudget)));
+          await session.page.locator("#point-budget").dispatchEvent("change");
+        }
         const environment = await session.telemetryEnvironment();
         if (environment.webgl.softwareRenderer) {
           throw new Error(
@@ -344,12 +374,24 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
           x: box.x + box.width / 2,
           y: box.y + box.height / 2,
         };
+        const markMotionBoundary = async (
+          label: string,
+          moving: boolean,
+        ): Promise<void> => {
+          if (moving && budgetMode === "fixed") {
+            await session.setDensityFraction(fixedInteractionDensity);
+          }
+          await session.markTelemetry(label);
+          if (!moving && budgetMode === "fixed") {
+            await session.setDensityFraction(1);
+          }
+        };
 
         // Pick a support depth from the point prefixes actually being drawn.
         // Pan its projection to the view centre, then use that sampled depth
         // as the orbit focus. No endpoint comes from a fixed pixel drag.
         const roiTarget = await pickBelowFocus(session, box, 0.62);
-        await session.markTelemetry("gesture-start");
+        await markMotionBoundary("gesture-start", true);
         await session.markTelemetry("roi-pan-start");
         await centerPointWithPan(session, box, roiTarget);
         await session.markTelemetry("roi-pan-ended");
@@ -361,7 +403,7 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
           await session.page.waitForTimeout(INPUT_INTERVAL_MS);
         }
         await session.frame();
-        await session.markTelemetry("gesture-ended");
+        await markMotionBoundary("gesture-ended", false);
 
         await session.settle(300_000);
         await session.render();
@@ -370,13 +412,13 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
         await session.markTelemetry("settled-after-gesture");
 
         await session.page.mouse.move(viewerCenter.x, viewerCenter.y);
-        await session.markTelemetry("tight-zoom-start");
+        await markMotionBoundary("tight-zoom-start", true);
         for (let index = 0; index < 40; index += 1) {
           await session.page.mouse.wheel(0, -120);
           await session.page.waitForTimeout(INPUT_INTERVAL_MS);
         }
         await session.frame();
-        await session.markTelemetry("tight-zoom-ended");
+        await markMotionBoundary("tight-zoom-ended", false);
         await session.settle(300_000);
         await session.render();
         await session.frame();
@@ -388,7 +430,7 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
         // The half turn is a repeatable workload length, not a camera-control
         // requirement: it exchanges tiles across the frustum and changes
         // which parts of the cloud are near and far from the camera.
-        await session.markTelemetry("close-orbit-start");
+        await markMotionBoundary("close-orbit-start", true);
         const obliquePitch = 45;
         const orbitSweepDegrees = -180;
         await dragLine(
@@ -413,7 +455,7 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
           },
           "right",
         );
-        await session.markTelemetry("close-orbit-ended");
+        await markMotionBoundary("close-orbit-ended", false);
         await session.settle(300_000);
         await session.render();
         await session.frame();
@@ -421,7 +463,7 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
         await session.markTelemetry("close-orbit-settled");
         const afterCloseOrbit = await session.readCamera();
 
-        await session.markTelemetry("horizontal-rotation-start");
+        await markMotionBoundary("horizontal-rotation-start", true);
         const horizontalPitch = 4;
         await dragLine(
           session,
@@ -444,7 +486,7 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
         const horizontalTarget = await pickBelowFocus(session, box, 0.6);
         await session.markTelemetry("horizontal-pan-start");
         await centerPointWithPan(session, box, horizontalTarget);
-        await session.markTelemetry("horizontal-pan-ended");
+        await markMotionBoundary("horizontal-pan-ended", false);
         await session.settle(300_000);
         await session.render();
         await session.frame();
@@ -453,14 +495,14 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
 
         // The return to overview is deliberately a separate phase after the
         // close horizontal view has settled and been measured.
-        await session.markTelemetry("return-overview-start");
+        await markMotionBoundary("return-overview-start", true);
         await session.page.mouse.move(viewerCenter.x, viewerCenter.y);
         for (let index = 0; index < 44; index += 1) {
           await session.page.mouse.wheel(0, 120);
           await session.page.waitForTimeout(INPUT_INTERVAL_MS);
         }
         await session.frame();
-        await session.markTelemetry("return-overview-gesture-ended");
+        await markMotionBoundary("return-overview-gesture-ended", false);
         await session.settle(300_000);
         await session.render();
         await session.frame();
@@ -544,6 +586,14 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
                     latencyMs: replayLatencyMs,
                     mbpsPerRequest: replayMbps,
                   },
+            budget:
+              budgetMode === "fixed"
+                ? {
+                    mode: "fixed",
+                    points: Math.floor(fixedPointBudget),
+                    interactionDensity: fixedInteractionDensity,
+                  }
+                : { mode: "adaptive" },
           })}\nTELEMETRY_ARTIFACT ${outputPath}\n`,
         );
       } finally {
