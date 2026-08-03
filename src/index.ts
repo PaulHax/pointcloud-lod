@@ -51,10 +51,12 @@ export {
   type LodControllerOptions,
   type LodControllerStats,
   type LodSelectionStats,
+  type LodDrawPlanStats,
   type PointPresentation,
   type FixedPointPresentation,
   type AutoPointPresentation,
   type TileBatch,
+  type TileDrawPlan,
 } from "./controller";
 
 export {

@@ -25,7 +25,9 @@ describe("progressive draw density", () => {
       );
       expect(thin.adapter!.submittedPoints).toBe(full.adapter!.submittedPoints);
       expect(thin.adapter!.drawnPoints).toBeLessThan(full.adapter!.drawnPoints);
-      expect(thin.adapter!.densityFraction).toBe(0.25);
+      expect(thin.adapter!.drawnPoints).toBe(thin.controller!.drawnPoints);
+      expect(thin.controller!.densityFraction).toBe(0.25);
+      expect(thin.adapter!.drawnFraction).toBeCloseTo(0.25, 5);
       expect(await session.keys()).toEqual(fullKeys);
       expect((await session.scene()).actors).toBe(fullScene.actors);
       expect(

@@ -18,6 +18,7 @@ import {
   type CameraView,
 } from "./camera";
 import { selectNodes } from "./budget";
+import { allocatePointPrefixes } from "./drawPlan";
 import { createLruCache } from "./lru";
 import {
   finiteAtLeast,
@@ -47,11 +48,18 @@ import {
 } from "./octree";
 import { tileBytes, type TileData, type TileSource } from "./tileSource";
 import { orderTileForProgressiveDrawing } from "./progressiveOrder";
-import { pointPrefixCount, projectedSpacingScale } from "./pointDensity";
+import { projectedSpacingScale } from "./pointDensity";
 
 export type TileBatch = {
   readonly added: readonly { key: VoxelKey; tile: TileData }[];
   readonly removed: readonly VoxelKey[];
+};
+
+export type TileDrawPlan = {
+  readonly entries: readonly {
+    readonly key: VoxelKey;
+    readonly pointCount: number;
+  }[];
 };
 
 export type FixedPointPresentation = {
@@ -80,6 +88,8 @@ export type LodControllerOptions = {
   source: TileSource;
   /** Receives batched tile arrivals/removals (typically a renderer adapter). */
   onTiles: (batch: TileBatch) => void;
+  /** Receives per-tile progressive prefixes without changing tile residency. */
+  onDrawPlan?: (plan: TileDrawPlan) => void;
   /**
    * Coalescing render request — called once per applied batch, never once per
    * tile. Must not render synchronously more than once per event loop turn.
@@ -102,7 +112,7 @@ export type LodControllerOptions = {
    * memory-derived point cap applies on top.
    */
   pointBudget?: number;
-  /** Initial fraction of every selected tile's progressive prefix to draw. */
+  /** Initial fraction of selected points to distribute across tile prefixes. */
   densityFraction?: number;
   /**
    * GPU-memory budget for resident tile bytes. Pass a `MemoryPool` to share
@@ -145,8 +155,6 @@ export type LodControllerOptions = {
   presentation?: PointPresentation;
   /** Receives the one CSS-pixel diameter applied to every active tile. */
   onPointDiameterCssPx?: (diameterCssPx: number) => void;
-  /** Receives progressive draw-density changes for the renderer adapter. */
-  onDensityFraction?: (densityFraction: number) => void;
   /** Non-abort fetch/hierarchy failures land here. Default: console.warn. */
   onError?: (error: unknown) => void;
 };
@@ -205,10 +213,12 @@ export type LodControllerStats = {
   readonly hierarchyConcurrency: number;
   /** Effective visible-point budget currently driving selection. */
   readonly pointBudget: number;
-  /** Fraction of every submitted tile's progressive prefix being drawn. */
+  /** Fraction of selected points supplied to the per-tile draw allocator. */
   readonly densityFraction: number;
   /** Points actually participating in drawing across the submitted set. */
   readonly drawnPoints: number;
+  /** Current per-tile allocation and its uniform-density counterfactual. */
+  readonly drawPlan: LodDrawPlanStats;
   /** This controller's byte share of its memory pool. */
   readonly memoryBudgetBytes: number;
   /** Memory-derived point ceiling the budget can never exceed. */
@@ -266,6 +276,7 @@ export type LodSelectionStats = {
     readonly hierarchyBlockedNodes: number;
     readonly tileBlockedNodes: number;
     readonly budgetBlockedNodes: number;
+    readonly drawBlockedNodes: number;
     readonly projectedSpacingCssPx: {
       readonly p25: number | null;
       readonly p50: number | null;
@@ -274,6 +285,19 @@ export type LodSelectionStats = {
       readonly max: number | null;
     };
   };
+};
+
+export type LodDrawPlanStats = {
+  /** Increments only when at least one tile prefix changes. */
+  readonly revision: number;
+  /** Exact point allowance supplied to the per-tile allocator. */
+  readonly pointBudget: number;
+  readonly plannedPoints: number;
+  readonly fullTiles: number;
+  readonly partialTiles: number;
+  readonly skippedTiles: number;
+  /** Priority-weighted benefit relative to an equal-density allocation. */
+  readonly priorityGain: number;
 };
 
 /**
@@ -300,7 +324,8 @@ export type LodController = {
    */
   setPointBudget(points: number): void;
   /**
-   * Set the progressive prefix fraction without changing tile selection.
+   * Redistribute this fraction of selected points into progressive prefixes
+   * without changing tile selection.
    * Values outside [0, 1] and non-finite values are ignored.
    */
   setDensityFraction(densityFraction: number): void;
@@ -534,6 +559,7 @@ const emptyReadyTerminalFrontier =
     hierarchyBlockedNodes: 0,
     tileBlockedNodes: 0,
     budgetBlockedNodes: 0,
+    drawBlockedNodes: 0,
     projectedSpacingCssPx: {
       p25: null,
       p50: null,
@@ -572,10 +598,10 @@ export const createLodController = (
 ): LodController => {
   const {
     onTiles,
+    onDrawPlan = () => {},
     scheduleRender,
     onWorkChange = () => {},
     onPointDiameterCssPx = () => {},
-    onDensityFraction = () => {},
     onError = (error) => console.warn("pointcloud-lod:", error),
   } = options;
 
@@ -625,7 +651,6 @@ export const createLodController = (
   let view: CameraView | null = null;
   let disposed = false;
   onPointDiameterCssPx(diameterCssPx);
-  onDensityFraction(densityFraction);
 
   const emitDiameter = (next: number): void => {
     if (next === diameterCssPx) return;
@@ -890,6 +915,16 @@ export const createLodController = (
   let selectionGeneration = 0;
   let selectionStats = emptySelectionStats(0, 0);
   let budgetSkipped: ReadonlySet<string> = new Set<string>();
+  let drawPrefixes: ReadonlyMap<string, number> = new Map();
+  let drawPlanStats: LodDrawPlanStats = {
+    revision: 0,
+    pointBudget: 0,
+    plannedPoints: 0,
+    fullTiles: 0,
+    partialTiles: 0,
+    skippedTiles: 0,
+    priorityGain: 1,
+  };
   type TileRead = {
     readonly abort: AbortController;
     wanted: boolean;
@@ -1116,6 +1151,63 @@ export const createLodController = (
     entry.children ??
     childKeys(key).filter((child) => hierarchy.has(keyToString(child)));
 
+  const samePrefixes = (
+    left: ReadonlyMap<string, number>,
+    right: ReadonlyMap<string, number>,
+  ): boolean =>
+    left.size === right.size &&
+    [...left].every(([key, count]) => right.get(key) === count);
+
+  /**
+   * Allocate the governor's exact draw allowance over the selected tree.
+   * Selection and residency stay unchanged: this only chooses progressive VBO
+   * prefixes, with a complete parent required before any child can draw.
+   */
+  const updateDrawPlan = (): void => {
+    const pointBudget = Math.floor(
+      selectionStats.targetPoints * densityFraction,
+    );
+    const allocation = allocatePointPrefixes({
+      root: keyToString(ROOT_KEY),
+      pointBudget,
+      getCandidate: (keyString) => {
+        if (!target.has(keyString)) return undefined;
+        const entry = hierarchy.get(keyString);
+        if (entry === undefined) return undefined;
+        const key = keyFromString(keyString);
+        return {
+          key: keyString,
+          pointCount: entry.pointCount,
+          priority: sseFor(keyString),
+          children: childrenOf(key, entry)
+            .map(keyToString)
+            .filter((child) => target.has(child)),
+        };
+      },
+    });
+    const changed = !samePrefixes(drawPrefixes, allocation.prefixes);
+    drawPrefixes = allocation.prefixes;
+    drawPlanStats = {
+      revision: drawPlanStats.revision + (changed ? 1 : 0),
+      pointBudget,
+      plannedPoints: allocation.plannedPoints,
+      fullTiles: allocation.fullTiles,
+      partialTiles: allocation.partialTiles,
+      skippedTiles: allocation.skippedTiles,
+      priorityGain:
+        allocation.uniformWeightedPoints > 0
+          ? allocation.weightedPoints / allocation.uniformWeightedPoints
+          : 1,
+    };
+    if (!changed) return;
+    onDrawPlan({
+      entries: [...drawPrefixes].map(([keyString, pointCount]) => ({
+        key: keyFromString(keyString),
+        pointCount,
+      })),
+    });
+  };
+
   const isEntryReady = (keyString: string, entry: HierarchyEntry): boolean =>
     entry.pointCount === 0 || resident.has(keyString);
 
@@ -1141,7 +1233,7 @@ export const createLodController = (
     if (
       presentation.mode !== "auto" ||
       view === null ||
-      densityFraction <= 0 ||
+      drawPlanStats.plannedPoints <= 0 ||
       !target.has(keyToString(ROOT_KEY))
     ) {
       return;
@@ -1151,7 +1243,12 @@ export const createLodController = (
     let largestSpacing: number | null = null;
     const include = (entry: HierarchyEntry, keyString: string): void => {
       if (entry.pointCount === 0) return;
-      largestSpacing = Math.max(largestSpacing ?? 0, sseFor(keyString));
+      const prefix = drawPrefixes.get(keyString) ?? 0;
+      if (prefix <= 0) return;
+      largestSpacing = Math.max(
+        largestSpacing ?? 0,
+        sseFor(keyString) * projectedSpacingScale(prefix / entry.pointCount),
+      );
     };
 
     const walk = (key: VoxelKey): void => {
@@ -1159,6 +1256,12 @@ export const createLodController = (
       if (!target.has(keyString)) return;
       const entry = hierarchy.get(keyString);
       if (entry === undefined) return;
+
+      const prefix = drawPrefixes.get(keyString) ?? 0;
+      if (entry.pointCount > 0 && prefix < entry.pointCount) {
+        include(entry, keyString);
+        return;
+      }
 
       const children = childrenOf(key, entry);
       if (children.length === 0 || sseFor(keyString) < refinementCutoffPx) {
@@ -1184,6 +1287,13 @@ export const createLodController = (
           blocked = budgetSkipped.has(childString) || blocked;
           continue;
         }
+        if (
+          childEntry.pointCount > 0 &&
+          (drawPrefixes.get(childString) ?? 0) === 0
+        ) {
+          blocked = true;
+          continue;
+        }
         selectedChildren.push(child);
       }
 
@@ -1197,10 +1307,7 @@ export const createLodController = (
         presentation.userScale *
           Math.min(
             presentation.maxDiameterCssPx,
-            Math.max(
-              presentation.minDiameterCssPx,
-              largestSpacing * projectedSpacingScale(densityFraction),
-            ),
+            Math.max(presentation.minDiameterCssPx, largestSpacing),
           ),
       );
     }
@@ -1211,7 +1318,7 @@ export const createLodController = (
     if (
       currentView === null ||
       !active ||
-      densityFraction <= 0 ||
+      drawPlanStats.plannedPoints <= 0 ||
       !target.has(keyToString(ROOT_KEY))
     ) {
       selectionStats = {
@@ -1229,6 +1336,7 @@ export const createLodController = (
     let hierarchyBlockedNodes = 0;
     let tileBlockedNodes = 0;
     let budgetBlockedNodes = 0;
+    let drawBlockedNodes = 0;
 
     const addTerminal = (
       keyString: string,
@@ -1239,19 +1347,27 @@ export const createLodController = (
         hierarchy?: boolean;
         tile?: boolean;
         budget?: boolean;
+        draw?: boolean;
       },
     ): void => {
       // A structural node has no samples with which to cover a blocked region.
       if (entry.pointCount === 0 || !resident.has(keyString)) return;
       if (!terminalKeys.has(keyString)) {
         terminalKeys.add(keyString);
-        values.push(sseFor(keyString) * projectedSpacingScale(densityFraction));
+        const prefix = drawPrefixes.get(keyString) ?? 0;
+        if (prefix > 0) {
+          values.push(
+            sseFor(keyString) *
+              projectedSpacingScale(prefix / entry.pointCount),
+          );
+        }
       }
       if (reasons.leaf) leafNodes += 1;
       if (reasons.cutoff) cutoffNodes += 1;
       if (reasons.hierarchy) hierarchyBlockedNodes += 1;
       if (reasons.tile) tileBlockedNodes += 1;
       if (reasons.budget) budgetBlockedNodes += 1;
+      if (reasons.draw) drawBlockedNodes += 1;
     };
 
     const walk = (key: VoxelKey): void => {
@@ -1259,6 +1375,12 @@ export const createLodController = (
       if (!target.has(keyString)) return;
       const entry = hierarchy.get(keyString);
       if (entry === undefined || !isEntryReady(keyString, entry)) return;
+
+      const prefix = drawPrefixes.get(keyString) ?? 0;
+      if (entry.pointCount > 0 && prefix < entry.pointCount) {
+        addTerminal(keyString, entry, { draw: true });
+        return;
+      }
 
       const children = childrenOf(key, entry);
       if (children.length === 0) {
@@ -1273,6 +1395,7 @@ export const createLodController = (
       let hierarchyBlocked = false;
       let tileBlocked = false;
       let budgetBlocked = false;
+      let drawBlocked = false;
       const readyChildren: VoxelKey[] = [];
       for (const child of children) {
         const childString = keyToString(child);
@@ -1294,6 +1417,13 @@ export const createLodController = (
           budgetBlocked = budgetSkipped.has(childString) || budgetBlocked;
           continue;
         }
+        if (
+          childEntry.pointCount > 0 &&
+          (drawPrefixes.get(childString) ?? 0) === 0
+        ) {
+          drawBlocked = true;
+          continue;
+        }
         if (!isEntryReady(childString, childEntry)) {
           tileBlocked = true;
           continue;
@@ -1301,11 +1431,12 @@ export const createLodController = (
         readyChildren.push(child);
       }
 
-      if (hierarchyBlocked || tileBlocked || budgetBlocked) {
+      if (hierarchyBlocked || tileBlocked || budgetBlocked || drawBlocked) {
         addTerminal(keyString, entry, {
           hierarchy: hierarchyBlocked,
           tile: tileBlocked,
           budget: budgetBlocked,
+          draw: drawBlocked,
         });
       }
       for (const child of readyChildren) walk(child);
@@ -1319,6 +1450,7 @@ export const createLodController = (
       hierarchyBlockedNodes,
       tileBlockedNodes,
       budgetBlockedNodes,
+      drawBlockedNodes,
       projectedSpacingCssPx: spacingQuantiles(values),
     };
     selectionStats = { ...selectionStats, readyTerminalFrontier: frontier };
@@ -1483,6 +1615,7 @@ export const createLodController = (
       projectedImportance: target.size > 0 ? sse(ROOT_KEY) : 0,
       readyTerminalFrontier: emptyReadyTerminalFrontier(),
     };
+    updateDrawPlan();
     updateAutoDiameter();
     // The root page bootstraps the hierarchy, so it can never come back
     // through neededPages: that path needs a hierarchy entry, and only the
@@ -1603,6 +1736,7 @@ export const createLodController = (
     resident.clear();
     residentPoints = 0;
     residentBytes = 0;
+    updateDrawPlan();
   };
 
   // Hosts feed the camera on every render, unconditionally; an unchanged view
@@ -1686,7 +1820,7 @@ export const createLodController = (
         return;
       }
       densityFraction = nextDensityFraction;
-      onDensityFraction(nextDensityFraction);
+      updateDrawPlan();
       updateAutoDiameter();
       updateReadyTerminalFrontier();
     },
@@ -1757,6 +1891,7 @@ export const createLodController = (
       target = new Set();
       selectionGeneration += 1;
       selectionStats = emptySelectionStats(selectionGeneration, targetRevision);
+      updateDrawPlan();
 
       // Nothing stays resident while hidden; the flush turns that into
       // removals for exactly the actors the consumer was last handed.
@@ -1777,8 +1912,11 @@ export const createLodController = (
         }
       }
       let drawnPoints = 0;
-      for (const tile of submitted.values()) {
-        drawnPoints += pointPrefixCount(tile.pointCount, densityFraction);
+      for (const [keyString, tile] of submitted) {
+        drawnPoints += Math.min(
+          tile.pointCount,
+          drawPrefixes.get(keyString) ?? 0,
+        );
       }
       const workPending =
         physicalTileOperations > 0 ||
@@ -1808,6 +1946,7 @@ export const createLodController = (
         pointBudget: currentBudget(),
         densityFraction,
         drawnPoints,
+        drawPlan: drawPlanStats,
         memoryBudgetBytes: memoryBudgetBytes(),
         memoryCeilingPoints: memoryCeilingPoints(),
         interactionDepth,
@@ -1836,11 +1975,15 @@ export const createLodController = (
       if (disposed || !active || !isFiniteView(pickView)) return null;
       const tiles: PickTile[] = [];
       for (const [keyString, tile] of submitted) {
-        if (tile.pointCount === 0) continue;
+        const pointCount = Math.min(
+          tile.pointCount,
+          drawPrefixes.get(keyString) ?? 0,
+        );
+        if (pointCount === 0) continue;
         tiles.push({
           origin: tile.origin,
           positions: tile.positions,
-          pointCount: pointPrefixCount(tile.pointCount, densityFraction),
+          pointCount,
           bounds: hierarchy.get(keyString)?.bounds,
         });
       }

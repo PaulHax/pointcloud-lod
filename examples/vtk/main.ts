@@ -1697,7 +1697,7 @@ const loadSource = async (
       },
       onPointDiameterCssPx: (diameter) =>
         adapter?.setPointDiameterCssPx(diameter),
-      onDensityFraction: (fraction) => adapter?.setDensityFraction(fraction),
+      onDrawPlan: (plan) => adapter?.applyDrawPlan(plan),
       onWorkChange: () => {
         updateMember();
         if (governor?.needsFrame()) scheduleRender();

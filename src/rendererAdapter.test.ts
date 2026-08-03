@@ -91,6 +91,7 @@ describe("createRendererAdapter", () => {
       resourceCeilingBytes: 256 * 1024 * 1024,
       drawnTiles: 1,
       drawnPoints: 2,
+      drawnFraction: 1,
       visible: true,
       densityFraction: 1,
       diameterCssPx: 3,
@@ -229,6 +230,66 @@ describe("createRendererAdapter", () => {
       0, 0,
     ]);
     expect(adapter.stats()).toMatchObject({ drawnTiles: 0, drawnPoints: 0 });
+  });
+
+  it("applies different tile prefixes without actor or payload churn", () => {
+    const { adapter, renderer, scheduleRender } = makeAdapter();
+    add(
+      adapter,
+      { key: KEY_A, tile: tile([0, 0, 0], 8) },
+      { key: KEY_B, tile: tile([1, 0, 0], 3) },
+    );
+    const actors = [...actorInstances];
+    const polyData = [...polyDataInstances];
+
+    scheduleRender.mockClear();
+    adapter.applyDrawPlan({
+      entries: [
+        { key: KEY_A, pointCount: 8 },
+        { key: KEY_B, pointCount: 1 },
+      ],
+    });
+
+    expect(mapperInstances.map((mapper) => mapper.maximumPointCount)).toEqual([
+      8, 1,
+    ]);
+    expect(adapter.stats()).toMatchObject({
+      submittedTiles: 2,
+      drawnTiles: 2,
+      drawnPoints: 9,
+      drawnFraction: 9 / 11,
+    });
+    expect(actorInstances).toEqual(actors);
+    expect(polyDataInstances).toEqual(polyData);
+    expect(renderer.addActor).toHaveBeenCalledTimes(2);
+    expect(renderer.removeActor).not.toHaveBeenCalled();
+    expect(scheduleRender).toHaveBeenCalledTimes(1);
+
+    scheduleRender.mockClear();
+    adapter.applyDrawPlan({
+      entries: [
+        { key: KEY_A, pointCount: 8 },
+        { key: KEY_B, pointCount: 1 },
+      ],
+    });
+    expect(scheduleRender).not.toHaveBeenCalled();
+  });
+
+  it("remembers a draw plan for tiles that arrive later", () => {
+    const { adapter } = makeAdapter();
+    adapter.applyDrawPlan({
+      entries: [{ key: KEY_A, pointCount: 3 }],
+    });
+
+    add(
+      adapter,
+      { key: KEY_A, tile: tile([0, 0, 0], 8) },
+      { key: KEY_B, tile: tile([1, 0, 0], 8) },
+    );
+    expect(mapperInstances.map((mapper) => mapper.maximumPointCount)).toEqual([
+      3, 0,
+    ]);
+    expect(adapter.stats()).toMatchObject({ drawnTiles: 1, drawnPoints: 3 });
   });
 
   it("validates density at construction and ignores invalid live values", () => {
@@ -727,6 +788,7 @@ describe("adapter driven by a live controller", () => {
         }
         adapter.applyBatch(batch);
       },
+      onDrawPlan: (plan) => adapter.applyDrawPlan(plan),
       scheduleRender: () => {},
       pointBudget: 500,
       selectionDelayMs: 0,

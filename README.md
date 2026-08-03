@@ -87,6 +87,7 @@ const adapter = createRendererAdapter({ renderer, scheduleRender });
 const controller = createLodController({
   source,
   onTiles: (batch) => adapter.applyBatch(batch),
+  onDrawPlan: (plan) => adapter.applyDrawPlan(plan),
   onPointDiameterCssPx: (diameter) => adapter.setPointDiameterCssPx(diameter),
   presentation: { mode: "auto", userScale: 1 },
   scheduleRender,
@@ -100,6 +101,7 @@ controller.setCamera({
   viewProj,
   position,
   fovY,
+  viewportWidthCssPx,
   viewportHeightCssPx,
 });
 adapter.setDevicePixelRatio(window.devicePixelRatio);
@@ -275,7 +277,7 @@ These methods are useful when application policy lives outside the library:
 | Control                                              | Effect                                                                                                                                                                   |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `controller.setPointBudget(points)`                  | Set the visible-point target directly. Use this instead of a governor for a fixed or externally managed budget.                                                          |
-| `controller.setDensityFraction(fraction)`            | Draw a nested prefix of every selected tile without changing selection, I/O, actors, or VBO contents.                                                                    |
+| `controller.setDensityFraction(fraction)`            | Redistribute that fraction of selected points into parent-closed, importance-ranked tile prefixes without changing selection, I/O, actors, or VBO contents.              |
 | `controller.setPresentation(...)`                    | Switch live between Auto and Fixed point presentation.                                                                                                                   |
 | `controller.setRefinementCutoffPx(pixels)`           | Stop descending when a node's projected spacing is below this threshold. Lower values allow finer traversal; the point and memory budgets still apply.                   |
 | `controller.refresh()`                               | Force immediate reselection against the current camera, useful after external state changes that do not produce a new camera value.                                      |
@@ -458,8 +460,10 @@ extra frame time on detail. With the default 20% hysteresis the no-change bands
 are 12.8-19.2 ms while moving and 26.4-39.6 ms while settled. Both tracks start
 at **1,000,000** points (`initialBudget`) and never drop below **200,000**
 (`minBudget`). The denser proven budget stays selected while moving. The
-interaction budget becomes a uniform progressive-prefix fraction, so cuts and
-settled restoration change the next draw without replacing tiles or buffers.
+interaction budget becomes parent-closed per-tile prefixes, so coarse coverage
+stays present while the most important visible branches retain more detail.
+Cuts and settled restoration change the next draw without replacing tiles or
+buffers.
 
 ```js
 import { createViewGovernor } from "pointcloud-lod";
@@ -599,12 +603,13 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
   Fixed presentation keeps one CSS-pixel diameter; Auto presentation derives
   the diameter from the largest projected spacing on the selected terminal
   coverage frontier, clamped to the presentation's min/max and scaled by
-  `userScale`. Progressive thinning scales that spacing by `1/sqrt(fraction)`
-  so larger points mask the reduced sample density. CPU picking examines the
-  same prefix the renderer draws. Two CSS pixels is the seed before any
-  selected frontier exists. Incoming tiles are deterministically shuffled once
-  at the source/controller boundary, keeping arbitrary COPC record order from
-  biasing early prefixes.
+  `userScale`. Progressive drawing reserves coarse parent coverage, then gives
+  complete or partial nested prefixes to the highest projected-importance
+  branches. Auto sizing follows each terminal's effective prefix density, and
+  CPU picking examines the same per-tile plan the renderer draws. Two CSS
+  pixels is the seed before any selected frontier exists. Incoming tiles are
+  deterministically shuffled once at the source/controller boundary, keeping
+  arbitrary COPC record order from biasing early prefixes.
 - **Renderer adapter** (`createRendererAdapter`) — turns tile batches into
   vtk.js actors, one `vtkPolyData` + `vtkPointGaussianMapper` per tile
   (one gl.POINTS vertex per point, no cell topology), with an anchor base
@@ -614,8 +619,9 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
   not yet in a released vtk.js — see [Requirements](#requirements).
   CSS diameter stays separate from framebuffer density: the adapter applies
   device pixel ratio through the mapper at the final rendering boundary.
-  `setDensityFraction` changes each mapper's draw count while its complete
-  point/color VBO remains resident.
+  `applyDrawPlan` changes each mapper's draw count while its complete
+  point/color VBO remains resident. `setDensityFraction` remains available
+  when an external policy deliberately wants uniform thinning.
   The controller owns residency and the adapter owns actors: `setVisible` is
   a draw switch that keeps every actor alive (batches still apply while
   hidden, so showing again restores exactly the submitted set), while

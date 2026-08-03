@@ -28,7 +28,7 @@ import vtkPolyData from "@kitware/vtk.js/Common/DataModel/PolyData";
 import vtkActor from "@kitware/vtk.js/Rendering/Core/Actor";
 import vtkPointGaussianMapper from "@kitware/vtk.js/Rendering/Core/PointGaussianMapper";
 
-import type { TileBatch } from "./controller";
+import type { TileBatch, TileDrawPlan } from "./controller";
 import { finiteAbove, finiteNonNegative, finiteWithin } from "./numeric";
 import { keyToString, type Vec3 } from "./octree";
 import { pointPrefixCount } from "./pointDensity";
@@ -74,6 +74,8 @@ export type RendererAdapter = {
    * screen replaces that tile's payload.
    */
   applyBatch(batch: TileBatch): void;
+  /** Apply per-tile progressive prefixes without replacing actors or VBOs. */
+  applyDrawPlan(plan: TileDrawPlan): void;
   /**
    * Anchor transform (column-major 16 floats, e.g. the scene actor's
    * UserMatrix); each tile renders with `base · translate(tile.origin)`.
@@ -156,6 +158,7 @@ export type RendererAdapterStats = {
   /** What participates in drawing: the submitted set, or nothing while hidden. */
   readonly drawnTiles: number;
   readonly drawnPoints: number;
+  readonly drawnFraction: number;
   readonly visible: boolean;
   readonly densityFraction: number;
   readonly diameterCssPx: number;
@@ -168,6 +171,7 @@ type TileActors = {
   polyData: any;
   tile: TileData;
   resourceBytes: number;
+  drawnPointCount: number;
 };
 
 export const createRendererAdapter = (
@@ -191,6 +195,8 @@ export const createRendererAdapter = (
     0,
     1,
   );
+  /** Null keeps the adapter's standalone uniform-density behavior. */
+  let pointPrefixes: ReadonlyMap<string, number> | null = null;
   let baseMatrix: ArrayLike<number> = IDENTITY;
   // A key lives in at most one of the two: removal moves its entry from
   // `tiles` to `pendingRelease`, and a re-addition either takes that entry
@@ -255,19 +261,26 @@ export const createRendererAdapter = (
   };
 
   /** Push the adapter's current visual state onto one tile's actor/mapper. */
-  const applyTileState = (entry: TileActors): void => {
+  const prefixFor = (keyString: string, entry: TileActors): number =>
+    pointPrefixes === null
+      ? pointPrefixCount(entry.tile.pointCount, densityFraction)
+      : Math.min(
+          entry.tile.pointCount,
+          Math.max(0, Math.floor(pointPrefixes.get(keyString) ?? 0)),
+        );
+
+  const applyTileState = (keyString: string, entry: TileActors): void => {
     // The actor property remains in CSS pixels. The custom dense-point mapper
     // multiplies it by scaleFactor before assigning physical gl_PointSize.
     entry.mapper.setScaleFactor(devicePixelRatio);
-    entry.mapper.setMaximumPointCount(
-      pointPrefixCount(entry.tile.pointCount, densityFraction),
-    );
+    entry.drawnPointCount = prefixFor(keyString, entry);
+    entry.mapper.setMaximumPointCount(entry.drawnPointCount);
     entry.actor.getProperty().setPointSize(diameterCssPx);
     entry.actor.setVisibility(visible);
     entry.actor.setUserMatrix(tileMatrix(entry.tile.origin));
   };
 
-  const createTile = (tile: TileData): TileActors => {
+  const createTile = (keyString: string, tile: TileData): TileActors => {
     const polyData = vtkPolyData.newInstance();
     polyData.getPoints().setData(tile.positions, 3);
     if (tile.rgb !== undefined) {
@@ -290,8 +303,9 @@ export const createRendererAdapter = (
       polyData,
       tile,
       resourceBytes: tileBytes(tile),
+      drawnPointCount: 0,
     };
-    applyTileState(entry);
+    applyTileState(keyString, entry);
     return entry;
   };
 
@@ -326,6 +340,26 @@ export const createRendererAdapter = (
   };
 
   return {
+    applyDrawPlan(plan) {
+      if (disposed) return;
+      const next = new Map(
+        plan.entries.map(({ key, pointCount }) => [
+          keyToString(key),
+          finiteNonNegative(pointCount) ? Math.floor(pointCount) : 0,
+        ]),
+      );
+      pointPrefixes = next;
+      let changed = false;
+      for (const [keyString, entry] of tiles) {
+        const count = prefixFor(keyString, entry);
+        if (count === entry.drawnPointCount) continue;
+        entry.drawnPointCount = count;
+        entry.mapper.setMaximumPointCount(count);
+        changed = true;
+      }
+      if (changed) scheduleRender();
+    },
+
     applyBatch(batch) {
       if (disposed) return;
       let changed = false;
@@ -358,7 +392,7 @@ export const createRendererAdapter = (
           dropPooled(keyString, stale);
           if (holdsPayload(stale, tile)) {
             stale.tile = tile;
-            applyTileState(stale);
+            applyTileState(keyString, stale);
             holdSubmitted(keyString, stale);
             changed = true;
             continue;
@@ -366,7 +400,7 @@ export const createRendererAdapter = (
           releaseTile(stale);
         }
         trimPool(tileBytes(tile));
-        const entry = createTile(tile);
+        const entry = createTile(keyString, tile);
         holdSubmitted(keyString, entry);
         renderer.addActor(entry.actor);
         changed = true;
@@ -419,15 +453,15 @@ export const createRendererAdapter = (
         disposed ||
         !finiteNonNegative(nextDensityFraction) ||
         nextDensityFraction > 1 ||
-        nextDensityFraction === densityFraction
+        (nextDensityFraction === densityFraction && pointPrefixes === null)
       ) {
         return;
       }
       densityFraction = nextDensityFraction;
-      for (const entry of tiles.values()) {
-        entry.mapper.setMaximumPointCount(
-          pointPrefixCount(entry.tile.pointCount, densityFraction),
-        );
+      pointPrefixes = null;
+      for (const [keyString, entry] of tiles) {
+        entry.drawnPointCount = prefixFor(keyString, entry);
+        entry.mapper.setMaximumPointCount(entry.drawnPointCount);
       }
       scheduleRender();
     },
@@ -451,12 +485,11 @@ export const createRendererAdapter = (
 
     stats() {
       let drawnPoints = 0;
+      let drawnTiles = 0;
       if (visible) {
         for (const entry of tiles.values()) {
-          drawnPoints += pointPrefixCount(
-            entry.tile.pointCount,
-            densityFraction,
-          );
+          drawnPoints += entry.drawnPointCount;
+          if (entry.drawnPointCount > 0) drawnTiles += 1;
         }
       }
       return {
@@ -471,8 +504,10 @@ export const createRendererAdapter = (
         gpuResidentPoints: submittedPoints + pooledPoints,
         gpuResidentBytes: submittedBytes + pooledBytes,
         resourceCeilingBytes,
-        drawnTiles: visible && densityFraction > 0 ? tiles.size : 0,
+        drawnTiles,
         drawnPoints,
+        drawnFraction:
+          visible && submittedPoints > 0 ? drawnPoints / submittedPoints : 0,
         visible,
         densityFraction,
         diameterCssPx,

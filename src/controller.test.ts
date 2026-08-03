@@ -385,10 +385,10 @@ describe("createLodController", () => {
   });
 
   it("changes progressive density without selection, I/O, or tile batches", async () => {
-    const onDensityFraction = vi.fn();
+    const onDrawPlan = vi.fn();
     const { controller, deferred, loadCalls, batches } = makeController(
       SMALL_TREE,
-      { onDensityFraction },
+      { onDrawPlan },
     );
     await bootAndLand(controller, deferred);
     const before = controller.stats();
@@ -409,7 +409,9 @@ describe("createLodController", () => {
     expect(controller.activeKeys()).toEqual(beforeKeys);
     expect(loadCalls).toEqual(beforeLoads);
     expect(batches).toHaveLength(beforeBatches);
-    expect(onDensityFraction).toHaveBeenLastCalledWith(0.25);
+    expect(onDrawPlan).toHaveBeenLastCalledWith({
+      entries: [{ key: ROOT_KEY, pointCount: 55 }],
+    });
     controller.dispose();
   });
 
