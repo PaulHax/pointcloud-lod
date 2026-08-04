@@ -202,7 +202,10 @@ export type ExampleSession = {
    * motion. Every other camera handle moves the camera programmatically, so
    * the governor infers motion instead — a different code path.
    */
-  drag(steps: { dx: number; dy: number }[], pauseMs?: number): Promise<void>;
+  drag(
+    steps: { dx: number; dy: number }[],
+    options?: DragOptions,
+  ): Promise<void>;
   /** Resize the browser viewport, which resizes the canvas under it. */
   resize(size: Viewport): Promise<void>;
   /** Load another cloud into the running page; resolves when it has opened. */
@@ -472,13 +475,14 @@ export const openExample = async (
       page.evaluate(() =>
         (window as never as ExampleWindow).pointCloudExample.scene(),
       ) as Promise<SceneReading>,
-    drag: async (steps, pauseMs = 16) => {
+    drag: async (steps, options = {}) => {
+      const { pauseMs = 16, button = "left", start } = options;
       const box = await page.locator("#viewer").boundingBox();
       if (box === null) throw new Error("the viewer has no box to drag in");
-      let x = box.x + box.width / 2;
-      let y = box.y + box.height / 2;
+      let x = start?.x ?? box.x + box.width / 2;
+      let y = start?.y ?? box.y + box.height / 2;
       await page.mouse.move(x, y);
-      await page.mouse.down();
+      await page.mouse.down({ button });
       for (const { dx, dy } of steps) {
         x += dx;
         y += dy;
@@ -492,7 +496,7 @@ export const openExample = async (
         await page.waitForTimeout(pauseMs);
         await session.frame();
       }
-      await page.mouse.up();
+      await page.mouse.up({ button });
     },
     resize: async (size) => {
       // `size` is the render viewport, not the browser window: the page's
@@ -745,6 +749,61 @@ export type CameraReading = {
   parallelScale: number;
   viewAngle: number;
   parallelProjection: boolean;
+};
+
+/**
+ * Camera arithmetic the specs share. A camera reading is three vectors and an
+ * angle, so every spec that checks where the camera went ends up needing the
+ * same handful of operations; two copies of a pitch formula are two chances to
+ * measure a different angle from the same reading.
+ */
+export const subtract = (
+  left: readonly number[],
+  right: readonly number[],
+): [number, number, number] => [
+  left[0]! - right[0]!,
+  left[1]! - right[1]!,
+  left[2]! - right[2]!,
+];
+
+export const dot = (
+  left: readonly number[],
+  right: readonly number[],
+): number => left.reduce((sum, value, axis) => sum + value * right[axis]!, 0);
+
+export const cross = (
+  left: readonly number[],
+  right: readonly number[],
+): [number, number, number] => [
+  left[1]! * right[2]! - left[2]! * right[1]!,
+  left[2]! * right[0]! - left[0]! * right[2]!,
+  left[0]! * right[1]! - left[1]! * right[0]!,
+];
+
+/** Eye-to-focus distance: the radius an orbit has to preserve. */
+export const cameraDistance = (camera: {
+  readonly position: readonly number[];
+  readonly focalPoint: readonly number[];
+}): number => Math.hypot(...subtract(camera.position, camera.focalPoint));
+
+/** Elevation of the eye above its focus, in degrees. */
+export const cameraPitchDegrees = (camera: {
+  readonly position: readonly number[];
+  readonly focalPoint: readonly number[];
+}): number => {
+  const offset = subtract(camera.position, camera.focalPoint);
+  return (Math.asin(offset[2]! / Math.hypot(...offset)) * 180) / Math.PI;
+};
+
+export type DragOptions = {
+  /**
+   * A floor between steps. The gesture paces to painted frames regardless;
+   * this only keeps consecutive moves distinguishable.
+   */
+  readonly pauseMs?: number;
+  readonly button?: "left" | "right";
+  /** Where the gesture starts, in page pixels. Defaults to the viewer centre. */
+  readonly start?: { readonly x: number; readonly y: number };
 };
 
 export type ExampleWindow = {

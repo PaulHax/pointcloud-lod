@@ -556,7 +556,7 @@ describe("a real pointer gesture on the canvas", () => {
           const before = await session.readCamera();
           const { result: seen } = await watching(session, SAMPLE_MS, () =>
             tracingWhile(session, GESTURE_SAMPLE_MS, () =>
-              session.drag(GESTURE_STEPS, GESTURE_PAUSE_MS),
+              session.drag(GESTURE_STEPS, { pauseMs: GESTURE_PAUSE_MS }),
             ),
           );
           const after = await session.readCamera();
@@ -639,7 +639,9 @@ describe("a real pointer gesture on the canvas", () => {
             async () => {
               // Press and hold: the pointer goes down and stays where it is, so
               // the gesture holds the regime while the camera does not move.
-              const gesture = session.drag(HELD_STEPS, HOLD_PAUSE_MS);
+              const gesture = session.drag(HELD_STEPS, {
+                pauseMs: HOLD_PAUSE_MS,
+              });
               // Waiting for the source to be *only* explicit is what makes the
               // second phase mean something: with nothing inferred and the
               // camera standing still, an inferred reference appearing next can

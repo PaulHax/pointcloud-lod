@@ -10,35 +10,20 @@
 import { afterAll, describe, expect, it } from "vitest";
 
 import {
+  cameraDistance,
+  cameraPitchDegrees,
   closeBrowser,
+  cross,
+  dot,
   MULTIPAGE_CLOUD,
   openExample,
+  subtract,
   type CameraReading,
   type ExampleSession,
 } from "./harness";
 
-const difference = (to: number[], from: number[]): number[] =>
-  to.map((value, axis) => value - from[axis]!);
-
-const dot = (left: number[], right: number[]): number =>
-  left.reduce((sum, value, axis) => sum + value * right[axis]!, 0);
-
-const cross = (left: number[], right: number[]): number[] => [
-  left[1]! * right[2]! - left[2]! * right[1]!,
-  left[2]! * right[0]! - left[0]! * right[2]!,
-  left[0]! * right[1]! - left[1]! * right[0]!,
-];
-
-const cameraDistance = (reading: CameraReading): number =>
-  Math.hypot(...difference(reading.position, reading.focalPoint));
-
-const cameraPitchDegrees = (reading: CameraReading): number => {
-  const offset = difference(reading.position, reading.focalPoint);
-  return (Math.asin(offset[2]! / Math.hypot(...offset)) * 180) / Math.PI;
-};
-
 const cameraYawDegrees = (reading: CameraReading): number => {
-  const offset = difference(reading.position, reading.focalPoint);
+  const offset = subtract(reading.position, reading.focalPoint);
   return (Math.atan2(offset[1]!, offset[0]!) * 180) / Math.PI;
 };
 
@@ -366,7 +351,7 @@ describe("example controls", () => {
       await session.setBudgetMode("fixed");
       const initial = await session.readCamera();
       const initialDistance = cameraDistance(initial);
-      const initialDirection = difference(initial.focalPoint, initial.position);
+      const initialDirection = subtract(initial.focalPoint, initial.position);
 
       // Pace the opening steps so Chromium presents several distinct frames.
       // Both values and the graph should then describe cadence, while the
@@ -401,7 +386,7 @@ describe("example controls", () => {
       expect(limitedDistance).toBeGreaterThan(0);
       expect(limitedDistance).toBeLessThan(initialDistance * 1e-5);
       expect(
-        dot(difference(atLimit.focalPoint, atLimit.position), initialDirection),
+        dot(subtract(atLimit.focalPoint, atLimit.position), initialDirection),
       ).toBeGreaterThan(0);
 
       await wheelAtViewerCenter(session, 20, 0, 0.82, 0.2);
@@ -418,11 +403,11 @@ describe("example controls", () => {
         (stats) => stats.controller?.interactionDepth === 0,
       );
       const beforePan = await session.readCamera();
-      const direction = difference(beforePan.focalPoint, beforePan.position);
+      const direction = subtract(beforePan.focalPoint, beforePan.position);
       const screenRight = cross(direction, beforePan.viewUp);
       await session.drag([{ dx: 80, dy: 0 }]);
       const afterPan = await session.readCamera();
-      const pan = difference(afterPan.focalPoint, beforePan.focalPoint);
+      const pan = subtract(afterPan.focalPoint, beforePan.focalPoint);
       expect(dot(pan, screenRight)).toBeLessThan(0);
       expect(
         relativeGap(cameraDistance(afterPan), cameraDistance(beforePan)),

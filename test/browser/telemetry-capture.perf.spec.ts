@@ -5,8 +5,13 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import type { TelemetryTrace } from "../../src/telemetry";
 import {
+  cameraDistance,
+  cameraPitchDegrees,
   closeBrowser,
+  cross,
+  dot,
   openExample,
+  subtract,
   usingRealGpu,
   type CameraReading,
   type ExampleSession,
@@ -114,54 +119,10 @@ const writeTrace = async (trace: TelemetryTrace): Promise<void> => {
   await writeFile(outputPath, `${JSON.stringify(trace, null, 2)}\n`, "utf8");
 };
 
-const cameraDistance = (camera: {
-  readonly position: readonly number[];
-  readonly focalPoint: readonly number[];
-}): number =>
-  Math.hypot(
-    camera.position[0]! - camera.focalPoint[0]!,
-    camera.position[1]! - camera.focalPoint[1]!,
-    camera.position[2]! - camera.focalPoint[2]!,
-  );
-
-const cameraPitchDegrees = (camera: {
-  readonly position: readonly number[];
-  readonly focalPoint: readonly number[];
-}): number => {
-  const distance = cameraDistance(camera);
-  return (
-    (Math.asin((camera.position[2]! - camera.focalPoint[2]!) / distance) *
-      180) /
-    Math.PI
-  );
-};
-
 const distanceBetween = (
   left: readonly number[],
   right: readonly number[],
-): number =>
-  Math.hypot(left[0]! - right[0]!, left[1]! - right[1]!, left[2]! - right[2]!);
-
-const subtract = (
-  left: readonly number[],
-  right: readonly number[],
-): [number, number, number] => [
-  left[0]! - right[0]!,
-  left[1]! - right[1]!,
-  left[2]! - right[2]!,
-];
-
-const dot = (left: readonly number[], right: readonly number[]): number =>
-  left.reduce((sum, value, axis) => sum + value * right[axis]!, 0);
-
-const cross = (
-  left: readonly number[],
-  right: readonly number[],
-): [number, number, number] => [
-  left[1]! * right[2]! - left[2]! * right[1]!,
-  left[2]! * right[0]! - left[0]! * right[2]!,
-  left[0]! * right[1]! - left[1]! * right[0]!,
-];
+): number => Math.hypot(...subtract(left, right));
 
 const normalised = (value: readonly number[]): [number, number, number] => {
   const length = Math.hypot(...value);
@@ -215,25 +176,20 @@ const projectPoint = (
   };
 };
 
-const dragLine = async (
-  session: ExampleSession,
+/**
+ * A straight gesture as the ~16 px steps `session.drag` takes, so a capture
+ * gesture is paced to painted frames like every other one in the suite.
+ */
+const lineSteps = (
   start: { readonly x: number; readonly y: number },
   end: { readonly x: number; readonly y: number },
-  button: "left" | "right",
-): Promise<void> => {
+): { dx: number; dy: number }[] => {
   const length = Math.hypot(end.x - start.x, end.y - start.y);
   const steps = Math.max(1, Math.ceil(length / 16));
-  await session.page.mouse.move(start.x, start.y);
-  await session.page.mouse.down({ button });
-  for (let step = 1; step <= steps; step += 1) {
-    const fraction = step / steps;
-    await session.page.mouse.move(
-      start.x + (end.x - start.x) * fraction,
-      start.y + (end.y - start.y) * fraction,
-    );
-    await session.page.waitForTimeout(INPUT_INTERVAL_MS);
-  }
-  await session.page.mouse.up({ button });
+  return Array.from({ length: steps }, () => ({
+    dx: (end.x - start.x) / steps,
+    dy: (end.y - start.y) / steps,
+  }));
 };
 
 const centerPointWithPan = async (
@@ -254,17 +210,16 @@ const centerPointWithPan = async (
   }
   const depthRatio = before.depth / cameraDistance(beforeCamera);
   const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
-  await dragLine(
-    session,
-    { x: before.clientX, y: before.clientY },
-    {
+  const start = { x: before.clientX, y: before.clientY };
+  await session.drag(
+    lineSteps(start, {
       // vtk.js converts pointer travel into a translation on the focal plane.
       // A sampled target in front of or behind that plane crosses the screen
       // faster or slower by this exact perspective depth ratio.
       x: before.clientX + (center.x - before.clientX) * depthRatio,
       y: before.clientY + (center.y - before.clientY) * depthRatio,
-    },
-    "left",
+    }),
+    { start, button: "left", pauseMs: INPUT_INTERVAL_MS },
   );
   const panned = await session.readCamera();
   const afterProjection = projectPoint(panned, target, box);
@@ -433,27 +388,23 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
         await markMotionBoundary("close-orbit-start", true);
         const obliquePitch = 45;
         const orbitSweepDegrees = -180;
-        await dragLine(
-          session,
-          viewerCenter,
-          {
+        await session.drag(
+          lineSteps(viewerCenter, {
             x: viewerCenter.x,
             y:
               viewerCenter.y +
               ((obliquePitch - cameraPitchDegrees(afterTightZoom)) / 360) *
                 box.height,
-          },
-          "right",
+          }),
+          { button: "right", pauseMs: INPUT_INTERVAL_MS },
         );
         await session.markTelemetry("close-orbit-oblique");
-        await dragLine(
-          session,
-          viewerCenter,
-          {
+        await session.drag(
+          lineSteps(viewerCenter, {
             x: viewerCenter.x - (orbitSweepDegrees / 360) * box.width,
             y: viewerCenter.y,
-          },
-          "right",
+          }),
+          { button: "right", pauseMs: INPUT_INTERVAL_MS },
         );
         await markMotionBoundary("close-orbit-ended", false);
         await session.settle(300_000);
@@ -465,17 +416,15 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
 
         await markMotionBoundary("horizontal-rotation-start", true);
         const horizontalPitch = 4;
-        await dragLine(
-          session,
-          viewerCenter,
-          {
+        await session.drag(
+          lineSteps(viewerCenter, {
             x: viewerCenter.x,
             y:
               viewerCenter.y +
               ((horizontalPitch - cameraPitchDegrees(afterCloseOrbit)) / 360) *
                 box.height,
-          },
-          "right",
+          }),
+          { button: "right", pauseMs: INPUT_INTERVAL_MS },
         );
         await session.markTelemetry("horizontal-rotation-ended");
 
