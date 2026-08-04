@@ -5,10 +5,12 @@ import {
   cursorRay,
   distanceToBounds,
   frustumPlanes,
+  modelFrameOf,
   nodeScreenSpaceError,
   orthographicScreenSpaceError,
   perspectiveScreenSpaceError,
   projectPointToCssPx,
+  viewInModelFrame,
   type OrthographicCameraView,
   type PerspectiveCameraView,
 } from "./camera";
@@ -416,5 +418,73 @@ describe("cursorRay", () => {
     expect(
       cursorRay(IDENTITY, 10, Number.POSITIVE_INFINITY, 100, 100),
     ).toBeNull();
+  });
+});
+
+describe("viewInModelFrame", () => {
+  // Rotation by 90 degrees about z, uniform scale 2, translation (5, 6, 7).
+  // prettier-ignore
+  const SIMILARITY = [
+    0, 2, 0, 0,
+    -2, 0, 0, 0,
+    0, 0, 2, 0,
+    5, 6, 7, 1,
+  ];
+  const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  const frame = modelFrameOf(SIMILARITY)!;
+
+  it("resolves a similarity's frame and refuses anything else", () => {
+    expect(frame.scale).toBeCloseTo(2);
+    // prettier-ignore
+    const anisotropic = [
+      1, 0, 0, 0,
+      0, 2, 0, 0,
+      0, 0, 1, 0,
+      0, 0, 0, 1,
+    ];
+    expect(modelFrameOf(anisotropic)).toBeNull();
+    expect(modelFrameOf([1, 0, 0])).toBeNull();
+  });
+
+  it("restates the eye through the inverse and keeps the field of view", () => {
+    const view = {
+      projection: "perspective" as const,
+      viewProj: IDENTITY,
+      position: [5, 8, 7] as [number, number, number],
+      fovY: Math.PI / 3,
+      viewportWidthCssPx: 800,
+      viewportHeightCssPx: 600,
+    };
+    const local = viewInModelFrame(view, frame);
+    // world (5, 8, 7) = M * local: local = (1, 0, 0).
+    expect(local.position[0]).toBeCloseTo(1);
+    expect(local.position[1]).toBeCloseTo(0);
+    expect(local.position[2]).toBeCloseTo(0);
+    // viewProj folds the model matrix in: I * M = M.
+    expect([...local.viewProj]).toEqual(SIMILARITY);
+    // A field of view is an angle: the uniform model scale cancels out.
+    expect(local.projection).toBe("perspective");
+    if (local.projection === "perspective") {
+      expect(local.fovY).toBe(view.fovY);
+    }
+    expect(local.viewportHeightCssPx).toBe(600);
+  });
+
+  it("restates an orthographic parallelScale in model units", () => {
+    const view = {
+      projection: "orthographic" as const,
+      viewProj: IDENTITY,
+      position: [5, 8, 7] as [number, number, number],
+      parallelScale: 8,
+      viewportWidthCssPx: 800,
+      viewportHeightCssPx: 600,
+    };
+    const local = viewInModelFrame(view, frame);
+    // parallelScale is a world height, and the model scales local units by
+    // 2, so the same viewport spans half as many model units.
+    expect(local.projection).toBe("orthographic");
+    if (local.projection === "orthographic") {
+      expect(local.parallelScale).toBe(4);
+    }
   });
 });
