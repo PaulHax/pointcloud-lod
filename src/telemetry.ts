@@ -1,3 +1,14 @@
+/**
+ * A record of what a session actually did: work spans, per-frame timings with
+ * their asynchronous GPU resolution, and the machine that produced them.
+ *
+ * Host-independent — nothing here knows about vtk.js, the controller, or the
+ * governor. A host reports events and the recorder assembles a downloadable
+ * trace. The environment capture reads a WebGL context only to name the
+ * renderer and flag the software rasterizers whose timings are not evidence
+ * of anything.
+ */
+
 export type TelemetryEnvironment = {
   readonly capturedAt: string;
   readonly userAgent: string;

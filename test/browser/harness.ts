@@ -37,7 +37,7 @@ import type {
   TelemetryEnvironment,
   TelemetrySummary,
   TelemetryTrace,
-} from "../../examples/vtk/telemetry";
+} from "../../src/telemetry";
 import {
   startStaticServer,
   type NetworkProfile,

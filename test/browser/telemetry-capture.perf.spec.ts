@@ -3,7 +3,7 @@ import { dirname, isAbsolute, resolve } from "node:path";
 
 import { afterAll, describe, expect, it } from "vitest";
 
-import type { TelemetryTrace } from "../../examples/vtk/telemetry";
+import type { TelemetryTrace } from "../../src/telemetry";
 import {
   closeBrowser,
   openExample,

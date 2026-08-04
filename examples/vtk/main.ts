@@ -26,9 +26,11 @@ import macro from "@kitware/vtk.js/macros";
 import {
   DEFAULTS,
   ROOT_KEY,
+  captureTelemetryEnvironment,
   createCopcWorkerTileSource,
   createGpuFrameTimer,
   createLodController,
+  createTelemetryRecorder,
   createViewBudgetCoordinator,
   createViewGovernor,
   keyToString,
@@ -37,6 +39,10 @@ import {
   type LodController,
   type MotionReference,
   type PointPresentation,
+  type TelemetryEnvironment,
+  type TelemetryFrameEvent,
+  type TelemetryRecorder,
+  type TelemetryTrace,
   type TileSource,
   type ViewGovernor,
   type ViewGovernorMember,
@@ -49,14 +55,6 @@ import {
   createRendererAdapter,
   type RendererAdapter,
 } from "../../src/rendererAdapter";
-import {
-  captureTelemetryEnvironment,
-  createTelemetryRecorder,
-  type TelemetryEnvironment,
-  type TelemetryFrameEvent,
-  type TelemetryRecorder,
-  type TelemetryTrace,
-} from "./telemetry";
 
 const element = <T extends Element>(selector: string): T => {
   const found = document.querySelector<T>(selector);
