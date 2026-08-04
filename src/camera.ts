@@ -346,3 +346,64 @@ export const cursorRay = (
     direction: [dx / length, dy / length, dz / length],
   };
 };
+
+/**
+ * Camera-motion comparison for the inferred-motion classifier: did this view
+ * move, beyond recomputation jitter, relative to a previously rendered one?
+ *
+ * The epsilon is relative with an absolute floor of the same size, because
+ * the compared numbers span map-projection units (~1) and metric frames
+ * (~1e6) in the same matrix. Recomputing a double-precision camera product
+ * every frame moves the last bits — a few 1e-16 of the terms behind each
+ * entry — while the smallest camera change that moves a pixel sits orders
+ * above 1e-9, so recomputation jitter never enters the moving regime and no
+ * real motion is missed. Entries that are small differences of huge terms
+ * would eat that margin; the one place a rendered matrix does that, a
+ * scene-derived clip depth range, is excluded from the comparison entirely
+ * (see MOTION_MATRIX_INDICES).
+ */
+const MOTION_RELATIVE_EPSILON = 1e-9;
+
+const movedBeyondJitter = (previous: number, next: number): boolean =>
+  Math.abs(previous - next) >
+  MOTION_RELATIVE_EPSILON * Math.max(1, Math.abs(previous), Math.abs(next));
+
+/**
+ * The `viewProj` entries that describe where the camera is looking, in the
+ * column-major layout (`index = column * 4 + row`). The clip-z row
+ * (2, 6, 10, 14) is deliberately left out: hosts fold a depth remap derived
+ * from the scene's visible bounds into it, so a tile arriving or being
+ * evicted rewrites those four numbers while the camera stands perfectly
+ * still. Everything a camera move does to the rendered image shows up in the
+ * x, y and w rows; the one motion that lives only in clip z — dollying an
+ * orthographic camera along its view axis — shows up in the eye point, which
+ * is compared alongside the matrix.
+ */
+const MOTION_MATRIX_INDICES = [0, 1, 3, 4, 5, 7, 8, 9, 11, 12, 13, 15];
+
+/**
+ * Everything about the camera that changes what LOD selects: where it looks
+ * from and at, the eye point, the viewport height screen-space error is
+ * measured in, and the projection's sizing scalar.
+ */
+const cameraMotionScalars = (view: CameraView): number[] => [
+  ...MOTION_MATRIX_INDICES.map((index) => Number(view.viewProj[index])),
+  ...view.position,
+  view.viewportHeightCssPx,
+  view.projection === "orthographic" ? view.parallelScale : view.fovY,
+];
+
+/**
+ * Whether `next` renders a genuinely different camera than `previous`.
+ * A missing `previous` is a baseline being established, not a movement.
+ */
+export const cameraMoved = (
+  previous: CameraView | null | undefined,
+  next: CameraView,
+): boolean => {
+  if (!previous) return false;
+  if (previous.projection !== next.projection) return true;
+  const before = cameraMotionScalars(previous);
+  const after = cameraMotionScalars(next);
+  return before.some((value, index) => movedBeyondJitter(value, after[index]!));
+};

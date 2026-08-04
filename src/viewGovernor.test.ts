@@ -1368,3 +1368,63 @@ describe("createViewGovernor reconfiguration", () => {
     expect(after.capacitySamples).toEqual(before.capacitySamples);
   });
 });
+
+describe("createViewGovernor rendered-camera classification", () => {
+  const cameraAt = (x: number, clipZ = 0) => ({
+    projection: "perspective" as const,
+    fovY: 1,
+    // Index 12 (translation) is a looking-direction entry; 2/6/10/14 are the
+    // clip-z row hosts rewrite while the camera stands still.
+    viewProj: [1, 0, clipZ, 0, 0, 1, 0, 0, 0, 0, 1 + clipZ, 0, x, 0, clipZ, 1],
+    position: [x, 0, 0] as [number, number, number],
+    viewportWidthCssPx: 800,
+    viewportHeightCssPx: 600,
+  });
+  const views = (x: number, clipZ = 0) => new Map([["r", cameraAt(x, clipZ)]]);
+
+  it("holds one inferred reference per burst and releases it on the debounce", () => {
+    const governor = createViewGovernor({
+      motionDebounceMs: 100,
+      interactionSettleMs: 200,
+    });
+    const scheduleRender = vi.fn();
+    governor.noteRenderedCameras(views(0), scheduleRender);
+    expect(governor.stats().motion.inferredReferences).toBe(0);
+
+    for (const x of [1, 2, 3]) {
+      governor.noteRenderedCameras(views(x), scheduleRender);
+    }
+    expect(governor.stats().motion.inferredReferences).toBe(1);
+    expect(governor.stats().regime).toBe("interaction");
+
+    vi.advanceTimersByTime(100);
+    expect(governor.stats().motion.inferredReferences).toBe(0);
+    expect(scheduleRender).toHaveBeenCalledTimes(1);
+    // The settle window is still holding the moving regime: two-phase.
+    expect(governor.stats().regime).toBe("interaction");
+    expect(governor.stats().motion.settling).toBe(true);
+
+    vi.advanceTimersByTime(200);
+    expect(governor.stats().regime).toBe("stationary");
+    expect(governor.stats().motion.settling).toBe(false);
+  });
+
+  it("ignores clip-z-row rewrites: tiles arriving are not camera motion", () => {
+    const governor = createViewGovernor({ motionDebounceMs: 100 });
+    governor.noteRenderedCameras(views(5));
+    governor.noteRenderedCameras(views(5, 0.25));
+    expect(governor.stats().motion.inferredReferences).toBe(0);
+    expect(governor.stats().regime).toBe("stationary");
+  });
+
+  it("treats the first camera after a baseline reset as a baseline again", () => {
+    const governor = createViewGovernor({ motionDebounceMs: 100 });
+    governor.noteRenderedCameras(views(0));
+    governor.resetMotionBaselines();
+    governor.noteRenderedCameras(views(50));
+    expect(governor.stats().motion.inferredReferences).toBe(0);
+
+    governor.noteRenderedCameras(views(51));
+    expect(governor.stats().motion.inferredReferences).toBe(1);
+  });
+});

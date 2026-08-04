@@ -17,6 +17,7 @@ import {
   type BudgetAdjustment,
   type BudgetRegime,
 } from "./adaptiveBudget";
+import { cameraMoved, type CameraView } from "./camera";
 import { finiteAtLeast, finiteNonNegative, finiteWithin } from "./numeric";
 import {
   createViewBudgetCoordinator,
@@ -102,6 +103,15 @@ export type ViewGovernorOptions = AdaptiveBudgetOptions & {
   vtkFrameFraction?: number;
   /** Delay before switching back to stationary allocation. Default 750 ms. */
   interactionSettleMs?: number;
+  /**
+   * How long rendered cameras must hold still before the inferred motion
+   * reference is released (`noteRenderedCameras`). Long enough to bridge a
+   * dropped playback frame or a slow scrub step, short enough that a single
+   * camera jump refines almost immediately. Default 250 ms. This is regime
+   * policy, not deployment configuration: it exists as an option so a test
+   * can shorten it.
+   */
+  motionDebounceMs?: number;
 };
 
 /** Which bound explains the budget a cloud is currently drawing to. */
@@ -193,6 +203,28 @@ export type ViewGovernor = {
   beginMotion(kind: MotionSourceKind): MotionReference;
   /** Report a rendered-camera change; one trailing timer owns camera stability. */
   recordCameraChange(): void;
+  /**
+   * Feed the cameras a pass actually rendered, keyed by host view (any stable
+   * key — a renderer instance, an id). Motion beyond recomputation jitter in
+   * any of them holds one inferred motion reference for the burst, released
+   * after `motionDebounceMs` of stillness; every camera that reaches LOD
+   * passing through here is what covers playback, scrubbing and programmatic
+   * animation without any of them having to announce itself. A key's first
+   * camera is its baseline, not a movement. `scheduleRender` is invoked once
+   * when the burst settles, because the settled regime cannot refine quality
+   * it never measures — the governor still never schedules frames on its own.
+   */
+  noteRenderedCameras(
+    views: ReadonlyMap<unknown, CameraView | null | undefined>,
+    scheduleRender?: () => void,
+  ): void;
+  /**
+   * Forget the rendered-camera baselines. For a host whose view stops
+   * feeding cameras (its last cloud left): without this, the first camera
+   * after they return is compared against one from before they left, and all
+   * the travel between reads as a gesture nobody made.
+   */
+  resetMotionBaselines(): void;
   /** Immediate responsiveness signal. Never feeds the damped capacity window. */
   recordTransientFrame(metrics: TransientFrameMetrics): void;
   /** Feed one clean or rejected stable-capacity measurement. */
@@ -256,6 +288,7 @@ const INTERACTION_SEED_OF_STATIONARY = 0.25;
 const GOVERNOR_DEFAULTS = {
   vtkFrameFraction: 0.7,
   interactionSettleMs: 750,
+  motionDebounceMs: 250,
 } as const;
 
 /**
@@ -282,6 +315,7 @@ const sameOptions = (a: ViewGovernorOptions, b: ViewGovernorOptions): boolean =>
 type GovernorConfiguration = {
   vtkFrameFraction: number;
   interactionSettleMs: number;
+  motionDebounceMs: number;
   budget: AdaptiveBudget;
   /** Read back from the loop rather than re-defaulted, so the two cannot drift. */
   configuredMaxPoints: number | null;
@@ -299,6 +333,7 @@ const resolveConfiguration = (
   const {
     vtkFrameFraction: rawVtkFraction = GOVERNOR_DEFAULTS.vtkFrameFraction,
     interactionSettleMs: rawSettleMs = GOVERNOR_DEFAULTS.interactionSettleMs,
+    motionDebounceMs: rawDebounceMs = GOVERNOR_DEFAULTS.motionDebounceMs,
     ...budgetOptions
   } = options;
   const vtkFrameFraction = finiteWithin(
@@ -312,12 +347,14 @@ const resolveConfiguration = (
     rawSettleMs,
     0,
   );
+  const motionDebounceMs = finiteAtLeast("motionDebounceMs", rawDebounceMs, 0);
   const budget = createAdaptiveBudget(budgetOptions);
   const { maxBudget: configuredMaxPoints, cooldownMs: emergencyCooldownMs } =
     budget.stats();
   return {
     vtkFrameFraction,
     interactionSettleMs,
+    motionDebounceMs,
     budget,
     configuredMaxPoints,
     emergencyCooldownMs,
@@ -331,6 +368,7 @@ export const createViewGovernor = (
   let {
     vtkFrameFraction,
     interactionSettleMs,
+    motionDebounceMs,
     budget,
     configuredMaxPoints,
     emergencyCooldownMs,
@@ -502,6 +540,46 @@ export const createViewGovernor = (
     if (!wasInteracting) enterInteraction();
   };
 
+  const takeMotionReference = (kind: MotionSourceKind): MotionReference => {
+    let held = !disposed;
+    if (held) {
+      const wasInteracting = interacting();
+      if (kind === "explicit") explicitMotion += 1;
+      else inferredMotion += 1;
+      if (!wasInteracting) enterInteraction();
+    }
+    return {
+      release() {
+        if (!held) return;
+        held = false;
+        if (kind === "explicit") explicitMotion -= 1;
+        else inferredMotion -= 1;
+        if (disposed || moving() || !cameraStable) return;
+        enterStationary();
+      },
+    };
+  };
+
+  /**
+   * The inferred-motion classifier: baselines of the cameras each host view
+   * last rendered, and the single burst reference their motion holds. One
+   * reference per burst of motion, never one per frame — the governor
+   * restarts its moving track whenever the first reference is taken, so a
+   * per-frame reference would keep resetting the window it needs to learn
+   * from.
+   */
+  let renderedCameras: ReadonlyMap<unknown, CameraView | null | undefined> =
+    new Map();
+  let inferredBurst: MotionReference | null = null;
+  let inferredBurstTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const endInferredBurst = (): void => {
+    if (inferredBurstTimer !== null) clearTimeout(inferredBurstTimer);
+    inferredBurstTimer = null;
+    inferredBurst?.release();
+    inferredBurst = null;
+  };
+
   const pendingWork = (): boolean =>
     someActive(
       (member) =>
@@ -655,6 +733,7 @@ export const createViewGovernor = (
       ({
         vtkFrameFraction,
         interactionSettleMs,
+        motionDebounceMs,
         budget,
         configuredMaxPoints,
         emergencyCooldownMs,
@@ -674,27 +753,36 @@ export const createViewGovernor = (
       else distribute();
     },
 
-    beginMotion(kind) {
-      let held = !disposed;
-      if (held) {
-        const wasInteracting = interacting();
-        if (kind === "explicit") explicitMotion += 1;
-        else inferredMotion += 1;
-        if (!wasInteracting) enterInteraction();
-      }
-      return {
-        release() {
-          if (!held) return;
-          held = false;
-          if (kind === "explicit") explicitMotion -= 1;
-          else inferredMotion -= 1;
-          if (disposed || moving() || !cameraStable) return;
-          enterStationary();
-        },
-      };
-    },
+    beginMotion: takeMotionReference,
 
     recordCameraChange: markCameraChanged,
+
+    noteRenderedCameras(views, scheduleRender) {
+      if (disposed) return;
+      let moved = false;
+      for (const [key, view] of views) {
+        if (view && cameraMoved(renderedCameras.get(key), view)) moved = true;
+      }
+      // Replace rather than merge: a view that stops reporting must not keep
+      // a stale baseline that reads as motion when it comes back.
+      renderedCameras = new Map(views);
+      if (!moved) return;
+      markCameraChanged();
+      if (!inferredBurst) inferredBurst = takeMotionReference("inferred");
+      if (inferredBurstTimer !== null) clearTimeout(inferredBurstTimer);
+      inferredBurstTimer = setTimeout(() => {
+        inferredBurstTimer = null;
+        inferredBurst?.release();
+        inferredBurst = null;
+        // The settled regime cannot refine quality it never measures, so
+        // hand the host one frame to start from.
+        scheduleRender?.();
+      }, motionDebounceMs);
+    },
+
+    resetMotionBaselines() {
+      renderedCameras = new Map();
+    },
 
     recordTransientFrame,
 
@@ -783,6 +871,7 @@ export const createViewGovernor = (
     dispose() {
       if (disposed) return;
       disposed = true;
+      endInferredBurst();
       clearCameraStabilityTimer();
       members.clear();
       viewBudget.dispose();
