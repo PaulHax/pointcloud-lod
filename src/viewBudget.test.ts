@@ -150,6 +150,54 @@ describe("createViewBudgetCoordinator", () => {
     );
   });
 
+  it("holds density through sub-deadband drift", () => {
+    const coordinator = createViewBudgetCoordinator({ pointBudget: 1_000_000 });
+    const setDensityFraction = vi.fn();
+    coordinator.register(memberOptions(vi.fn(), setDensityFraction));
+
+    coordinator.setTargets(1_000_000, 500_000);
+    expect(setDensityFraction).toHaveBeenLastCalledWith(0.5);
+    setDensityFraction.mockClear();
+
+    // Re-planning the draw prefixes, the auto diameter and the ready frontier
+    // is not worth a two-point move nobody can see.
+    coordinator.setTargets(1_000_000, 520_000);
+    expect(setDensityFraction).not.toHaveBeenCalled();
+  });
+
+  it("always reaches full density, however small the last step", () => {
+    const coordinator = createViewBudgetCoordinator({ pointBudget: 1_000_000 });
+    const setDensityFraction = vi.fn();
+    coordinator.register(memberOptions(vi.fn(), setDensityFraction));
+
+    coordinator.setTargets(1_000_000, 500_000);
+    coordinator.setTargets(1_000_000, 970_000);
+    expect(setDensityFraction).toHaveBeenLastCalledWith(0.97);
+    setDensityFraction.mockClear();
+
+    // 0.97 -> 1 is inside the deadband, but stopping there would leave the
+    // cloud permanently short of the full-quality frame it was asked for.
+    coordinator.setTargets(1_000_000, 1_000_000);
+    expect(setDensityFraction).toHaveBeenLastCalledWith(1);
+  });
+
+  it("reports the aggregate memory ceiling without a full snapshot", () => {
+    const coordinator = createViewBudgetCoordinator({ pointBudget: 4_000_000 });
+    expect(coordinator.memoryCeiling()).toBeNull();
+
+    coordinator
+      .register(memberOptions(vi.fn()))
+      .update({ memoryCeilingPoints: 750_000 });
+    coordinator
+      .register(memberOptions(vi.fn()))
+      .update({ memoryCeilingPoints: 250_000 });
+
+    expect(coordinator.memoryCeiling()).toBe(1_000_000);
+    expect(coordinator.stats().memoryCeilingPoints).toBe(
+      coordinator.memoryCeiling(),
+    );
+  });
+
   it("keeps exact adaptive draw targets instead of round-tripping a ratio", () => {
     const coordinator = createViewBudgetCoordinator({ pointBudget: 3 });
     coordinator.setTargets(3, 2);

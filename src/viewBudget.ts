@@ -78,6 +78,12 @@ export type ViewBudgetCoordinator = {
   setDensityFraction(densityFraction: number): void;
   /** Update selection and draw targets atomically. Used by adaptive policies. */
   setTargets(pointBudget: number, drawBudget: number): void;
+  /**
+   * The aggregate residency ceiling, or null when no member declares one.
+   * The one field of {@link stats} a policy reads per pass, without building
+   * the rest of the diagnostic snapshot.
+   */
+  memoryCeiling(): number | null;
   stats(): ViewBudgetStats;
   dispose(): void;
 };
@@ -97,8 +103,20 @@ type MemberState = {
 /** A dominant cloud cannot reduce another below this fraction of an even split. */
 const MIN_SHARE_OF_EVEN_SPLIT = 0.25;
 
-/** Ignore sub-percent share drift that would synchronously reselect a cloud. */
+/**
+ * Ignore sub-percent share drift that would synchronously reselect a cloud.
+ * Applied *relatively*, against the member's own selection budget.
+ */
 const DISTRIBUTE_DEADBAND = 0.01;
+
+/**
+ * The same idea for the draw density, which is already a 0..1 fraction and so
+ * is compared *absolutely*. It needs its own, wider number: re-applying a
+ * density re-plans the draw prefixes, rebuilds the auto diameter and rewalks
+ * the ready frontier, and the fraction is recomputed on every distribute() —
+ * at one hundredth those three tree walks run for changes no one can see.
+ */
+const DENSITY_DEADBAND = 0.05;
 
 export const createViewBudgetCoordinator = (
   options: ViewBudgetCoordinatorOptions = {},
@@ -179,8 +197,11 @@ export const createViewBudgetCoordinator = (
   const distribute = (): void => {
     if (disposed) return;
     const active = activeMembers();
+    // One ceiling walk for both totals: effectiveDrawBudget would otherwise
+    // recompute the selection budget, and every member below reads the
+    // ceiling again.
     const selectionTotal = effectiveSelectionBudget(active);
-    const drawTotal = effectiveDrawBudget(active);
+    const drawTotal = Math.min(drawBudget, selectionTotal);
     const maxReported = active.reduce(
       (max, member) => Math.max(max, member.importance ?? 0),
       0,
@@ -224,9 +245,14 @@ export const createViewBudgetCoordinator = (
         effectiveSelection > 0
           ? Math.min(1, effectiveDraw / effectiveSelection)
           : 0;
+      // The endpoints are never jitter: undrawn and fully drawn are visible
+      // states the deadband must not strand the cloud just short of, however
+      // small the last step is.
+      const densityEndpoint = nextDensity >= 1 || nextDensity <= 0;
       const densityJitter =
         member.densityFraction >= 0 &&
-        Math.abs(nextDensity - member.densityFraction) < DISTRIBUTE_DEADBAND;
+        !densityEndpoint &&
+        Math.abs(nextDensity - member.densityFraction) < DENSITY_DEADBAND;
       member.drawBudget = nextDraw;
       if (!densityJitter) {
         member.densityFraction = nextDensity;
@@ -319,6 +345,10 @@ export const createViewBudgetCoordinator = (
     },
 
     setTargets,
+
+    memoryCeiling() {
+      return memoryCeilingPoints(activeMembers());
+    },
 
     stats() {
       const active = activeMembers();

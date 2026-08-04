@@ -22,9 +22,6 @@ export type PointPrefixAllocation = {
   readonly partialTiles: number;
   readonly skippedTiles: number;
   /** Priority-weighted points in this allocation. */
-  readonly weightedPoints: number;
-  /** Same point total distributed uniformly across the same tiles. */
-  readonly uniformWeightedPoints: number;
 };
 
 export type AllocatePointPrefixesOptions = {
@@ -35,44 +32,6 @@ export type AllocatePointPrefixesOptions = {
 
 const betterCandidate = (left: DrawCandidate, right: DrawCandidate): number =>
   right.priority - left.priority || left.key.localeCompare(right.key);
-
-const uniformPrefixes = (
-  candidates: readonly DrawCandidate[],
-  pointBudget: number,
-): ReadonlyMap<string, number> => {
-  const totalPoints = candidates.reduce(
-    (sum, candidate) => sum + candidate.pointCount,
-    0,
-  );
-  const budget = Math.min(pointBudget, totalPoints);
-  if (budget <= 0 || totalPoints <= 0) return new Map();
-
-  const fraction = budget / totalPoints;
-  const shares = candidates.map((candidate) => {
-    const exact = candidate.pointCount * fraction;
-    return {
-      candidate,
-      count: Math.floor(exact),
-      remainder: exact - Math.floor(exact),
-    };
-  });
-  let assigned = shares.reduce((sum, share) => sum + share.count, 0);
-  shares.sort(
-    (left, right) =>
-      right.remainder - left.remainder ||
-      left.candidate.key.localeCompare(right.candidate.key),
-  );
-  for (const share of shares) {
-    if (assigned >= budget) break;
-    share.count += 1;
-    assigned += 1;
-  }
-  return new Map(
-    shares
-      .filter((share) => share.count > 0)
-      .map((share) => [share.candidate.key, share.count]),
-  );
-};
 
 export const allocatePointPrefixes = (
   options: AllocatePointPrefixesOptions,
@@ -125,21 +84,11 @@ export const allocatePointPrefixes = (
     (sum, count) => sum + count,
     0,
   );
-  const uniform = uniformPrefixes(reachable, plannedPoints);
-  const weighted = (allocation: ReadonlyMap<string, number>): number =>
-    reachable.reduce(
-      (sum, candidate) =>
-        sum + candidate.priority * (allocation.get(candidate.key) ?? 0),
-      0,
-    );
-
   return {
     prefixes,
     plannedPoints,
     fullTiles,
     partialTiles,
     skippedTiles: Math.max(0, reachable.length - prefixes.size),
-    weightedPoints: weighted(prefixes),
-    uniformWeightedPoints: weighted(uniform),
   };
 };

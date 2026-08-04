@@ -296,8 +296,6 @@ export type LodDrawPlanStats = {
   readonly fullTiles: number;
   readonly partialTiles: number;
   readonly skippedTiles: number;
-  /** Priority-weighted benefit relative to an equal-density allocation. */
-  readonly priorityGain: number;
 };
 
 /**
@@ -923,7 +921,6 @@ export const createLodController = (
     fullTiles: 0,
     partialTiles: 0,
     skippedTiles: 0,
-    priorityGain: 1,
   };
   type TileRead = {
     readonly abort: AbortController;
@@ -1194,10 +1191,6 @@ export const createLodController = (
       fullTiles: allocation.fullTiles,
       partialTiles: allocation.partialTiles,
       skippedTiles: allocation.skippedTiles,
-      priorityGain:
-        allocation.uniformWeightedPoints > 0
-          ? allocation.weightedPoints / allocation.uniformWeightedPoints
-          : 1,
     };
     if (!changed) return;
     onDrawPlan({

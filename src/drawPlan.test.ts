@@ -48,7 +48,6 @@ describe("allocatePointPrefixes", () => {
       partialTiles: 0,
       skippedTiles: 1,
     });
-    expect(result.weightedPoints).toBeGreaterThan(result.uniformWeightedPoints);
   });
 
   it("uses a partial progressive prefix at the budget boundary", () => {
@@ -97,7 +96,6 @@ describe("allocatePointPrefixes", () => {
     expect(full.fullTiles).toBe(4);
     expect(full.partialTiles).toBe(0);
     expect(full.skippedTiles).toBe(0);
-    expect(full.weightedPoints).toBe(full.uniformWeightedPoints);
   });
 
   it("breaks equal-priority ties deterministically", () => {

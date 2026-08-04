@@ -374,7 +374,7 @@ export const createViewGovernor = (
 
   const distribute = (): void => {
     if (disposed) return;
-    const ceiling = viewBudget.stats().memoryCeilingPoints;
+    const ceiling = viewBudget.memoryCeiling();
     // Hand the loop the memory ceiling before reading it. Clamping only the
     // aggregate would let the track integrate toward frame-time headroom the
     // memory ceiling never allows it to spend: the effective budget would sit
@@ -451,13 +451,25 @@ export const createViewGovernor = (
   const needsFrame = (): boolean =>
     !disposed && (interacting() || (!pendingWork() && !converged()));
 
-  const recordTransientFrame = (metrics: TransientFrameMetrics): void => {
-    if (disposed || !finiteNonNegative(metrics?.hostFrameMs)) return;
+  /**
+   * Adopt the host's clock offset from this metrics packet and return "now" on
+   * the host's timeline. Every timestamp the governor compares — cooldowns,
+   * emergency cuts, budget samples — has to come from one epoch.
+   */
+  const stampFrom = (metrics: { readonly now?: number }): number => {
     const localNow = Date.now();
     if (finiteNonNegative(metrics.now)) {
       hostEpochOffsetMs = metrics.now - localNow;
     }
-    const now = localNow + (hostEpochOffsetMs ?? 0);
+    return localNow + (hostEpochOffsetMs ?? 0);
+  };
+
+  /**
+   * What the frame really cost: the host's own frame time, and the vtk and GPU
+   * spans grossed up by the fraction of the frame vtk is expected to own. The
+   * worst of the three is the one the budget must answer to.
+   */
+  const observedFrameMs = (metrics: TransientFrameMetrics): number => {
     const candidates = [metrics.hostFrameMs];
     if (finiteNonNegative(metrics.vtkFrameMs)) {
       candidates.push(metrics.vtkFrameMs / vtkFrameFraction);
@@ -465,12 +477,25 @@ export const createViewGovernor = (
     if (finiteNonNegative(metrics.gpuMs)) {
       candidates.push(metrics.gpuMs / vtkFrameFraction);
     }
+    return Math.max(...candidates);
+  };
+
+  /**
+   * A frame may train the budget only when nothing is still streaming into it
+   * and the camera is in a settled state — either genuinely moving, or stable.
+   */
+  const coreEligible = (): boolean =>
+    !pendingWork() && (moving() || cameraStable);
+
+  const recordTransientFrame = (metrics: TransientFrameMetrics): number => {
+    if (disposed || !finiteNonNegative(metrics?.hostFrameMs)) return 0;
+    const now = stampFrom(metrics);
     const severeInput =
       (finiteNonNegative(metrics.inputDelayMs) && metrics.inputDelayMs > 50) ||
       (finiteNonNegative(metrics.longTaskMs) && metrics.longTaskMs > 50);
     const inMotion = moving();
     const target = budget.target(interacting());
-    const observedMs = Math.max(...candidates);
+    const observedMs = observedFrameMs(metrics);
     const emergency = inMotion && (severeInput || observedMs > target * 2);
     if (!emergency) emergencyStreak = 0;
     if (
@@ -484,15 +509,12 @@ export const createViewGovernor = (
       emergencyCooldownUntil = now + emergencyCooldownMs;
       distribute();
     }
+    return observedMs;
   };
 
   const recordCapacitySample = (metrics: CapacitySampleMetrics): void => {
     if (disposed || !finiteNonNegative(metrics?.frameMs)) return;
-    const localNow = Date.now();
-    if (finiteNonNegative(metrics.now)) {
-      hostEpochOffsetMs = metrics.now - localNow;
-    }
-    const now = localNow + (hostEpochOffsetMs ?? 0);
+    const now = stampFrom(metrics);
     lastCapacitySampleEligible = metrics.eligible;
     if (!metrics.eligible) {
       rejectedCapacitySamples += 1;
@@ -576,20 +598,11 @@ export const createViewGovernor = (
 
     recordHostFrame(metrics) {
       if (disposed || !finiteNonNegative(metrics?.hostFrameMs)) return;
-      recordTransientFrame(metrics);
-      const candidates = [metrics.hostFrameMs];
-      if (finiteNonNegative(metrics.vtkFrameMs)) {
-        candidates.push(metrics.vtkFrameMs / vtkFrameFraction);
-      }
-      if (finiteNonNegative(metrics.gpuMs)) {
-        candidates.push(metrics.gpuMs / vtkFrameFraction);
-      }
-      const observedMs = Math.max(...candidates);
-      const coreEligible = !pendingWork() && (moving() || cameraStable);
+      const observedMs = recordTransientFrame(metrics);
       recordCapacitySample({
         frameMs: observedMs,
         regime: regime(),
-        eligible: (metrics.capacitySampleEligible ?? true) && coreEligible,
+        eligible: (metrics.capacitySampleEligible ?? true) && coreEligible(),
         now: metrics.now,
       });
     },
@@ -648,7 +661,7 @@ export const createViewGovernor = (
           inputActive: moving(),
           cameraStable,
           workPending: pendingWork(),
-          measurementEligible: !pendingWork() && (moving() || cameraStable),
+          measurementEligible: coreEligible(),
         },
         capacitySamples: {
           eligible: eligibleCapacitySamples,

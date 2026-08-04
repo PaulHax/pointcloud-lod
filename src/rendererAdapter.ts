@@ -29,9 +29,8 @@ import vtkActor from "@kitware/vtk.js/Rendering/Core/Actor";
 import vtkPointGaussianMapper from "@kitware/vtk.js/Rendering/Core/PointGaussianMapper";
 
 import type { TileBatch, TileDrawPlan } from "./controller";
-import { finiteAbove, finiteNonNegative, finiteWithin } from "./numeric";
+import { finiteAbove, finiteNonNegative } from "./numeric";
 import { keyToString, type Vec3 } from "./octree";
-import { pointPrefixCount } from "./pointDensity";
 import { tileBytes, type TileData } from "./tileSource";
 
 const IDENTITY: readonly number[] = [
@@ -63,8 +62,6 @@ export type RendererAdapterOptions = {
   devicePixelRatio?: number;
   /** Initial visibility. Default true. Tiles added while hidden stay hidden. */
   visible?: boolean;
-  /** Initial fraction of every submitted tile's point prefix to draw. Default 1. */
-  densityFraction?: number;
 };
 
 export type RendererAdapter = {
@@ -83,8 +80,6 @@ export type RendererAdapter = {
   setBaseMatrix(matrix: ArrayLike<number> | null): void;
   setPointDiameterCssPx(diameterCssPx: number): void;
   setDevicePixelRatio(devicePixelRatio: number): void;
-  /** Draw this fraction of every submitted tile without replacing its VBO. */
-  setDensityFraction(densityFraction: number): void;
   /**
    * Draw switch only: hiding keeps every actor and its GPU resources, so
    * showing again restores exactly the submitted set — including tiles that
@@ -160,7 +155,6 @@ export type RendererAdapterStats = {
   readonly drawnPoints: number;
   readonly drawnFraction: number;
   readonly visible: boolean;
-  readonly densityFraction: number;
   readonly diameterCssPx: number;
   readonly devicePixelRatio: number;
 };
@@ -189,13 +183,11 @@ export const createRendererAdapter = (
     0,
   );
   let visible = options.visible ?? true;
-  let densityFraction = finiteWithin(
-    "densityFraction",
-    options.densityFraction ?? 1,
-    0,
-    1,
-  );
-  /** Null keeps the adapter's standalone uniform-density behavior. */
+  /**
+   * The prefix each submitted tile draws, as the controller last planned it.
+   * Null until the first plan arrives: a tile submitted before any plan draws
+   * whole, while a tile absent from a plan that did arrive draws nothing.
+   */
   let pointPrefixes: ReadonlyMap<string, number> | null = null;
   let baseMatrix: ArrayLike<number> = IDENTITY;
   // A key lives in at most one of the two: removal moves its entry from
@@ -263,11 +255,24 @@ export const createRendererAdapter = (
   /** Push the adapter's current visual state onto one tile's actor/mapper. */
   const prefixFor = (keyString: string, entry: TileActors): number =>
     pointPrefixes === null
-      ? pointPrefixCount(entry.tile.pointCount, densityFraction)
+      ? entry.tile.pointCount
       : Math.min(
           entry.tile.pointCount,
           Math.max(0, Math.floor(pointPrefixes.get(keyString) ?? 0)),
         );
+
+  /** Re-read every tile's planned prefix; true when any drawn count moved. */
+  const refreshPrefixes = (): boolean => {
+    let changed = false;
+    for (const [keyString, entry] of tiles) {
+      const count = prefixFor(keyString, entry);
+      if (count === entry.drawnPointCount) continue;
+      entry.drawnPointCount = count;
+      entry.mapper.setMaximumPointCount(count);
+      changed = true;
+    }
+    return changed;
+  };
 
   const applyTileState = (keyString: string, entry: TileActors): void => {
     // The actor property remains in CSS pixels. The custom dense-point mapper
@@ -349,15 +354,7 @@ export const createRendererAdapter = (
         ]),
       );
       pointPrefixes = next;
-      let changed = false;
-      for (const [keyString, entry] of tiles) {
-        const count = prefixFor(keyString, entry);
-        if (count === entry.drawnPointCount) continue;
-        entry.drawnPointCount = count;
-        entry.mapper.setMaximumPointCount(count);
-        changed = true;
-      }
-      if (changed) scheduleRender();
+      if (refreshPrefixes()) scheduleRender();
     },
 
     applyBatch(batch) {
@@ -448,24 +445,6 @@ export const createRendererAdapter = (
       scheduleRender();
     },
 
-    setDensityFraction(nextDensityFraction) {
-      if (
-        disposed ||
-        !finiteNonNegative(nextDensityFraction) ||
-        nextDensityFraction > 1 ||
-        (nextDensityFraction === densityFraction && pointPrefixes === null)
-      ) {
-        return;
-      }
-      densityFraction = nextDensityFraction;
-      pointPrefixes = null;
-      for (const [keyString, entry] of tiles) {
-        entry.drawnPointCount = prefixFor(keyString, entry);
-        entry.mapper.setMaximumPointCount(entry.drawnPointCount);
-      }
-      scheduleRender();
-    },
-
     setVisible(nextVisible) {
       if (disposed || nextVisible === visible) return;
       visible = nextVisible;
@@ -509,7 +488,6 @@ export const createRendererAdapter = (
         drawnFraction:
           visible && submittedPoints > 0 ? drawnPoints / submittedPoints : 0,
         visible,
-        densityFraction,
         diameterCssPx,
         devicePixelRatio,
       };
