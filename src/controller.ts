@@ -16,6 +16,7 @@ import {
   nodeScreenSpaceError,
   boundsIntersectsFrustum,
   type CameraView,
+  type Plane,
 } from "./camera";
 import { selectNodes } from "./budget";
 import { allocatePointPrefixes } from "./drawPlan";
@@ -1203,6 +1204,128 @@ export const createLodController = (
   const isEntryReady = (keyString: string, entry: HierarchyEntry): boolean =>
     entry.pointCount === 0 || resident.has(keyString);
 
+  /** Why a selected node is the finest thing drawn on its branch. */
+  type TerminalReasons = {
+    leaf?: boolean;
+    cutoff?: boolean;
+    hierarchy?: boolean;
+    tile?: boolean;
+    budget?: boolean;
+    draw?: boolean;
+  };
+
+  /**
+   * The projected spacing a terminal's drawn prefix leaves on screen, null
+   * when it draws nothing. Thinning a tile to a prefix spreads its points, so
+   * the node's own screen-space error is scaled by the prefix's density.
+   */
+  const terminalSpacing = (
+    keyString: string,
+    entry: HierarchyEntry,
+  ): number | null => {
+    const prefix = drawPrefixes.get(keyString) ?? 0;
+    if (entry.pointCount === 0 || prefix <= 0) return null;
+    return sseFor(keyString) * projectedSpacingScale(prefix / entry.pointCount);
+  };
+
+  /**
+   * Walk the selected tree down to its terminals, reporting each with what
+   * stopped the refinement there.
+   *
+   * `requireReady` chooses which tree is walked. The ready frontier describes
+   * what is on screen now, so an unloaded node ends its branch and is reported
+   * as tile-blocked. Auto sizing follows the selection instead — the density
+   * the frame is converging on — so it walks past arrivals that have not
+   * landed yet, and no terminal there is ever tile-blocked. Everything else
+   * about the two walks, including the order the child blocks are classified
+   * in, is one rule: two walks that disagreed would size the points for a
+   * frontier the diagnostics never described.
+   */
+  const walkTerminals = (
+    planes: readonly Plane[],
+    requireReady: boolean,
+    onTerminal: (
+      keyString: string,
+      entry: HierarchyEntry,
+      reasons: TerminalReasons,
+    ) => void,
+  ): void => {
+    const walk = (key: VoxelKey): void => {
+      const keyString = keyToString(key);
+      if (!target.has(keyString)) return;
+      const entry = hierarchy.get(keyString);
+      if (entry === undefined) return;
+      if (requireReady && !isEntryReady(keyString, entry)) return;
+
+      const prefix = drawPrefixes.get(keyString) ?? 0;
+      if (entry.pointCount > 0 && prefix < entry.pointCount) {
+        onTerminal(keyString, entry, { draw: true });
+        return;
+      }
+
+      const children = childrenOf(key, entry);
+      if (children.length === 0) {
+        onTerminal(keyString, entry, { leaf: true });
+        return;
+      }
+      if (sseFor(keyString) < refinementCutoffPx) {
+        onTerminal(keyString, entry, { cutoff: true });
+        return;
+      }
+
+      let hierarchyBlocked = false;
+      let tileBlocked = false;
+      let budgetBlocked = false;
+      let drawBlocked = false;
+      const openChildren: VoxelKey[] = [];
+      for (const child of children) {
+        const childString = keyToString(child);
+        const childEntry = hierarchy.get(childString);
+        if (childEntry === undefined) {
+          hierarchyBlocked = true;
+          continue;
+        }
+        if (!boundsIntersectsFrustum(planes, childEntry.bounds)) continue;
+        // Matches selection: an invisible page reference is not requested, so
+        // it is not blocking anything either.
+        if (childEntry.pageRef && !pagesLoaded.has(childString)) {
+          hierarchyBlocked = true;
+          continue;
+        }
+        if (!target.has(childString)) {
+          // A visible, available child of a selected parent can only be absent
+          // because the breadth-first point budget rejected it.
+          budgetBlocked = budgetSkipped.has(childString) || budgetBlocked;
+          continue;
+        }
+        if (
+          childEntry.pointCount > 0 &&
+          (drawPrefixes.get(childString) ?? 0) === 0
+        ) {
+          drawBlocked = true;
+          continue;
+        }
+        if (requireReady && !isEntryReady(childString, childEntry)) {
+          tileBlocked = true;
+          continue;
+        }
+        openChildren.push(child);
+      }
+
+      if (hierarchyBlocked || tileBlocked || budgetBlocked || drawBlocked) {
+        onTerminal(keyString, entry, {
+          hierarchy: hierarchyBlocked,
+          tile: tileBlocked,
+          budget: budgetBlocked,
+          draw: drawBlocked,
+        });
+      }
+      for (const child of openChildren) walk(child);
+    };
+
+    walk(ROOT_KEY);
+  };
+
   /**
    * Size Auto points for the selected density, not the subset that has happened
    * to finish loading.
@@ -1231,69 +1354,13 @@ export const createLodController = (
       return;
     }
 
-    const planes = frustumPlanes(view.viewProj);
     let largestSpacing: number | null = null;
-    const include = (entry: HierarchyEntry, keyString: string): void => {
-      if (entry.pointCount === 0) return;
-      const prefix = drawPrefixes.get(keyString) ?? 0;
-      if (prefix <= 0) return;
-      largestSpacing = Math.max(
-        largestSpacing ?? 0,
-        sseFor(keyString) * projectedSpacingScale(prefix / entry.pointCount),
-      );
-    };
+    walkTerminals(frustumPlanes(view.viewProj), false, (keyString, entry) => {
+      const spacing = terminalSpacing(keyString, entry);
+      if (spacing !== null)
+        largestSpacing = Math.max(largestSpacing ?? 0, spacing);
+    });
 
-    const walk = (key: VoxelKey): void => {
-      const keyString = keyToString(key);
-      if (!target.has(keyString)) return;
-      const entry = hierarchy.get(keyString);
-      if (entry === undefined) return;
-
-      const prefix = drawPrefixes.get(keyString) ?? 0;
-      if (entry.pointCount > 0 && prefix < entry.pointCount) {
-        include(entry, keyString);
-        return;
-      }
-
-      const children = childrenOf(key, entry);
-      if (children.length === 0 || sseFor(keyString) < refinementCutoffPx) {
-        include(entry, keyString);
-        return;
-      }
-
-      let blocked = false;
-      const selectedChildren: VoxelKey[] = [];
-      for (const child of children) {
-        const childString = keyToString(child);
-        const childEntry = hierarchy.get(childString);
-        if (childEntry === undefined) {
-          blocked = true;
-          continue;
-        }
-        if (!boundsIntersectsFrustum(planes, childEntry.bounds)) continue;
-        if (childEntry.pageRef && !pagesLoaded.has(childString)) {
-          blocked = true;
-          continue;
-        }
-        if (!target.has(childString)) {
-          blocked = budgetSkipped.has(childString) || blocked;
-          continue;
-        }
-        if (
-          childEntry.pointCount > 0 &&
-          (drawPrefixes.get(childString) ?? 0) === 0
-        ) {
-          blocked = true;
-          continue;
-        }
-        selectedChildren.push(child);
-      }
-
-      if (blocked) include(entry, keyString);
-      for (const child of selectedChildren) walk(child);
-    };
-
-    walk(ROOT_KEY);
     if (largestSpacing !== null) {
       emitDiameter(
         presentation.userScale *
@@ -1320,7 +1387,6 @@ export const createLodController = (
       return;
     }
 
-    const planes = frustumPlanes(currentView.viewProj);
     const values: number[] = [];
     const terminalKeys = new Set<string>();
     let leafNodes = 0;
@@ -1330,111 +1396,26 @@ export const createLodController = (
     let budgetBlockedNodes = 0;
     let drawBlockedNodes = 0;
 
-    const addTerminal = (
-      keyString: string,
-      entry: HierarchyEntry,
-      reasons: {
-        leaf?: boolean;
-        cutoff?: boolean;
-        hierarchy?: boolean;
-        tile?: boolean;
-        budget?: boolean;
-        draw?: boolean;
+    walkTerminals(
+      frustumPlanes(currentView.viewProj),
+      true,
+      (keyString, entry, reasons) => {
+        // A structural node has no samples with which to cover a blocked region.
+        if (entry.pointCount === 0 || !resident.has(keyString)) return;
+        if (!terminalKeys.has(keyString)) {
+          terminalKeys.add(keyString);
+          const spacing = terminalSpacing(keyString, entry);
+          if (spacing !== null) values.push(spacing);
+        }
+        if (reasons.leaf) leafNodes += 1;
+        if (reasons.cutoff) cutoffNodes += 1;
+        if (reasons.hierarchy) hierarchyBlockedNodes += 1;
+        if (reasons.tile) tileBlockedNodes += 1;
+        if (reasons.budget) budgetBlockedNodes += 1;
+        if (reasons.draw) drawBlockedNodes += 1;
       },
-    ): void => {
-      // A structural node has no samples with which to cover a blocked region.
-      if (entry.pointCount === 0 || !resident.has(keyString)) return;
-      if (!terminalKeys.has(keyString)) {
-        terminalKeys.add(keyString);
-        const prefix = drawPrefixes.get(keyString) ?? 0;
-        if (prefix > 0) {
-          values.push(
-            sseFor(keyString) *
-              projectedSpacingScale(prefix / entry.pointCount),
-          );
-        }
-      }
-      if (reasons.leaf) leafNodes += 1;
-      if (reasons.cutoff) cutoffNodes += 1;
-      if (reasons.hierarchy) hierarchyBlockedNodes += 1;
-      if (reasons.tile) tileBlockedNodes += 1;
-      if (reasons.budget) budgetBlockedNodes += 1;
-      if (reasons.draw) drawBlockedNodes += 1;
-    };
+    );
 
-    const walk = (key: VoxelKey): void => {
-      const keyString = keyToString(key);
-      if (!target.has(keyString)) return;
-      const entry = hierarchy.get(keyString);
-      if (entry === undefined || !isEntryReady(keyString, entry)) return;
-
-      const prefix = drawPrefixes.get(keyString) ?? 0;
-      if (entry.pointCount > 0 && prefix < entry.pointCount) {
-        addTerminal(keyString, entry, { draw: true });
-        return;
-      }
-
-      const children = childrenOf(key, entry);
-      if (children.length === 0) {
-        addTerminal(keyString, entry, { leaf: true });
-        return;
-      }
-      if (sseFor(keyString) < refinementCutoffPx) {
-        addTerminal(keyString, entry, { cutoff: true });
-        return;
-      }
-
-      let hierarchyBlocked = false;
-      let tileBlocked = false;
-      let budgetBlocked = false;
-      let drawBlocked = false;
-      const readyChildren: VoxelKey[] = [];
-      for (const child of children) {
-        const childString = keyToString(child);
-        const childEntry = hierarchy.get(childString);
-        if (childEntry === undefined) {
-          hierarchyBlocked = true;
-          continue;
-        }
-        if (!boundsIntersectsFrustum(planes, childEntry.bounds)) continue;
-        // Matches selection: an invisible page reference is not requested, so
-        // it is not blocking anything either.
-        if (childEntry.pageRef && !pagesLoaded.has(childString)) {
-          hierarchyBlocked = true;
-          continue;
-        }
-        if (!target.has(childString)) {
-          // A visible, available child of a selected parent can only be absent
-          // because the breadth-first point budget rejected it.
-          budgetBlocked = budgetSkipped.has(childString) || budgetBlocked;
-          continue;
-        }
-        if (
-          childEntry.pointCount > 0 &&
-          (drawPrefixes.get(childString) ?? 0) === 0
-        ) {
-          drawBlocked = true;
-          continue;
-        }
-        if (!isEntryReady(childString, childEntry)) {
-          tileBlocked = true;
-          continue;
-        }
-        readyChildren.push(child);
-      }
-
-      if (hierarchyBlocked || tileBlocked || budgetBlocked || drawBlocked) {
-        addTerminal(keyString, entry, {
-          hierarchy: hierarchyBlocked,
-          tile: tileBlocked,
-          budget: budgetBlocked,
-          draw: drawBlocked,
-        });
-      }
-      for (const child of readyChildren) walk(child);
-    };
-
-    walk(ROOT_KEY);
     const frontier: LodSelectionStats["readyTerminalFrontier"] = {
       count: terminalKeys.size,
       leafNodes,
