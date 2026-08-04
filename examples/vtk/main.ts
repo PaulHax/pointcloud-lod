@@ -435,12 +435,6 @@ interactorStyle.addMouseManipulator(
 );
 interactor.setInteractorStyle(interactorStyle);
 
-/**
- * Relative, so the same threshold works for a cloud in metres and one in
- * degrees: recomputing the camera product every frame jitters in the last
- * bits, and no real camera change is that small.
- */
-const MOTION_RELATIVE_EPSILON = 1e-9;
 /** The panel is an instrument, so it repaints on its own slower clock. */
 const DIAGNOSTICS_INTERVAL_MS = 100;
 
@@ -457,7 +451,6 @@ let member: ViewGovernorMember | null = null;
 let fixedBudget: ViewBudgetCoordinator | null = null;
 let fixedMember: ViewBudgetMember | null = null;
 let explicitMotion: MotionReference | null = null;
-let lastRenderedView: CameraView | null = null;
 let loadedName = "";
 let loadedPointCount = 0;
 let frameQueued = false;
@@ -672,73 +665,23 @@ const frameContamination = (): string[] => {
 // ---------------------------------------------------------------------------
 // Camera-motion inference
 //
-// Compare the camera actually handed to LOD against the previous one and
-// ignore floating-point jitter. The governor owns the one trailing stability
-// timer, so the host reports changes instead of maintaining another debounce.
+// Hand the governor the camera this page actually rendered and let it classify
+// the motion: it owns the jitter epsilon, the clip-z-row exclusion, the
+// inferred motion reference and the trailing stability timer. A host with
+// several views passes one entry per view; this page has one.
 // ---------------------------------------------------------------------------
 
-const movedBeyondJitter = (previous: number, next: number): boolean =>
-  Math.abs(previous - next) >
-  MOTION_RELATIVE_EPSILON * Math.max(1, Math.abs(previous), Math.abs(next));
-
-/**
- * World-to-clip entries describing where the camera is looking.
- *
- * The clip-z row is deliberately left out, exactly as the bridge leaves out
- * its own: a host folds a depth remap derived from the scene's visible bounds
- * into that row, so a tile arriving or being evicted rewrites those four
- * numbers while the camera stands perfectly still. Every camera move shows up
- * in the x, y and w rows; the one motion that lives only in clip z — dollying
- * an orthographic camera along its view axis — shows up in the eye point
- * instead, which is compared alongside.
- *
- * `viewProj` is column-major (`index = column * 4 + row`), so the clip-z row
- * is entries 2, 6, 10 and 14 — not 8..11, which are column 2 and move under
- * ordinary rotation.
- *
- * This page hands the projection a fixed z range, so the row never moves here
- * and excluding it changes nothing on screen. It is here because the example
- * exists to show a host what to implement, and a host reading its own
- * composite matrix will have the remap folded in.
- */
-const MOTION_MATRIX_INDICES = [0, 1, 3, 4, 5, 7, 8, 9, 11, 12, 13, 15];
-
-/** Everything about the camera that changes what LOD selects. */
-const motionScalars = (view: CameraView): number[] => [
-  ...MOTION_MATRIX_INDICES.map((index) => Number(view.viewProj[index])),
-  ...view.position,
-  view.viewportHeightCssPx,
-  view.projection === "orthographic" ? view.parallelScale : view.fovY,
-];
-
-const cameraMoved = (
-  previous: CameraView | null,
-  next: CameraView,
-): boolean => {
-  // The first camera a view supplies is the baseline, not a movement.
-  if (!previous) return false;
-  if (previous.projection !== next.projection) return true;
-  const before = motionScalars(previous);
-  const after = motionScalars(next);
-  return before.some((value, index) => movedBeyondJitter(value, after[index]!));
-};
-
-const classifyCameraMotion = (view: CameraView): void => {
-  const moved = cameraMoved(lastRenderedView, view);
-  lastRenderedView = view;
-  if (!moved || !governor) return;
-  governor.recordCameraChange();
-};
+/** Any stable key identifies a view; this page's single renderer is one. */
+const renderedCameras = new Map<unknown, CameraView>();
 
 // ---------------------------------------------------------------------------
 // Budget mode and the view governor
 // ---------------------------------------------------------------------------
 
 /**
- * The governor fixes its options at construction and throws on an unusable
- * one rather than clamping, so the panel is validated here and a changed
- * target replaces the instance — the same reconciliation the bridge does,
- * without the multi-cloud bookkeeping.
+ * The governor throws on an unusable option rather than clamping, so the panel
+ * is validated here — the same reconciliation the bridge does, without the
+ * multi-cloud bookkeeping.
  */
 const readGovernorOptions = (): ViewGovernorOptions | null => {
   const interactionTargetMs = numberFrom(movingTargetInput);
@@ -775,12 +718,17 @@ const applyBudgetMode = (): void => {
   if (budgetMode() === "adaptive" && governor) {
     fixedMember?.release();
     fixedMember = null;
-    member ??= governor.register({
-      id: loadedName || "cloud",
-      setPointBudget: (budget) => controller?.setPointBudget(budget),
-      setDensityFraction: (fraction) =>
-        controller?.setDensityFraction(fraction),
-    });
+    if (!member) {
+      member = governor.register({
+        id: loadedName || "cloud",
+        setPointBudget: (budget) => controller?.setPointBudget(budget),
+        setDensityFraction: (fraction) =>
+          controller?.setDensityFraction(fraction),
+      });
+      // A fresh member starts at "no work pending", which is only true if the
+      // controller happens to be idle right now.
+      reportWorkPending();
+    }
     return;
   }
   member?.release();
@@ -811,20 +759,26 @@ const syncGovernor = (): void => {
   }
   const key = wanted === null ? null : JSON.stringify(wanted);
   if (key === governorKey) return;
-  const cameraWasStable = governor?.stats().activity.cameraStable ?? true;
-  member?.release();
-  member = null;
-  governor?.dispose();
-  governor = wanted === null ? null : createViewGovernor(wanted);
   governorKey = key;
-  // Motion belongs to the view, not to the instance: a governor replaced
-  // mid-gesture inherits what the view was holding, or the swap reads as the
-  // camera having stopped and quality jumps mid-drag.
-  if (explicitMotion) {
-    explicitMotion.release();
-    explicitMotion = governor?.beginMotion("explicit") ?? null;
+  if (wanted !== null && governor) {
+    // Re-target in place. Memberships, motion references, camera stability
+    // and the clock offset all survive a re-configuration, so a governor
+    // retargeted mid-drag never reads as a torn-down one and quality does not
+    // jump. Only the adaptive tracks restart, which is the point: their
+    // learned budgets measured the targets being replaced.
+    governor.setOptions(wanted);
+  } else {
+    // Switching quality policy entirely: the governor goes away, or comes back.
+    member?.release();
+    member = null;
+    governor?.dispose();
+    governor = wanted === null ? null : createViewGovernor(wanted);
+    // A gesture in progress belongs to the view, not to the instance.
+    if (explicitMotion) {
+      explicitMotion.release();
+      explicitMotion = governor?.beginMotion("explicit") ?? null;
+    }
   }
-  if (!cameraWasStable) governor?.recordCameraChange();
   applyBudgetMode();
 };
 
@@ -1421,26 +1375,41 @@ const scheduleRender = (): void => {
   });
 };
 
+/**
+ * The per-frame report. `governorInputs()` reads held state only: the governor
+ * needs the memory ceiling to bound the aggregate before it splits it, the
+ * projected importance to weight this cloud's share, and the physical work
+ * counts to know whether another frame is still worth painting. `stats()`
+ * would answer all of that too, but by walking the selected and submitted
+ * sets — a diagnostic snapshot no frame should be paying for.
+ */
 const updateMember = (): void => {
   if (!controller || !adapter) return;
-  const cloud = controller.stats();
-  adapter.setResourceCeilingBytes(cloud.memoryBudgetBytes);
-  // The governor needs the memory ceiling to bound the aggregate before it
-  // splits it, and the physical work counts to know whether another frame is
-  // still worth painting.
+  const inputs = controller.governorInputs();
+  adapter.setResourceCeilingBytes(inputs.memoryBudgetBytes);
   member?.update({
     active: true,
-    projectedImportance: cloud.selection.projectedImportance,
-    memoryCeilingPoints: cloud.memoryCeilingPoints,
-    physicalTileOperations: cloud.physicalTileOperations,
-    physicalHierarchyOperations: cloud.physicalHierarchyOperations,
-    workPending: cloud.workPending,
+    projectedImportance: inputs.projectedImportance,
+    memoryCeilingPoints: inputs.memoryCeilingPoints,
+    physicalTileOperations: inputs.physicalTileOperations,
+    physicalHierarchyOperations: inputs.physicalHierarchyOperations,
   });
   fixedMember?.update({
     active: true,
-    projectedImportance: cloud.selection.projectedImportance,
-    memoryCeilingPoints: cloud.memoryCeilingPoints,
+    projectedImportance: inputs.projectedImportance,
+    memoryCeilingPoints: inputs.memoryCeilingPoints,
   });
+};
+
+/**
+ * `workPending` is the one governor input that costs a walk of the selected
+ * set, and it is also the one that cannot change without the controller
+ * reporting a work change — so it rides the `onWorkChange` path instead of the
+ * frame, and a member that has just been registered is told once.
+ */
+const reportWorkPending = (): void => {
+  if (!controller) return;
+  member?.update({ workPending: controller.stats().workPending });
 };
 
 // Every paint the interactor drives ends here — ours and the ones its own
@@ -1459,7 +1428,8 @@ interactor.onRenderEvent(() => {
   const view = cameraView();
   controller?.setCamera(view);
   updateMember();
-  classifyCameraMotion(view);
+  renderedCameras.set(renderer, view);
+  governor?.noteRenderedCameras(renderedCameras, scheduleRender);
   if (startedAt !== null) {
     if (controller) recordFrameRate(lastFrameMs, gpuQueryId);
   }
@@ -1517,8 +1487,10 @@ const disposeCloud = (): void => {
   loadedPointCount = 0;
   framing = null;
   resetFrameRate();
-  // Framing the next cloud is not motion the user asked for.
-  lastRenderedView = null;
+  // Framing the next cloud is not motion the user asked for: this view stops
+  // feeding cameras, so its baseline has to go with it.
+  renderedCameras.clear();
+  governor?.resetMotionBaselines();
 };
 
 const VIEW_ANGLE = 38;
@@ -1718,6 +1690,7 @@ const loadSource = async (
       onDrawPlan: (plan) => adapter?.applyDrawPlan(plan),
       onWorkChange: () => {
         updateMember();
+        reportWorkPending();
         if (governor?.needsFrame()) scheduleRender();
       },
       onError: (error) => {

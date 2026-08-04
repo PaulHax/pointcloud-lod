@@ -276,27 +276,31 @@ changes through `adapter.setDevicePixelRatio(window.devicePixelRatio)`.
 
 These methods are useful when application policy lives outside the library:
 
-| Control                                              | Effect                                                                                                                                                                   |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `controller.setPointBudget(points)`                  | Set the visible-point target directly. Use this instead of a governor for a fixed or externally managed budget.                                                          |
-| `controller.setDensityFraction(fraction)`            | Redistribute that fraction of selected points into parent-closed, importance-ranked tile prefixes without changing selection, I/O, actors, or VBO contents.              |
-| `budget.setPointBudget(points)`                      | Set one fixed aggregate target for every controller registered with a `ViewBudgetCoordinator`.                                                                           |
-| `budget.setDensityFraction(fraction)`                | Thin or restore the aggregate draw target without changing the coordinator's selected-point target.                                                                      |
-| `controller.setPresentation(...)`                    | Switch live between Auto and Fixed point presentation.                                                                                                                   |
-| `controller.setRefinementCutoffPx(pixels)`           | Stop descending when a node's projected spacing is below this threshold. Lower values allow finer traversal; the point and memory budgets still apply.                   |
-| `controller.refresh()`                               | Force immediate reselection against the current camera, useful after external state changes that do not produce a new camera value.                                      |
-| `controller.beginInteraction()` / `endInteraction()` | Mark explicit camera interaction for controller diagnostics and immediate selection. Calls may be nested.                                                                |
-| `governor.beginMotion(kind)`                         | Hold the adaptive budget in its moving-camera regime. Use `"explicit"` for announced gestures and `"inferred"` for playback or programmatic motion detected by the host. |
-| `governor.recordCameraChange()`                      | Report a rendered-camera change. The governor owns the trailing camera-stability timer.                                                                                  |
-| `adapter.setPointDiameterCssPx(pixels)`              | Set point size outside the controller. Omit `onPointDiameterCssPx` when the application owns this value so two policies do not compete.                                  |
-| `adapter.setDevicePixelRatio(ratio)`                 | Update CSS-to-framebuffer scaling without changing selection or the CSS point diameter.                                                                                  |
-| `adapter.setDensityFraction(fraction)`               | Apply progressive prefix drawing directly when policy lives outside the controller.                                                                                      |
-| `adapter.setResourceCeilingBytes(bytes)`             | Bound GPU resources retained in the adapter's actor-reuse pool. A host can feed it the controller's current `memoryBudgetBytes`.                                         |
-| `adapter.setVisible(false)`                          | Hide drawing only. Actors, GPU resources, selection, and streaming remain live for an immediate show.                                                                    |
-| `controller.setActive(false)`                        | Stop selection and tile fetches, emit removals that move actors into the bounded adapter pool, and retain decoded payloads in the bounded CPU cache.                     |
-| `controller.setSource(source)`                       | Replace the dataset or revision, dropping old hierarchy, residency, cache, and pending results before bootstrapping the new source.                                      |
-| `controller.governorInputs()`                        | The five numbers a governor member and an adapter resource ceiling need, read straight from held state. Prefer it to `stats()` on a per-frame path.                      |
-| `adapter.setBaseMatrix(matrix)`                      | Apply or update the registration transform without rebuilding tile payloads.                                                                                             |
+| Control                                               | Effect                                                                                                                                                                     |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `controller.setPointBudget(points)`                   | Set the visible-point target directly. Use this instead of a governor for a fixed or externally managed budget.                                                            |
+| `controller.setDensityFraction(fraction)`             | Redistribute that fraction of selected points into parent-closed, importance-ranked tile prefixes without changing selection, I/O, actors, or VBO contents.                |
+| `budget.setPointBudget(points)`                       | Set one fixed aggregate target for every controller registered with a `ViewBudgetCoordinator`.                                                                             |
+| `budget.setDensityFraction(fraction)`                 | Thin or restore the aggregate draw target without changing the coordinator's selected-point target.                                                                        |
+| `controller.setPresentation(...)`                     | Switch live between Auto and Fixed point presentation.                                                                                                                     |
+| `controller.setRefinementCutoffPx(pixels)`            | Stop descending when a node's projected spacing is below this threshold. Lower values allow finer traversal; the point and memory budgets still apply.                     |
+| `controller.refresh()`                                | Force immediate reselection against the current camera, useful after external state changes that do not produce a new camera value.                                        |
+| `controller.beginInteraction()` / `endInteraction()`  | Mark explicit camera interaction for controller diagnostics and immediate selection. Calls may be nested.                                                                  |
+| `governor.beginMotion(kind)`                          | Hold the adaptive budget in its moving-camera regime. Use `"explicit"` for announced gestures and `"inferred"` for playback or programmatic motion detected by the host.   |
+| `governor.recordCameraChange()`                       | Report a rendered-camera change directly. The governor owns the trailing camera-stability timer. Prefer `noteRenderedCameras()`, which infers this.                        |
+| `governor.noteRenderedCameras(views, scheduleRender)` | Hand the governor the camera each view actually rendered, keyed by anything stable, and let it classify the motion. Covers playback, scrubbing and programmatic motion.    |
+| `governor.resetMotionBaselines()`                     | Forget those baselines when a view stops feeding cameras, so its next one is a baseline again rather than every metre travelled since.                                     |
+| `governor.setOptions(options)`                        | Re-target a running governor. Memberships, motion references and camera stability survive; only the adaptive tracks restart. An unusable value throws and changes nothing. |
+| `adapter.setPointDiameterCssPx(pixels)`               | Set point size outside the controller. Omit `onPointDiameterCssPx` when the application owns this value so two policies do not compete.                                    |
+| `adapter.setDevicePixelRatio(ratio)`                  | Update CSS-to-framebuffer scaling without changing selection or the CSS point diameter.                                                                                    |
+| `adapter.setDensityFraction(fraction)`                | Apply progressive prefix drawing directly when policy lives outside the controller.                                                                                        |
+| `adapter.setResourceCeilingBytes(bytes)`              | Bound GPU resources retained in the adapter's actor-reuse pool. A host can feed it the controller's current `memoryBudgetBytes`.                                           |
+| `adapter.setVisible(false)`                           | Hide drawing only. Actors, GPU resources, selection, and streaming remain live for an immediate show.                                                                      |
+| `controller.setActive(false)`                         | Stop selection and tile fetches, emit removals that move actors into the bounded adapter pool, and retain decoded payloads in the bounded CPU cache.                       |
+| `controller.setSource(source)`                        | Replace the dataset or revision, dropping old hierarchy, residency, cache, and pending results before bootstrapping the new source.                                        |
+| `controller.governorInputs()`                         | The five numbers a governor member and an adapter resource ceiling need, read straight from held state. Prefer it to `stats()` on a per-frame path.                        |
+| `controller.setModelMatrix(matrix)`                   | The transform the tiles draw under, so cameras and picks are given in world coordinates. Must be a similarity; an unchanged matrix is a no-op, so forward it every pass.   |
+| `adapter.setBaseMatrix(matrix)`                       | Apply or update the registration transform without rebuilding tile payloads. Pair it with `controller.setModelMatrix()` so selection and drawing agree.                    |
 
 The main dials and their tradeoffs are:
 
@@ -557,18 +561,27 @@ governor.recordTransientFrame({ hostFrameMs, vtkFrameMs });
 governor.recordCapacitySample({ frameMs: gpuMs, regime, eligible });
 if (governor.needsFrame()) scheduleRender();
 
-// Feed the split and the diagnostics from the controller's own statistics:
+// Feed the split from `governorInputs()`, which reads held state only. Run it
+// on every frame: `stats()` answers the same questions but walks the selected
+// and submitted sets to do it.
 const updateMember = () => {
-  const stats = controller.stats();
+  const inputs = controller.governorInputs();
   member.update({
-    projectedImportance: stats.selection.projectedImportance,
-    memoryCeilingPoints: stats.memoryCeilingPoints,
-    physicalTileOperations: stats.physicalTileOperations,
-    physicalHierarchyOperations: stats.physicalHierarchyOperations,
-    workPending: stats.workPending,
+    projectedImportance: inputs.projectedImportance,
+    memoryCeilingPoints: inputs.memoryCeilingPoints,
+    physicalTileOperations: inputs.physicalTileOperations,
+    physicalHierarchyOperations: inputs.physicalHierarchyOperations,
   });
+  adapter.setResourceCeilingBytes(inputs.memoryBudgetBytes);
 };
 updateMember();
+
+// `workPending` is the one member field that costs the selected-set walk, and
+// it cannot change without the controller reporting a work change — so report
+// it from `onWorkChange`, not from the frame.
+const reportWorkPending = () => {
+  member.update({ workPending: controller.stats().workPending });
+};
 
 // Hold the moving regime while the camera moves. References compose across
 // sources and the regime ends only when the last one is released, so an
@@ -576,14 +589,28 @@ updateMember();
 const gesture = governor.beginMotion("explicit");
 controller.beginInteraction();
 // ...camera moves...
-governor.recordCameraChange();
 gesture.release();
 controller.endInteraction();
 
 // Motion the host cannot announce — playback, scrubbing, programmatic
-// animation — is inferred by comparing the camera actually handed to LOD from
-// frame to frame and calling recordCameraChange(). A scene change with an
-// unchanged camera is not motion.
+// animation — is classified by the governor. Hand it the camera each view
+// actually rendered, once per rendered frame, keyed by anything stable:
+governor.noteRenderedCameras(new Map([[renderer, view]]), scheduleRender);
+// It owns the jitter epsilon, ignores the clip-z row a host rewrites when
+// tiles arrive, holds one inferred motion reference for the whole burst, and
+// releases it after the debounce — asking for one frame back, because the
+// settled regime cannot refine quality it never measures. A scene change with
+// an unchanged camera is not motion.
+
+// When a view stops feeding cameras, drop its baseline. Otherwise the first
+// camera after it returns is compared against one from before it left, and all
+// the travel between reads as a gesture nobody made.
+governor.resetMotionBaselines();
+
+// Re-target a running governor rather than replacing it. Memberships, motion
+// references and camera stability survive; only the adaptive tracks restart,
+// because their learned budgets measured the targets being replaced.
+governor.setOptions({ interactionTargetMs: 16, stationaryTargetMs: 33 });
 
 // Drop a controller out of the split without disposing it:
 member.update({ active: false });
@@ -591,10 +618,11 @@ member.release();
 governor.dispose();
 ```
 
-Pass a callback that runs `updateMember()` as the controller's `onWorkChange`
-when constructing it. If that update makes `governor.needsFrame()` true, call
-`scheduleRender()`. Pending I/O alone does not dirty the current pixels, but
-its completion may make clean capacity measurement useful again.
+Pass a callback that runs `updateMember()` and `reportWorkPending()` as the
+controller's `onWorkChange` when constructing it. If that update makes
+`governor.needsFrame()` true, call `scheduleRender()`. Pending I/O alone does
+not dirty the current pixels, but its completion may make clean capacity
+measurement useful again.
 
 `governor.stats()` explains any drawn point count without reading internal
 state: the regime and what is holding it, the target frame time, the recent
