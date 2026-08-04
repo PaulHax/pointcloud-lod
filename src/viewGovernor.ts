@@ -11,6 +11,7 @@
 
 import {
   createAdaptiveBudget,
+  DEFAULTS,
   type AdaptiveBudget,
   type AdaptiveBudgetOptions,
   type BudgetAdjustment,
@@ -175,6 +176,16 @@ export type ViewGovernorStats = {
 export type ViewGovernor = {
   register(options: ViewGovernorMemberOptions): ViewGovernorMember;
   /**
+   * Replace the governor's options wholesale — an absent field means the same
+   * default it means at construction, and identical options are a no-op.
+   * A change restarts both adaptive tracks fresh, because their learned
+   * budgets measured the old configuration; memberships, motion references,
+   * camera-stability state and the host clock offset all survive, so a
+   * re-configured view never reads as a torn-down one. An unusable value
+   * throws and leaves the governor exactly as it was.
+   */
+  setOptions(options?: ViewGovernorOptions): void;
+  /**
    * Hold the moving regime. References are counted across kinds, so
    * overlapping pointer, wheel, playback, and programmatic motion compose and
    * the regime ends only when the last of them is released.
@@ -241,12 +252,53 @@ const EMERGENCY_CONSECUTIVE_FRAMES = 2;
  */
 const INTERACTION_SEED_OF_STATIONARY = 0.25;
 
-export const createViewGovernor = (
-  options: ViewGovernorOptions = {},
-): ViewGovernor => {
+/** Governor-level defaults, beside the adaptive loop's own `DEFAULTS`. */
+const GOVERNOR_DEFAULTS = {
+  vtkFrameFraction: 0.7,
+  interactionSettleMs: 750,
+} as const;
+
+/**
+ * Every option resolved to the value it configures, `maxBudget`'s absence
+ * resolved to null. Two option bags that resolve equal configure the same
+ * governor, whether a field was stated or defaulted — which is what makes
+ * `setOptions` with an equivalent bag a no-op instead of a track reset.
+ */
+const RESOLVED_OPTION_DEFAULTS = {
+  ...DEFAULTS,
+  maxBudget: null,
+  ...GOVERNOR_DEFAULTS,
+} as const;
+
+const sameOptions = (a: ViewGovernorOptions, b: ViewGovernorOptions): boolean =>
+  (
+    Object.keys(RESOLVED_OPTION_DEFAULTS) as (keyof ViewGovernorOptions)[]
+  ).every(
+    (key) =>
+      (a[key] ?? RESOLVED_OPTION_DEFAULTS[key]) ===
+      (b[key] ?? RESOLVED_OPTION_DEFAULTS[key]),
+  );
+
+type GovernorConfiguration = {
+  vtkFrameFraction: number;
+  interactionSettleMs: number;
+  budget: AdaptiveBudget;
+  /** Read back from the loop rather than re-defaulted, so the two cannot drift. */
+  configuredMaxPoints: number | null;
+  emergencyCooldownMs: number;
+};
+
+/**
+ * Validate one options bag and build the adaptive loop it asks for. Everything
+ * that can throw happens in here, before any governor state is touched — a
+ * bad `setOptions` bag must leave the running configuration intact.
+ */
+const resolveConfiguration = (
+  options: ViewGovernorOptions,
+): GovernorConfiguration => {
   const {
-    vtkFrameFraction: rawVtkFraction = 0.7,
-    interactionSettleMs: rawSettleMs = 750,
+    vtkFrameFraction: rawVtkFraction = GOVERNOR_DEFAULTS.vtkFrameFraction,
+    interactionSettleMs: rawSettleMs = GOVERNOR_DEFAULTS.interactionSettleMs,
     ...budgetOptions
   } = options;
   const vtkFrameFraction = finiteWithin(
@@ -260,12 +312,29 @@ export const createViewGovernor = (
     rawSettleMs,
     0,
   );
-  const budget: AdaptiveBudget = createAdaptiveBudget(budgetOptions);
-  // Configuration, so these are fixed for the governor's life. The cooldown is
-  // read back from the loop instead of re-defaulted here, so the two cannot
-  // drift apart.
+  const budget = createAdaptiveBudget(budgetOptions);
   const { maxBudget: configuredMaxPoints, cooldownMs: emergencyCooldownMs } =
     budget.stats();
+  return {
+    vtkFrameFraction,
+    interactionSettleMs,
+    budget,
+    configuredMaxPoints,
+    emergencyCooldownMs,
+  };
+};
+
+export const createViewGovernor = (
+  options: ViewGovernorOptions = {},
+): ViewGovernor => {
+  let appliedOptions: ViewGovernorOptions = { ...options };
+  let {
+    vtkFrameFraction,
+    interactionSettleMs,
+    budget,
+    configuredMaxPoints,
+    emergencyCooldownMs,
+  } = resolveConfiguration(options);
   const viewBudget = createViewBudgetCoordinator({
     pointBudget: budget.budget(false),
   });
@@ -575,6 +644,34 @@ export const createViewGovernor = (
           distribute();
         },
       };
+    },
+
+    setOptions(next = {}) {
+      if (disposed || sameOptions(appliedOptions, next)) return;
+      // Resolve first: this is where unusable values throw, and they must do
+      // so before the running configuration has been touched.
+      const configuration = resolveConfiguration(next);
+      appliedOptions = { ...next };
+      ({
+        vtkFrameFraction,
+        interactionSettleMs,
+        budget,
+        configuredMaxPoints,
+        emergencyCooldownMs,
+      } = configuration);
+      // The replaced loop's history measured the old configuration: emergency
+      // bookkeeping and the capacity-sample tallies restart with it. The host
+      // clock offset survives — the host's timeline did not change.
+      emergencyStreak = 0;
+      emergencyCooldownUntil = Number.NEGATIVE_INFINITY;
+      lastEmergencyCutAt = Number.NEGATIVE_INFINITY;
+      eligibleCapacitySamples = 0;
+      rejectedCapacitySamples = 0;
+      lastCapacitySampleEligible = null;
+      // Memberships and motion references were not disturbed, so the fresh
+      // tracks re-enter the regime the view is actually in.
+      if (interacting()) enterInteraction();
+      else distribute();
     },
 
     beginMotion(kind) {

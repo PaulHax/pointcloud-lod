@@ -1285,3 +1285,86 @@ describe("createViewGovernor numeric configuration", () => {
     expect(governor.needsFrame()).toBe(false);
   });
 });
+
+describe("createViewGovernor reconfiguration", () => {
+  it("applies new options in place: members and their allocations survive", () => {
+    const governor = createViewGovernor({
+      initialBudget: 1_000_000,
+      maxBudget: 1_000_000,
+    });
+    const a = vi.fn();
+    const b = vi.fn();
+    governor.register(memberOptions(a)).update({ projectedImportance: 1 });
+    governor.register(memberOptions(b)).update({ projectedImportance: 3 });
+
+    governor.setOptions({ initialBudget: 400_000, maxBudget: 400_000 });
+
+    const stats = governor.stats();
+    expect(stats.configuredMaxPoints).toBe(400_000);
+    expect(stats.activeMembers).toBe(2);
+    expect(a).toHaveBeenLastCalledWith(100_000);
+    expect(b).toHaveBeenLastCalledWith(300_000);
+  });
+
+  it("keeps motion references and the moving regime across an options change", () => {
+    const governor = createViewGovernor({ interactionTargetMs: 16 });
+    const motion = governor.beginMotion("explicit");
+    governor.setOptions({ interactionTargetMs: 8 });
+
+    const stats = governor.stats();
+    expect(stats.regime).toBe("interaction");
+    expect(stats.motion.explicitReferences).toBe(1);
+    expect(stats.targetFrameTimeMs).toBe(8);
+
+    motion.release();
+    expect(governor.stats().regime).toBe("stationary");
+  });
+
+  it("restarts the adaptive tracks: budgets learned under old options reset", () => {
+    const governor = createViewGovernor(FAST_ADAPT);
+    governor.register(memberOptions(vi.fn()));
+    frames(governor, 5, 8);
+    expect(governor.stats().trackBudget).toBeGreaterThan(1_000_000);
+    expect(governor.stats().capacitySamples.eligible).toBe(8);
+
+    governor.setOptions({ ...FAST_ADAPT, stationaryTargetMs: 50 });
+
+    const stats = governor.stats();
+    expect(stats.trackBudget).toBe(1_000_000);
+    expect(stats.targetFrameTimeMs).toBe(50);
+    expect(stats.capacitySamples.eligible).toBe(0);
+    expect(stats.samples).toBe(0);
+  });
+
+  it("treats an equivalent options bag as a no-op, stated or defaulted", () => {
+    const governor = createViewGovernor(FAST_ADAPT);
+    governor.register(memberOptions(vi.fn()));
+    frames(governor, 5, 8);
+    const learned = governor.stats().trackBudget;
+    expect(learned).toBeGreaterThan(1_000_000);
+
+    // Same configuration twice over: field-for-field, and with a default
+    // (windowSize) stated explicitly. Neither may reset the learned track.
+    governor.setOptions({ ...FAST_ADAPT });
+    governor.setOptions({ ...FAST_ADAPT, windowSize: 30 });
+
+    expect(governor.stats().trackBudget).toBe(learned);
+    expect(governor.stats().capacitySamples.eligible).toBe(8);
+  });
+
+  it("throws on an unusable option and leaves the governor untouched", () => {
+    const governor = createViewGovernor(FAST_ADAPT);
+    governor.register(memberOptions(vi.fn()));
+    frames(governor, 5, 8);
+    const before = governor.stats();
+
+    expect(() => governor.setOptions({ interactionTargetMs: -1 })).toThrow(
+      /^interactionTargetMs/,
+    );
+
+    const after = governor.stats();
+    expect(after.trackBudget).toBe(before.trackBudget);
+    expect(after.targetFrameTimeMs).toBe(before.targetFrameTimeMs);
+    expect(after.capacitySamples).toEqual(before.capacitySamples);
+  });
+});
