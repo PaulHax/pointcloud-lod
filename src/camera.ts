@@ -407,3 +407,111 @@ export const cameraMoved = (
   const after = cameraMotionScalars(next);
   return before.some((value, index) => movedBeyondJitter(value, after[index]!));
 };
+
+/**
+ * A model transform tiles draw under, resolved once: the matrix, its inverse,
+ * and the uniform scale of the similarity. The frustum/SSE math in this
+ * module assumes a uniform-scale transform — an affine bottom row, orthogonal
+ * columns, equal column lengths — so a matrix that is not a similarity has no
+ * usable frame and resolves to null.
+ */
+export type ModelFrame = {
+  readonly matrix: readonly number[];
+  readonly inverse: readonly number[];
+  readonly scale: number;
+};
+
+/**
+ * The uniform scale of a similarity transform, or null when the matrix is
+ * not one.
+ */
+const similarityScale = (m: Mat16): number | null => {
+  if (m.length !== 16) return null;
+  for (let index = 0; index < 16; index += 1) {
+    if (!Number.isFinite(m[index]!)) return null;
+  }
+  if (
+    Math.abs(m[3]!) > 1e-9 ||
+    Math.abs(m[7]!) > 1e-9 ||
+    Math.abs(m[11]!) > 1e-9 ||
+    Math.abs(m[15]! - 1) > 1e-9
+  ) {
+    return null;
+  }
+  const columns: Vec3[] = [
+    [m[0]!, m[1]!, m[2]!],
+    [m[4]!, m[5]!, m[6]!],
+    [m[8]!, m[9]!, m[10]!],
+  ];
+  const lengths = columns.map((column) => Math.hypot(...column));
+  const scale = lengths[0]!;
+  const tolerance = Math.max(1e-9, scale * 1e-6);
+  if (
+    !finitePositive(scale) ||
+    lengths.some((length) => Math.abs(length - scale) > tolerance)
+  ) {
+    return null;
+  }
+  for (let left = 0; left < 3; left += 1) {
+    for (let right = left + 1; right < 3; right += 1) {
+      const dot = columns[left]!.reduce(
+        (sum, value, axis) => sum + value * columns[right]![axis]!,
+        0,
+      );
+      if (Math.abs(dot) > scale * tolerance) return null;
+    }
+  }
+  return scale;
+};
+
+/** Column-major product `a × b`. */
+const multiply4 = (a: Mat16, b: Mat16): number[] => {
+  const out = new Array<number>(16);
+  for (let column = 0; column < 4; column += 1) {
+    for (let row = 0; row < 4; row += 1) {
+      out[column * 4 + row] =
+        a[row]! * b[column * 4]! +
+        a[4 + row]! * b[column * 4 + 1]! +
+        a[8 + row]! * b[column * 4 + 2]! +
+        a[12 + row]! * b[column * 4 + 3]!;
+    }
+  }
+  return out;
+};
+
+/** Apply an affine column-major matrix to a point. */
+export const transformPointBy = (m: Mat16, point: Vec3): Vec3 => [
+  m[0]! * point[0] + m[4]! * point[1] + m[8]! * point[2] + m[12]!,
+  m[1]! * point[0] + m[5]! * point[1] + m[9]! * point[2] + m[13]!,
+  m[2]! * point[0] + m[6]! * point[1] + m[10]! * point[2] + m[14]!,
+];
+
+/** Resolve a model matrix into a frame, or null when it is not a similarity. */
+export const modelFrameOf = (m: Mat16): ModelFrame | null => {
+  const scale = similarityScale(m);
+  if (scale === null) return null;
+  const inverse = invert4(m);
+  if (inverse === null) return null;
+  return { matrix: Array.from(m), inverse, scale };
+};
+
+/**
+ * Restate a world camera in the model's local frame, where the octree's
+ * bounds and spacings live. Perspective screen-space error is a ratio of two
+ * lengths, so the uniform model scale cancels out of it. Parallel projection
+ * has no such ratio: parallelScale is an absolute world height and must be
+ * restated in model units alongside the spacings it is compared against.
+ */
+export const viewInModelFrame = (
+  view: CameraView,
+  frame: ModelFrame,
+): CameraView => {
+  const local = {
+    ...view,
+    viewProj: multiply4(view.viewProj, frame.matrix),
+    position: transformPointBy(frame.inverse, view.position),
+  };
+  return local.projection === "orthographic"
+    ? { ...local, parallelScale: local.parallelScale / frame.scale }
+    : local;
+};

@@ -2899,6 +2899,61 @@ describe("createLodController — pickPoint", () => {
   const pickCenter = (controller: LodController, view: CameraView = VIEW) =>
     controller.pickPoint(view, 50, 50);
 
+  // Rotation by 90 degrees about z, uniform scale 2, small translation:
+  // model-local origin lands at world (0.5, 0.2, 0), which the identity
+  // view-projection puts at css (75, 40) on the 100x100 viewport.
+  // prettier-ignore
+  const SIMILARITY = [
+    0, 2, 0, 0,
+    -2, 0, 0, 0,
+    0, 0, 2, 0,
+    0.5, 0.2, 0, 1,
+  ];
+  // Anisotropic scale: not a similarity, so the camera restatement refuses it.
+  // prettier-ignore
+  const NON_SIMILARITY = [
+    1, 0, 0, 0,
+    0, 2, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1,
+  ];
+
+  it("solves through the model matrix and answers in world coordinates", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await bootAndLand(controller, deferred);
+
+    controller.setModelMatrix(SIMILARITY);
+    const result = controller.pickPoint(VIEW, 75, 40);
+    expect(result?.status).toBe("hit");
+    if (result?.status !== "hit") throw new Error("unreachable");
+    expect(result.pointOnRay[0]).toBeCloseTo(0.5);
+    expect(result.pointOnRay[1]).toBeCloseTo(0.2);
+    expect(result.pointOnRay[2]).toBeCloseTo(0);
+    // A pick from elsewhere in the viewport supports through an outer radius
+    // bucket, and its pointOnRay lies on the WORLD cursor ray — for the
+    // identity view-projection, the z axis — at the supported depth.
+    const offCenter = controller.pickPoint(VIEW, 50, 50);
+    expect(offCenter?.status).toBe("hit");
+    if (offCenter?.status !== "hit") throw new Error("unreachable");
+    expect(offCenter.pointOnRay[0]).toBeCloseTo(0);
+    expect(offCenter.pointOnRay[1]).toBeCloseTo(0);
+    expect(offCenter.distancePx).toBeGreaterThan(20);
+    controller.dispose();
+  });
+
+  it("an unusable model matrix parks picks until a usable one arrives", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await bootAndLand(controller, deferred);
+    expect(pickCenter(controller)?.status).toBe("hit");
+
+    controller.setModelMatrix(NON_SIMILARITY);
+    expect(pickCenter(controller)).toBeNull();
+
+    controller.setModelMatrix(null);
+    expect(pickCenter(controller)?.status).toBe("hit");
+    controller.dispose();
+  });
+
   it("hits over the submitted tile set, on the cursor ray", async () => {
     const { controller, deferred } = makeController(SMALL_TREE);
     await bootAndLand(controller, deferred);

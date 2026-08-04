@@ -13,9 +13,14 @@
 
 import {
   frustumPlanes,
+  modelFrameOf,
   nodeScreenSpaceError,
   boundsIntersectsFrustum,
+  transformPointBy,
+  viewInModelFrame,
   type CameraView,
+  type Mat16,
+  type ModelFrame,
   type Plane,
 } from "./camera";
 import { selectNodes } from "./budget";
@@ -326,9 +331,23 @@ export type LodDrawPlanStats = {
 export type LodController = {
   /**
    * Update the camera; selection reruns debounced (leading edge immediate).
-   * A view with any non-finite number is ignored.
+   * A view with any non-finite number is ignored. With a model matrix set,
+   * the view is in world coordinates and the controller restates it in the
+   * tiles' local frame itself; while the current model matrix is unusable
+   * (not a similarity), camera updates are held and the last good view stays
+   * in force.
    */
   setCamera(view: CameraView): void;
+  /**
+   * The transform the tiles draw under (the host actor's model/user matrix),
+   * or null for identity. The controller's frustum/SSE math needs a
+   * uniform-scale transform, so a matrix that is not a similarity marks the
+   * transform unusable: selection holds the last good camera and picks are
+   * unavailable until a usable matrix arrives. An unchanged matrix is a
+   * no-op, so hosts can forward it every pass; a change re-derives the
+   * camera restatement once, not per frame.
+   */
+  setModelMatrix(matrix: Mat16 | null): void;
   /** Enter a camera interaction. Nested calls are reference counted. */
   beginInteraction(): void;
   /** Leave a camera interaction. Camera stability belongs to the view governor. */
@@ -380,12 +399,15 @@ export type LodController = {
    * Read-only pick against exactly the tile set last handed to the consumer
    * (`submitted` plus each tile's hierarchy bounds) — never `resident`, which
    * can run ahead of a pending renderer flush, and never the decoded cache.
-   * The view and cursor are in the same coordinates `setCamera` takes:
-   * whatever space the tiles live in, with the cursor in renderer-local css
-   * pixels.
+   * The view and cursor are in the same coordinates `setCamera` takes —
+   * world coordinates when a model matrix is set — with the cursor in
+   * renderer-local css pixels. A hit's `pointOnRay` comes back in those same
+   * world coordinates: the controller solves on the model-local ray and
+   * transforms the answer back through the model matrix itself.
    *
    * Returns null when the query is unavailable — inactive or disposed
-   * controller, an invalid view, unusable viewport dimensions, a singular
+   * controller, an invalid view, an unusable (non-similarity) model matrix,
+   * unusable viewport dimensions, a singular
    * view-projection, or a non-finite cursor. A valid sweep that supports
    * nothing is `{status: "miss"}`, never null: only an explicit miss tells a
    * caller its fallback is authorized.
@@ -674,7 +696,21 @@ export const createLodController = (
       ? presentation.diameterCssPx
       : INITIAL_AUTO_DIAMETER_CSS_PX;
   let active = options.active ?? true;
+  /** The camera in the tiles' local frame — what all selection math reads. */
   let view: CameraView | null = null;
+  /** The camera as the host supplied it, kept to re-derive `view` when the
+   * model matrix changes. */
+  let worldView: CameraView | null = null;
+  /**
+   * The model transform tiles draw under, resolved once per change: the
+   * matrix as applied (for the no-op guard), the frame (inverse + uniform
+   * scale), and whether the current matrix is usable at all. Restating the
+   * camera is the only per-frame cost left — everything matrix-derived is
+   * cached here.
+   */
+  let appliedModelMatrix: number[] | null = null;
+  let modelFrame: ModelFrame | null = null;
+  let modelMatrixUsable = true;
   let disposed = false;
   onPointDiameterCssPx(diameterCssPx);
 
@@ -1786,14 +1822,41 @@ export const createLodController = (
   // waits until activation so a hidden cloud performs no hierarchy I/O.
   if (active) queueRootPage();
 
+  const sameMatrix = (
+    a: readonly number[] | null,
+    b: Mat16 | null,
+  ): boolean => {
+    if (a === null || b === null) return a === null && b === null;
+    if (a.length !== b.length) return false;
+    for (let index = 0; index < a.length; index += 1) {
+      if (a[index] !== b[index]) return false;
+    }
+    return true;
+  };
+
+  /** Adopt the local restatement of the stored world camera, if usable. */
+  const applyWorldView = (): void => {
+    if (worldView === null || !modelMatrixUsable) return;
+    view = modelFrame ? viewInModelFrame(worldView, modelFrame) : worldView;
+    sseByKey.clear();
+    if (active) requestSelection();
+  };
+
   return {
     setCamera(nextView) {
       if (disposed || !isFiniteView(nextView)) return;
-      if (view !== null && sameView(view, nextView)) return;
-      view = nextView;
-      sseByKey.clear();
-      if (!active) return;
-      requestSelection();
+      if (worldView !== null && sameView(worldView, nextView)) return;
+      worldView = nextView;
+      applyWorldView();
+    },
+
+    setModelMatrix(matrix) {
+      if (disposed || sameMatrix(appliedModelMatrix, matrix ?? null)) return;
+      appliedModelMatrix = matrix ? Array.from(matrix) : null;
+      modelFrame = matrix ? modelFrameOf(matrix) : null;
+      modelMatrixUsable =
+        matrix === null || matrix === undefined ? true : modelFrame !== null;
+      applyWorldView();
     },
 
     beginInteraction() {
@@ -2000,6 +2063,10 @@ export const createLodController = (
 
     pickPoint(pickView, cursorXCssPx, cursorYCssPx) {
       if (disposed || !active || !isFiniteView(pickView)) return null;
+      if (!modelMatrixUsable) return null;
+      const localView = modelFrame
+        ? viewInModelFrame(pickView, modelFrame)
+        : pickView;
       const tiles: PickTile[] = [];
       for (const [keyString, tile] of submitted) {
         const pointCount = Math.min(
@@ -2014,7 +2081,20 @@ export const createLodController = (
           bounds: hierarchy.get(keyString)?.bounds,
         });
       }
-      return pickPointInTiles(pickView, cursorXCssPx, cursorYCssPx, tiles);
+      const result = pickPointInTiles(
+        localView,
+        cursorXCssPx,
+        cursorYCssPx,
+        tiles,
+      );
+      // The sweep solved on the model-local ray; hand the answer back in the
+      // caller's world coordinates through the same matrix.
+      return result?.status === "hit" && modelFrame
+        ? {
+            ...result,
+            pointOnRay: transformPointBy(modelFrame.matrix, result.pointOnRay),
+          }
+        : result;
     },
 
     activeKeys: () => ({
