@@ -50,9 +50,12 @@ export type TileData = {
   /** World-space origin the tile-local positions are relative to. */
   readonly origin: Vec3;
   /**
-   * Tile-local xyz triplets, `3 * pointCount` floats. The controller puts
-   * these and all point attributes into deterministic progressive order before
-   * renderer submission, so drawing any prefix remains spatially representative.
+   * Tile-local xyz triplets, `3 * pointCount` floats, in progressive order:
+   * every prefix has to be a spatially representative sample of the node,
+   * because that is exactly what progressive drawing puts on the screen. LAS
+   * and COPC record order promises no such thing, so a source that does not
+   * already have one applies {@link orderTileForProgressiveDrawing} to the
+   * payload it decoded — see {@link TileSource.loadTile}.
    */
   readonly positions: Float32Array;
   /** Optional per-point color, `3 * pointCount` bytes (RGB). */
@@ -86,7 +89,12 @@ export type TileSource = {
    * root key). May return entries for several levels at once.
    */
   nodes(key: VoxelKey, opts?: LoadOptions): Promise<NodeInfo[]>;
-  /** Fetch and decode one node's points. */
+  /**
+   * Fetch and decode one node's points, in the progressive order
+   * {@link TileData.positions} describes. Ordering belongs to the source
+   * because that is where the payload is already being touched — for a
+   * worker-backed source, off the main thread and before transfer.
+   */
   loadTile(key: VoxelKey, opts?: LoadOptions): Promise<TileData>;
   /** Release source-owned resources such as a decoding worker. The host owns this lifetime. */
   dispose?(): void;

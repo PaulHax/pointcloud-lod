@@ -156,8 +156,23 @@ const openStub = async (asset: StubAsset): Promise<TileSource> => {
   return source;
 };
 
+/**
+ * Colors as a sorted set of per-point triplets. A source delivers its points
+ * in progressive order — a deterministic permutation of the file's record
+ * order — and every rule asserted here is about a point's own channels, not
+ * about where in the tile that point landed.
+ */
+const rgbPoints = (channels: ArrayLike<number> | undefined): string[] => {
+  const values = Array.from(channels ?? []);
+  const triplets: string[] = [];
+  for (let index = 0; index + 2 < values.length; index += 3) {
+    triplets.push(values.slice(index, index + 3).join(","));
+  }
+  return triplets.sort();
+};
+
 const loadRgb = async (source: TileSource, key: string) =>
-  (await source.loadTile(keyFromString(key))).rgb;
+  rgbPoints((await source.loadTile(keyFromString(key))).rgb);
 
 /**
  * The `reg-ui` HTTP tile service rule, transcribed from
@@ -383,11 +398,11 @@ describe("createCopcTileSource", () => {
         view.getter("Green"),
         view.getter("Blue"),
       ];
-      for (let i = 0; i < Math.min(tile.pointCount, 40); i += 1) {
-        for (const [channel, get] of raw.entries()) {
-          expect(tile.rgb![i * 3 + channel]).toBe(get(i) >> 8);
-        }
+      const shifted: number[] = [];
+      for (let i = 0; i < tile.pointCount; i += 1) {
+        for (const get of raw) shifted.push(get(i) >> 8);
       }
+      expect(rgbPoints(tile.rgb)).toEqual(rgbPoints(shifted));
     }
   });
 
@@ -487,7 +502,7 @@ describe("createCopcTileSource RGB depth", () => {
   // decides no shift: the small ones must survive untouched, the large ones
   // must clip rather than wrap round to near-black.
   const MIXED = [40000, 200, 42000, 30, 400, 50];
-  const MIXED_CLIPPED = new Uint8Array([255, 200, 255, 30, 255, 50]);
+  const MIXED_CLIPPED = [255, 200, 255, 30, 255, 50];
   const NEIGHBOURS: StubAsset = {
     pointDataRecordFormat: 2,
     nodes: {
@@ -500,33 +515,54 @@ describe("createCopcTileSource RGB depth", () => {
   it("leaves an 8-bit cloud unshifted", async () => {
     const source = await openStub(EIGHT_BIT);
     expect(await loadRgb(source, "0-0-0-0")).toEqual(
-      new Uint8Array([10, 20, 30, 250, 240, 230]),
+      rgbPoints([10, 20, 30, 250, 240, 230]),
     );
     expect(await loadRgb(source, "1-0-0-0")).toEqual(
-      new Uint8Array([7, 8, 9, 128, 129, 130]),
+      rgbPoints([7, 8, 9, 128, 129, 130]),
     );
   });
 
   it("shifts a full-range 16-bit cloud by eight bits", async () => {
     const source = await openStub(FULL_RANGE);
     expect(await loadRgb(source, "0-0-0-0")).toEqual(
-      new Uint8Array([0, 128, 255, 16, 32, 64]),
+      rgbPoints([0, 128, 255, 16, 32, 64]),
     );
     expect(await loadRgb(source, "1-0-0-0")).toEqual(
-      new Uint8Array([255, 128, 1, 0, 0, 0]),
+      rgbPoints([255, 128, 1, 0, 0, 0]),
     );
   });
 
   it("gives neighbouring dark and bright nodes the same shift", async () => {
     const source = await openStub(NEIGHBOURS);
     const shifted = (channels: number[]) =>
-      Uint8Array.from(channels, (c) => c >> 8);
+      rgbPoints(channels.map((c) => c >> 8));
     const dark = await loadRgb(source, "1-0-0-0");
     expect(dark).toEqual(shifted(DARK));
     expect(await loadRgb(source, "1-1-0-0")).toEqual(shifted(BRIGHT));
     // Deciding from this node's own maximum would have left it unshifted and
     // banded it against its neighbour.
-    expect(dark).not.toEqual(Uint8Array.from(DARK));
+    expect(dark).not.toEqual(rgbPoints(DARK));
+  });
+
+  it("delivers tile points in progressive order, not record order", async () => {
+    // LAS record order says nothing about spatial coverage, so the source
+    // owes its caller an order whose every prefix samples the whole node.
+    const points = Array.from({ length: 64 }, (_, index) => index);
+    const source = await openStub({
+      pointDataRecordFormat: 2,
+      nodes: {
+        "0-0-0-0": { pointCount: 1, channels: [1, 2, 3] },
+        "1-0-0-0": {
+          pointCount: points.length,
+          channels: points.flatMap((point) => [point, point, point]),
+        },
+      },
+    });
+
+    const tile = await source.loadTile(keyFromString("1-0-0-0"));
+    const delivered = points.map((_, index) => tile.rgb![index * 3]!);
+    expect([...delivered].sort((a, b) => a - b)).toEqual(points);
+    expect(delivered).not.toEqual(points);
   });
 
   it("loads tiles from a point format without color, sampling nothing", async () => {
@@ -548,7 +584,7 @@ describe("createCopcTileSource RGB depth", () => {
     const source = await openStub(FULL_RANGE);
     expect(stub.viewLoads).toBe(1);
     expect(await loadRgb(source, "0-0-0-0")).toEqual(
-      new Uint8Array([0, 128, 255, 16, 32, 64]),
+      rgbPoints([0, 128, 255, 16, 32, 64]),
     );
     expect(stub.viewLoads).toBe(1);
     // Held for one read only; a second one goes back to the file.
@@ -565,7 +601,7 @@ describe("createCopcTileSource RGB depth", () => {
         "1-0-0-0": { pointCount: 2, channels: MIXED },
       },
     });
-    expect(await loadRgb(source, "1-0-0-0")).toEqual(MIXED_CLIPPED);
+    expect(await loadRgb(source, "1-0-0-0")).toEqual(rgbPoints(MIXED_CLIPPED));
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
   });
@@ -583,7 +619,7 @@ describe("createCopcTileSource RGB depth", () => {
     // Wrapping would send 40000 to 64 and the brighter 42000 to 16: the top of
     // the cloud comes back darker than its own mid-tones, and out of order with
     // itself, which reads as a broken decoder rather than a washed-out sample.
-    expect(await loadRgb(source, "1-0-0-0")).toEqual(MIXED_CLIPPED);
+    expect(await loadRgb(source, "1-0-0-0")).toEqual(rgbPoints(MIXED_CLIPPED));
   });
 
   it("produces the RGB bytes the HTTP tile service would serve", async () => {
@@ -592,7 +628,7 @@ describe("createCopcTileSource RGB depth", () => {
       const rootChannels = asset.nodes["0-0-0-0"]!.channels!;
       for (const [key, node] of Object.entries(asset.nodes)) {
         expect(await loadRgb(source, key)).toEqual(
-          serviceRgb(rootChannels, node.channels!),
+          rgbPoints(serviceRgb(rootChannels, node.channels!)),
         );
       }
     }

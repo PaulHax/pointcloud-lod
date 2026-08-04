@@ -21,6 +21,7 @@ import {
   type Bounds,
   type VoxelKey,
 } from "./octree";
+import { orderTileForProgressiveDrawing } from "./progressiveOrder";
 import type {
   LoadOptions,
   NodeInfo,
@@ -434,7 +435,10 @@ export const createCopcTileSource = async (
         }
       }
 
-      return { origin, positions, rgb, pointCount };
+      return orderTileForProgressiveDrawing(
+        { origin, positions, rgb, pointCount },
+        keyString,
+      );
     },
   };
 };

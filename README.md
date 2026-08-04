@@ -677,9 +677,10 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
   complete or partial nested prefixes to the highest projected-importance
   branches. Auto sizing follows each terminal's effective prefix density, and
   CPU picking examines the same per-tile plan the renderer draws. Two CSS
-  pixels is the seed before any selected frontier exists. Incoming tiles are
-  deterministically shuffled once at the source/controller boundary, keeping
-  arbitrary COPC record order from biasing early prefixes.
+  pixels is the seed before any selected frontier exists. Tiles arrive already
+  in progressive order — every source shuffles a tile once, deterministically,
+  as it decodes it, which for the worker-backed source is off the main thread —
+  keeping arbitrary COPC record order from biasing early prefixes.
 - **Renderer adapter** (`createRendererAdapter`) — turns tile batches into
   vtk.js actors, one `vtkPolyData` + `vtkPointGaussianMapper` per tile
   (one gl.POINTS vertex per point, no cell topology), with an anchor base

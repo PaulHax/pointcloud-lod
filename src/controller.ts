@@ -47,7 +47,6 @@ import {
   type VoxelKey,
 } from "./octree";
 import { tileBytes, type TileData, type TileSource } from "./tileSource";
-import { orderTileForProgressiveDrawing } from "./progressiveOrder";
 import { projectedSpacingScale } from "./pointDensity";
 
 export type TileBatch = {
@@ -1493,16 +1492,15 @@ export const createLodController = (
           clearReadCancellation(read);
           tileReads.delete(keyString);
           tileFailures.delete(keyString);
-          const tile = orderTileForProgressiveDrawing(loadedTile, keyString);
           // Cancellation is advisory: the COPC getter takes no signal, so a
           // cancelled read still delivers. If the key was reselected while it
           // ran, this payload is exactly what the selection is waiting for.
           if (target.has(keyString) && !resident.has(keyString)) {
-            takeResident(keyString, tile);
+            takeResident(keyString, loadedTile);
             updateReadyTerminalFrontier();
             scheduleFlush();
           } else {
-            cacheDecoded(keyString, tile);
+            cacheDecoded(keyString, loadedTile);
           }
           pump();
         },

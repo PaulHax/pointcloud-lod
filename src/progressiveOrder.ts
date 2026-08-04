@@ -41,9 +41,11 @@ const swapTriplet = (
  *
  * Progressive drawing uses a prefix of each VBO, so every prefix needs to be
  * a representative sample of the complete node. COPC/LAS record order makes
- * no such promise. A one-time Fisher-Yates pass at the source/controller
- * boundary supplies that promise while keeping positions and RGB paired and
- * without allocating a second point payload.
+ * no such promise. A one-time Fisher-Yates pass inside the tile source
+ * supplies that promise while keeping positions and RGB paired and without
+ * allocating a second point payload. Sources apply it once, at decode, where
+ * a worker-backed one is already off the main thread; the controller trusts
+ * what it is handed.
  */
 export const orderTileForProgressiveDrawing = (
   tile: TileData,
