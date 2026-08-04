@@ -306,8 +306,26 @@ export const createViewGovernor = (
   const regime = (): BudgetRegime =>
     interacting() ? "interaction" : "stationary";
 
-  const activeMembers = (): MemberState[] =>
-    [...members].filter((member) => member.active);
+  /** Fold the active members without materializing them. */
+  const reduceActive = <T>(
+    seed: T,
+    step: (accumulated: T, member: MemberState) => T,
+  ): T => {
+    let accumulated = seed;
+    for (const member of members) {
+      if (member.active) accumulated = step(accumulated, member);
+    }
+    return accumulated;
+  };
+
+  const someActive = (test: (member: MemberState) => boolean): boolean => {
+    for (const member of members) {
+      if (member.active && test(member)) return true;
+    }
+    return false;
+  };
+
+  const activeCount = (): number => reduceActive(0, (count) => count + 1);
 
   /**
    * The effective aggregate:
@@ -342,10 +360,10 @@ export const createViewGovernor = (
       : cappedTrackBudget(false, ceiling);
 
   const constraintOf = (
-    active: readonly MemberState[],
+    active: number,
     memory: number | null,
   ): BudgetConstraint => {
-    if (active.length === 0) return "inactive";
+    if (active === 0) return "inactive";
     const track = budget.budget(interacting());
     if (memory !== null && memory <= track) {
       // Ties go to the harder constraint: when memory and the configured
@@ -416,7 +434,7 @@ export const createViewGovernor = (
   };
 
   const pendingWork = (): boolean =>
-    activeMembers().some(
+    someActive(
       (member) =>
         member.workPending ||
         member.physicalTileOperations > 0 ||
@@ -437,8 +455,8 @@ export const createViewGovernor = (
     );
   };
 
-  const needsFrame = (): boolean =>
-    !disposed && (interacting() || (!pendingWork() && !converged()));
+  const needsFrame = (pending: boolean): boolean =>
+    !disposed && (interacting() || (!pending && !converged()));
 
   /**
    * Adopt the host's clock offset from this metrics packet and return "now" on
@@ -473,8 +491,8 @@ export const createViewGovernor = (
    * A frame may train the budget only when nothing is still streaming into it
    * and the camera is in a settled state — either genuinely moving, or stable.
    */
-  const coreEligible = (): boolean =>
-    !pendingWork() && (moving() || cameraStable);
+  const coreEligible = (pending: boolean): boolean =>
+    !pending && (moving() || cameraStable);
 
   const recordTransientFrame = (metrics: TransientFrameMetrics): number => {
     if (disposed || !finiteNonNegative(metrics?.hostFrameMs)) return 0;
@@ -591,17 +609,20 @@ export const createViewGovernor = (
       recordCapacitySample({
         frameMs: observedMs,
         regime: regime(),
-        eligible: (metrics.capacitySampleEligible ?? true) && coreEligible(),
+        eligible:
+          (metrics.capacitySampleEligible ?? true) &&
+          coreEligible(pendingWork()),
         now: metrics.now,
       });
     },
 
-    needsFrame,
+    needsFrame: () => needsFrame(pendingWork()),
 
     stats() {
       const adaptive = budget.stats();
       const track = interacting() ? adaptive.interaction : adaptive.stationary;
-      const active = activeMembers();
+      const active = activeCount();
+      const pending = pendingWork();
       const allocation = viewBudget.stats();
       const viewCeiling = allocation.memoryCeilingPoints;
       const viewConstraint = constraintOf(active, viewCeiling);
@@ -617,7 +638,7 @@ export const createViewGovernor = (
         },
       );
       const sum = (pick: (member: MemberState) => number): number =>
-        active.reduce((total, member) => total + pick(member), 0);
+        reduceActive(0, (total, member) => total + pick(member));
       return {
         regime: regime(),
         motion: {
@@ -636,8 +657,8 @@ export const createViewGovernor = (
         activity: {
           inputActive: moving(),
           cameraStable,
-          workPending: pendingWork(),
-          measurementEligible: coreEligible(),
+          workPending: pending,
+          measurementEligible: coreEligible(pending),
         },
         capacitySamples: {
           eligible: eligibleCapacitySamples,
@@ -654,11 +675,11 @@ export const createViewGovernor = (
         selectionBudget: allocation.selectionBudget,
         activeConstraint: viewConstraint,
         lastAdjustment: track.lastAdjustment,
-        activeMembers: active.length,
+        activeMembers: active,
         members: memberStats,
         physicalTileOperations: sum((m) => m.physicalTileOperations),
         physicalHierarchyOperations: sum((m) => m.physicalHierarchyOperations),
-        needsFrame: needsFrame(),
+        needsFrame: needsFrame(pending),
       };
     },
 

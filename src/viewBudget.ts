@@ -163,33 +163,38 @@ export const createViewBudgetCoordinator = (
   const members = new Set<MemberState>();
   let disposed = false;
 
-  const activeMembers = (): MemberState[] =>
-    [...members].filter((member) => member.active);
-
-  const memoryCeilingPoints = (
-    active: readonly MemberState[],
-  ): number | null => {
-    let total = 0;
-    let reported = false;
-    for (const member of active) {
-      if (member.memoryCeilingPoints === null) continue;
-      total += member.memoryCeilingPoints;
-      reported = true;
+  /** Fold the active members without materializing them. */
+  const reduceActive = <T>(
+    seed: T,
+    step: (accumulated: T, member: MemberState) => T,
+  ): T => {
+    let accumulated = seed;
+    for (const member of members) {
+      if (member.active) accumulated = step(accumulated, member);
     }
-    return reported ? total : null;
+    return accumulated;
   };
 
-  const effectiveSelectionBudget = (active: readonly MemberState[]): number => {
-    const ceiling = memoryCeilingPoints(active);
+  const activeCount = (): number => reduceActive(0, (count) => count + 1);
+
+  const memoryCeilingPoints = (): number | null =>
+    reduceActive<number | null>(null, (total, member) =>
+      member.memoryCeilingPoints === null
+        ? total
+        : (total ?? 0) + member.memoryCeilingPoints,
+    );
+
+  const effectiveSelectionBudget = (): number => {
+    const ceiling = memoryCeilingPoints();
     return ceiling === null ? pointBudget : Math.min(pointBudget, ceiling);
   };
 
-  const effectiveDrawBudget = (active: readonly MemberState[]): number =>
-    Math.min(drawBudget, effectiveSelectionBudget(active));
+  const effectiveDrawBudget = (): number =>
+    Math.min(drawBudget, effectiveSelectionBudget());
 
-  const constraint = (active: readonly MemberState[]): ViewBudgetConstraint => {
-    if (active.length === 0) return "inactive";
-    const ceiling = memoryCeilingPoints(active);
+  const constraint = (active: number): ViewBudgetConstraint => {
+    if (active === 0) return "inactive";
+    const ceiling = memoryCeilingPoints();
     return ceiling !== null && ceiling <= pointBudget ? "memory" : "target";
   };
 
@@ -222,23 +227,21 @@ export const createViewBudgetCoordinator = (
 
   const distribute = (): void => {
     if (disposed) return;
-    const active = activeMembers();
     // One ceiling walk for both totals: effectiveDrawBudget would otherwise
     // recompute the selection budget, and every member below reads the
     // ceiling again.
-    const selectionTotal = effectiveSelectionBudget(active);
+    const selectionTotal = effectiveSelectionBudget();
     const drawTotal = Math.min(drawBudget, selectionTotal);
-    const maxReported = active.reduce(
-      (max, member) => Math.max(max, member.importance ?? 0),
-      0,
+    const maxReported = reduceActive(0, (max, member) =>
+      Math.max(max, member.importance ?? 0),
     );
     const floorWeight =
       maxReported > 0 ? maxReported * MIN_SHARE_OF_EVEN_SPLIT : 1;
     const weightOf = (member: MemberState): number =>
       Math.max(member.importance ?? maxReported, floorWeight);
-    const weightTotal = active.reduce(
-      (sum, member) => sum + weightOf(member),
+    const weightTotal = reduceActive(
       0,
+      (sum, member) => sum + weightOf(member),
     );
     const shareOf = (member: MemberState, total: number): number =>
       member.active && total > 0
@@ -340,8 +343,7 @@ export const createViewBudgetCoordinator = (
           distribute();
         },
         stats() {
-          const active = activeMembers();
-          return memberStats(state, constraint(active));
+          return memberStats(state, constraint(activeCount()));
         },
         release() {
           if (!members.delete(state)) return;
@@ -373,21 +375,21 @@ export const createViewBudgetCoordinator = (
     setTargets,
 
     memoryCeiling() {
-      return memoryCeilingPoints(activeMembers());
+      return memoryCeilingPoints();
     },
 
     stats() {
-      const active = activeMembers();
+      const active = activeCount();
       const viewConstraint = constraint(active);
       return {
         pointBudget,
         densityFraction,
         drawBudget,
-        memoryCeilingPoints: memoryCeilingPoints(active),
-        aggregateBudget: effectiveDrawBudget(active),
-        selectionBudget: effectiveSelectionBudget(active),
+        memoryCeilingPoints: memoryCeilingPoints(),
+        aggregateBudget: effectiveDrawBudget(),
+        selectionBudget: effectiveSelectionBudget(),
         activeConstraint: viewConstraint,
-        activeMembers: active.length,
+        activeMembers: active,
         members: [...members].map((member) =>
           memberStats(member, viewConstraint),
         ),
