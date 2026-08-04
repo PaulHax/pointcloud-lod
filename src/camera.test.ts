@@ -461,7 +461,7 @@ describe("viewInModelFrame", () => {
     expect(local.position[1]).toBeCloseTo(0);
     expect(local.position[2]).toBeCloseTo(0);
     // viewProj folds the model matrix in: I * M = M.
-    expect([...local.viewProj]).toEqual(SIMILARITY);
+    expect(Array.from(local.viewProj)).toEqual(SIMILARITY);
     // A field of view is an angle: the uniform model scale cancels out.
     expect(local.projection).toBe("perspective");
     if (local.projection === "perspective") {

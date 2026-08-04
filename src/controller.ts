@@ -260,6 +260,12 @@ export type LodControllerStats = {
  * held, so this costs nothing to read — unlike {@link LodControllerStats},
  * which walks the selected set and the submitted set to answer questions no
  * frame asks. Every field here is the same number under the same name there.
+ *
+ * A governor member also takes `workPending`, which is deliberately not here:
+ * answering it needs the walk of the selected set. It is also the one input
+ * that cannot change without the controller reporting a work change, so it
+ * belongs on the `onWorkChange` path — read `stats().workPending` there — and
+ * not on the frame.
  */
 export type LodGovernorInputs = {
   readonly memoryBudgetBytes: number;
@@ -1215,9 +1221,13 @@ export const createLodController = (
   const samePrefixes = (
     left: ReadonlyMap<string, number>,
     right: ReadonlyMap<string, number>,
-  ): boolean =>
-    left.size === right.size &&
-    [...left].every(([key, count]) => right.get(key) === count);
+  ): boolean => {
+    if (left.size !== right.size) return false;
+    for (const [key, count] of left) {
+      if (right.get(key) !== count) return false;
+    }
+    return true;
+  };
 
   /**
    * Allocate the governor's exact draw allowance over the selected tree.

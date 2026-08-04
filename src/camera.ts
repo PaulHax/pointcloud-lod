@@ -381,21 +381,20 @@ const movedBeyondJitter = (previous: number, next: number): boolean =>
  */
 const MOTION_MATRIX_INDICES = [0, 1, 3, 4, 5, 7, 8, 9, 11, 12, 13, 15];
 
-/**
- * Everything about the camera that changes what LOD selects: where it looks
- * from and at, the eye point, the viewport height screen-space error is
- * measured in, and the projection's sizing scalar.
- */
-const cameraMotionScalars = (view: CameraView): number[] => [
-  ...MOTION_MATRIX_INDICES.map((index) => Number(view.viewProj[index])),
-  ...view.position,
-  view.viewportHeightCssPx,
-  view.projection === "orthographic" ? view.parallelScale : view.fovY,
-];
+/** The projection's own sizing scalar, whichever kind of projection it is. */
+const projectionSizingScalar = (view: CameraView): number =>
+  view.projection === "orthographic" ? view.parallelScale : view.fovY;
 
 /**
  * Whether `next` renders a genuinely different camera than `previous`.
  * A missing `previous` is a baseline being established, not a movement.
+ *
+ * Compared entry by entry and answered at the first difference: this runs on
+ * every rendered frame of every view, and the overwhelmingly common answer —
+ * a camera that has not moved — is the one case that must read all of them.
+ * What is compared is everything about the camera that changes what LOD
+ * selects: where it looks from and at, the eye point, the viewport height
+ * screen-space error is measured in, and the projection's sizing scalar.
  */
 export const cameraMoved = (
   previous: CameraView | null | undefined,
@@ -403,9 +402,28 @@ export const cameraMoved = (
 ): boolean => {
   if (!previous) return false;
   if (previous.projection !== next.projection) return true;
-  const before = cameraMotionScalars(previous);
-  const after = cameraMotionScalars(next);
-  return before.some((value, index) => movedBeyondJitter(value, after[index]!));
+  for (const index of MOTION_MATRIX_INDICES) {
+    if (
+      movedBeyondJitter(
+        Number(previous.viewProj[index]),
+        Number(next.viewProj[index]),
+      )
+    ) {
+      return true;
+    }
+  }
+  for (let axis = 0; axis < 3; axis += 1) {
+    if (movedBeyondJitter(previous.position[axis]!, next.position[axis]!)) {
+      return true;
+    }
+  }
+  return (
+    movedBeyondJitter(previous.viewportHeightCssPx, next.viewportHeightCssPx) ||
+    movedBeyondJitter(
+      projectionSizingScalar(previous),
+      projectionSizingScalar(next),
+    )
+  );
 };
 
 /**
@@ -466,7 +484,13 @@ const similarityScale = (m: Mat16): number | null => {
 
 /** Column-major product `a × b`. */
 const multiply4 = (a: Mat16, b: Mat16): number[] => {
-  const out = new Array<number>(16);
+  // prettier-ignore
+  const out: number[] = [
+    0, 0, 0, 0,
+    0, 0, 0, 0,
+    0, 0, 0, 0,
+    0, 0, 0, 0,
+  ];
   for (let column = 0; column < 4; column += 1) {
     for (let row = 0; row < 4; row += 1) {
       out[column * 4 + row] =
