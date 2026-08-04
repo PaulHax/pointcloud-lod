@@ -575,7 +575,10 @@ const emptyReadyTerminalFrontier =
 const emptySelectionStats = (
   generation: number,
   targetRevision: number,
-): Omit<LodSelectionStats, "targetUndecodedTiles"> => ({
+): Omit<
+  LodSelectionStats,
+  "targetUndecodedTiles" | "readyTerminalFrontier"
+> => ({
   generation,
   targetRevision,
   targetTiles: 0,
@@ -588,7 +591,6 @@ const emptySelectionStats = (
   budgetSkippedNodes: 0,
   budgetSkippedPoints: 0,
   projectedImportance: 0,
-  readyTerminalFrontier: emptyReadyTerminalFrontier(),
 });
 
 export const createLodController = (
@@ -1372,62 +1374,78 @@ export const createLodController = (
     }
   };
 
-  const updateReadyTerminalFrontier = (): void => {
-    const currentView = view;
-    if (
-      currentView === null ||
-      !active ||
-      drawPlanStats.plannedPoints <= 0 ||
-      !target.has(keyToString(ROOT_KEY))
-    ) {
-      selectionStats = {
-        ...selectionStats,
-        readyTerminalFrontier: emptyReadyTerminalFrontier(),
-      };
-      return;
-    }
+  /**
+   * The ready frontier, computed on demand and held until something that can
+   * move it happens.
+   *
+   * It is a diagnostic, and `stats()` is its only reader, but computing it
+   * eagerly meant a full recursive walk and a quantile sort on every tile
+   * arrival — for a number no frame depends on. The invalidation points are
+   * exactly where the walk used to run, so a host that reads `stats()` on
+   * every frame pays what it always did and one that never reads it pays
+   * nothing.
+   */
+  let frontierCache: LodSelectionStats["readyTerminalFrontier"] | null = null;
 
-    const values: number[] = [];
-    const terminalKeys = new Set<string>();
-    let leafNodes = 0;
-    let cutoffNodes = 0;
-    let hierarchyBlockedNodes = 0;
-    let tileBlockedNodes = 0;
-    let budgetBlockedNodes = 0;
-    let drawBlockedNodes = 0;
-
-    walkTerminals(
-      frustumPlanes(currentView.viewProj),
-      true,
-      (keyString, entry, reasons) => {
-        // A structural node has no samples with which to cover a blocked region.
-        if (entry.pointCount === 0 || !resident.has(keyString)) return;
-        if (!terminalKeys.has(keyString)) {
-          terminalKeys.add(keyString);
-          const spacing = terminalSpacing(keyString, entry);
-          if (spacing !== null) values.push(spacing);
-        }
-        if (reasons.leaf) leafNodes += 1;
-        if (reasons.cutoff) cutoffNodes += 1;
-        if (reasons.hierarchy) hierarchyBlockedNodes += 1;
-        if (reasons.tile) tileBlockedNodes += 1;
-        if (reasons.budget) budgetBlockedNodes += 1;
-        if (reasons.draw) drawBlockedNodes += 1;
-      },
-    );
-
-    const frontier: LodSelectionStats["readyTerminalFrontier"] = {
-      count: terminalKeys.size,
-      leafNodes,
-      cutoffNodes,
-      hierarchyBlockedNodes,
-      tileBlockedNodes,
-      budgetBlockedNodes,
-      drawBlockedNodes,
-      projectedSpacingCssPx: spacingQuantiles(values),
-    };
-    selectionStats = { ...selectionStats, readyTerminalFrontier: frontier };
+  const invalidateFrontier = (): void => {
+    frontierCache = null;
   };
+
+  const readyTerminalFrontier =
+    (): LodSelectionStats["readyTerminalFrontier"] => {
+      const currentView = view;
+      if (
+        currentView === null ||
+        !active ||
+        drawPlanStats.plannedPoints <= 0 ||
+        !target.has(keyToString(ROOT_KEY))
+      ) {
+        frontierCache = null;
+        return emptyReadyTerminalFrontier();
+      }
+      if (frontierCache !== null) return frontierCache;
+
+      const values: number[] = [];
+      const terminalKeys = new Set<string>();
+      let leafNodes = 0;
+      let cutoffNodes = 0;
+      let hierarchyBlockedNodes = 0;
+      let tileBlockedNodes = 0;
+      let budgetBlockedNodes = 0;
+      let drawBlockedNodes = 0;
+
+      walkTerminals(
+        frustumPlanes(currentView.viewProj),
+        true,
+        (keyString, entry, reasons) => {
+          // A structural node has no samples with which to cover a blocked region.
+          if (entry.pointCount === 0 || !resident.has(keyString)) return;
+          if (!terminalKeys.has(keyString)) {
+            terminalKeys.add(keyString);
+            const spacing = terminalSpacing(keyString, entry);
+            if (spacing !== null) values.push(spacing);
+          }
+          if (reasons.leaf) leafNodes += 1;
+          if (reasons.cutoff) cutoffNodes += 1;
+          if (reasons.hierarchy) hierarchyBlockedNodes += 1;
+          if (reasons.tile) tileBlockedNodes += 1;
+          if (reasons.budget) budgetBlockedNodes += 1;
+          if (reasons.draw) drawBlockedNodes += 1;
+        },
+      );
+
+      frontierCache = {
+        count: terminalKeys.size,
+        leafNodes,
+        cutoffNodes,
+        hierarchyBlockedNodes,
+        tileBlockedNodes,
+        budgetBlockedNodes,
+        drawBlockedNodes,
+        projectedSpacingCssPx: spacingQuantiles(values),
+      };
+      return frontierCache;
+    };
 
   const pump = (): void => {
     while (
@@ -1448,7 +1466,7 @@ export const createLodController = (
       // Reading it again would be pure duplicate I/O, and a failure of that
       // read would settle the cloud with a hole over a payload it already has.
       if (promoteCached(keyString)) {
-        updateReadyTerminalFrontier();
+        invalidateFrontier();
         scheduleFlush();
         continue;
       }
@@ -1478,7 +1496,7 @@ export const createLodController = (
           // ran, this payload is exactly what the selection is waiting for.
           if (target.has(keyString) && !resident.has(keyString)) {
             takeResident(keyString, loadedTile);
-            updateReadyTerminalFrontier();
+            invalidateFrontier();
             scheduleFlush();
           } else {
             cacheDecoded(keyString, loadedTile);
@@ -1505,7 +1523,7 @@ export const createLodController = (
             // reselected while the read was cancelled: it needs a fresh one.
             queue.unshift(keyString);
           }
-          updateReadyTerminalFrontier();
+          invalidateFrontier();
           pump();
         },
       );
@@ -1585,8 +1603,8 @@ export const createLodController = (
       budgetSkippedNodes: selection.budgetSkippedNodes,
       budgetSkippedPoints: selection.budgetSkippedPoints,
       projectedImportance: target.size > 0 ? sse(ROOT_KEY) : 0,
-      readyTerminalFrontier: emptyReadyTerminalFrontier(),
     };
+    invalidateFrontier();
     updateDrawPlan();
     updateAutoDiameter();
     // The root page bootstraps the hierarchy, so it can never come back
@@ -1640,7 +1658,7 @@ export const createLodController = (
     }
     queue = byFrontierPriority(toFetch);
 
-    updateReadyTerminalFrontier();
+    invalidateFrontier();
     scheduleFlush();
     pump();
   };
@@ -1794,7 +1812,7 @@ export const createLodController = (
       densityFraction = nextDensityFraction;
       updateDrawPlan();
       updateAutoDiameter();
-      updateReadyTerminalFrontier();
+      invalidateFrontier();
     },
 
     setSource(nextSource) {
@@ -1831,7 +1849,7 @@ export const createLodController = (
         emitDiameter(presentation.diameterCssPx);
       } else {
         updateAutoDiameter();
-        updateReadyTerminalFrontier();
+        invalidateFrontier();
       }
     },
 
@@ -1931,6 +1949,7 @@ export const createLodController = (
         refinementCutoffPx,
         selection: {
           ...selectionStats,
+          readyTerminalFrontier: readyTerminalFrontier(),
           // Live, not a selection-time snapshot: how many selected tiles have
           // no decoded payload anywhere (neither resident nor cached). This
           // is the number that distinguishes "the burst issued no reads
