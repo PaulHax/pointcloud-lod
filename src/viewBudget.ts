@@ -27,14 +27,19 @@ export type ViewBudgetMemberUpdate = {
 export type ViewBudgetMemberStats = {
   readonly id: string | null;
   readonly active: boolean;
+  /** Null until the member reports; 0 is a real measurement, not "unknown". */
   readonly projectedImportance: number | null;
   /** This member's share of the aggregate draw budget. */
   readonly allocatedShare: number;
+  /** Last memory-derived ceiling the member reported, null if it never has. */
   readonly memoryCeilingPoints: number | null;
+  /** What the member can actually draw: its share capped by its own ceiling. */
   readonly effectiveBudget: number;
-  /** Points kept selected and resident for this member. */
+  /** Points kept selected and resident so density changes need no tile churn. */
   readonly selectionShare: number;
+  /** Selection share capped by this member's memory ceiling. */
   readonly effectiveSelectionBudget: number;
+  /** Effective draw budget divided by the effective selection budget. */
   readonly densityFraction: number;
   readonly activeConstraint: ViewBudgetConstraint;
 };
@@ -46,6 +51,28 @@ export type ViewBudgetMember = {
 };
 
 export type ViewBudgetConstraint = "target" | "memory" | "inactive";
+
+/**
+ * Which bound explains one member's allocation, given whichever bound explains
+ * the view's. A member's own memory ceiling outranks the view-wide answer; an
+ * inactive member is bound by nothing else. Hosts that wrap this coordinator
+ * classify their view with a vocabulary of their own, so the view's constraint
+ * passes through unnarrowed.
+ */
+export const memberConstraint = <Constraint extends string>(
+  member: {
+    readonly active: boolean;
+    readonly memoryCeilingPoints: number | null;
+    readonly allocatedShare: number;
+  },
+  viewConstraint: Constraint,
+): Constraint | "memory" | "inactive" =>
+  !member.active
+    ? "inactive"
+    : member.memoryCeilingPoints !== null &&
+        member.memoryCeilingPoints < member.allocatedShare
+      ? "memory"
+      : viewConstraint;
 
 export type ViewBudgetCoordinatorOptions = {
   /** Aggregate selected-point target. Default 2,000,000. */
@@ -175,7 +202,7 @@ export const createViewBudgetCoordinator = (
       ? Math.max(member.selectionBudget, 0)
       : 0;
     const ceiling = member.memoryCeilingPoints;
-    return {
+    const allocated = {
       id: member.id,
       active: member.active,
       projectedImportance: member.importance,
@@ -186,11 +213,10 @@ export const createViewBudgetCoordinator = (
       effectiveSelectionBudget:
         ceiling === null ? selectionShare : Math.min(selectionShare, ceiling),
       densityFraction: Math.max(member.densityFraction, 0),
-      activeConstraint: !member.active
-        ? "inactive"
-        : ceiling !== null && ceiling < share
-          ? "memory"
-          : viewConstraint,
+    };
+    return {
+      ...allocated,
+      activeConstraint: memberConstraint(allocated, viewConstraint),
     };
   };
 

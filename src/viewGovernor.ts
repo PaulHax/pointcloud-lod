@@ -19,8 +19,10 @@ import {
 import { finiteAtLeast, finiteNonNegative, finiteWithin } from "./numeric";
 import {
   createViewBudgetCoordinator,
+  memberConstraint,
   type ViewBudgetMember,
   type ViewBudgetMemberOptions,
+  type ViewBudgetMemberStats,
   type ViewBudgetMemberUpdate,
 } from "./viewBudget";
 
@@ -108,27 +110,14 @@ export type BudgetConstraint =
   | "memory"
   | "inactive";
 
-export type ViewGovernorMemberStats = {
-  readonly id: string | null;
-  readonly active: boolean;
-  /** Null until the member reports; 0 is a real measurement, not "unknown". */
-  readonly projectedImportance: number | null;
-  /** Points this member was allocated from the aggregate view budget. */
-  readonly allocatedShare: number;
-  /** Last memory-derived ceiling the member reported, null if it never has. */
-  readonly memoryCeilingPoints: number | null;
-  /**
-   * What the cloud can actually draw: its share capped by its own memory
-   * ceiling. The controller re-applies its live ceiling to whatever it is
-   * given, so this is the governor's view of the same arithmetic.
-   */
-  readonly effectiveBudget: number;
-  /** Points kept selected and resident so density changes need no tile churn. */
-  readonly selectionShare: number;
-  /** Selection share capped by this member's memory ceiling. */
-  readonly effectiveSelectionBudget: number;
-  /** Effective draw budget divided by the effective selection budget. */
-  readonly densityFraction: number;
+/**
+ * The coordinator's allocation for one cloud, re-classified in the governor's
+ * constraint vocabulary and joined to the physical work that cloud reports.
+ */
+export type ViewGovernorMemberStats = Omit<
+  ViewBudgetMemberStats,
+  "activeConstraint"
+> & {
   readonly activeConstraint: BudgetConstraint;
   readonly physicalTileOperations: number;
   readonly physicalHierarchyOperations: number;
@@ -620,21 +609,8 @@ export const createViewGovernor = (
         (member): ViewGovernorMemberStats => {
           const allocated = member.budgetMember.stats();
           return {
-            id: allocated.id,
-            active: allocated.active,
-            projectedImportance: allocated.projectedImportance,
-            allocatedShare: allocated.allocatedShare,
-            memoryCeilingPoints: allocated.memoryCeilingPoints,
-            effectiveBudget: allocated.effectiveBudget,
-            selectionShare: allocated.selectionShare,
-            effectiveSelectionBudget: allocated.effectiveSelectionBudget,
-            densityFraction: allocated.densityFraction,
-            activeConstraint: !member.active
-              ? "inactive"
-              : allocated.memoryCeilingPoints !== null &&
-                  allocated.memoryCeilingPoints < allocated.allocatedShare
-                ? "memory"
-                : viewConstraint,
+            ...allocated,
+            activeConstraint: memberConstraint(allocated, viewConstraint),
             physicalTileOperations: member.physicalTileOperations,
             physicalHierarchyOperations: member.physicalHierarchyOperations,
           };
