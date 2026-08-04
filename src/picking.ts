@@ -12,12 +12,14 @@
  */
 
 import {
+  CLIP_W_EPSILON,
   cursorRay,
   projectPointToCssPx,
   type CameraView,
   type CursorRay,
   type Mat16,
 } from "./camera";
+import { finitePositive } from "./numeric";
 import type { Bounds, Vec3 } from "./octree";
 
 /** Mirrors `DEFAULT_PICK_PIXEL_RADIUS` in telesculptor-web `ray_depth.py`. */
@@ -37,6 +39,11 @@ export const PICK_RADII_CSS_PX: readonly number[] =
   DEFAULT_PICK_PIXEL_RADIUS_MULTIPLIERS.map(
     (multiplier) => DEFAULT_PICK_PIXEL_RADIUS * multiplier,
   );
+
+/** The same radii squared, as `_PICK_RADII_SQ` in `ray_depth.py`. */
+const PICK_RADII_SQ: readonly number[] = PICK_RADII_CSS_PX.map(
+  (radius) => radius * radius,
+);
 
 /** One pickable tile: a submitted payload plus its hierarchy bounds. */
 export type PickTile = {
@@ -116,11 +123,6 @@ export const tileIsPickCandidate = (
   );
 };
 
-type BucketBest = {
-  readonly depth: number;
-  readonly distancePx: number;
-};
-
 /**
  * Sweep every point of the candidate tiles. A point is rejected when its
  * projection is unusable (non-finite, or `clip.w <= CLIP_W_EPSILON`), it
@@ -128,13 +130,53 @@ type BucketBest = {
  * depth is negative. Survivors land in every bucket whose radius covers their
  * css distance from the cursor; the smallest non-empty bucket then answers
  * with its minimum-depth point, mirroring `ray_depth.py`.
+ *
+ * The projection is spelled out here instead of calling
+ * {@link projectPointToCssPx}: this loop runs once per drawn point — the whole
+ * draw budget, on every move of a drag — where the shared helper would allocate
+ * an argument array and a result object per point and re-test a viewport that
+ * is fixed for the query. Distances stay squared until a winner is known, as
+ * `_PICK_RADII_SQ` does.
  */
 export const sweepPickPoints = (
   query: PickQuery,
   tiles: readonly PickTile[],
 ): PointPickResult => {
-  const { ray } = query;
-  const bests: (BucketBest | null)[] = PICK_RADII_CSS_PX.map(() => null);
+  const {
+    ray,
+    viewProj: m,
+    cursorXCssPx,
+    cursorYCssPx,
+    viewportWidthCssPx: width,
+    viewportHeightCssPx: height,
+  } = query;
+  if (!finitePositive(width) || !finitePositive(height)) return MISS;
+  const m0 = m[0]!,
+    m1 = m[1]!,
+    m2 = m[2]!,
+    m3 = m[3]!;
+  const m4 = m[4]!,
+    m5 = m[5]!,
+    m6 = m[6]!,
+    m7 = m[7]!;
+  const m8 = m[8]!,
+    m9 = m[9]!,
+    m10 = m[10]!,
+    m11 = m[11]!;
+  const m12 = m[12]!,
+    m13 = m[13]!,
+    m14 = m[14]!,
+    m15 = m[15]!;
+  const [rayX, rayY, rayZ] = ray.origin;
+  const [dirX, dirY, dirZ] = ray.direction;
+  const bucketCount = PICK_RADII_SQ.length;
+  const widestRadiusSq = PICK_RADII_SQ[bucketCount - 1]!;
+  /**
+   * NaN marks an empty bucket: `!(depth >= NaN)` holds, so the first
+   * qualifying point fills a bucket and every later one has to beat it.
+   */
+  const bestDepth = new Float64Array(bucketCount).fill(Number.NaN);
+  const bestDistanceSq = new Float64Array(bucketCount);
   for (const tile of tiles) {
     const [originX, originY, originZ] = tile.origin;
     const { positions } = tile;
@@ -142,47 +184,46 @@ export const sweepPickPoints = (
       const x = originX + positions[index * 3]!;
       const y = originY + positions[index * 3 + 1]!;
       const z = originZ + positions[index * 3 + 2]!;
-      const projected = projectPointToCssPx(
-        query.viewProj,
-        [x, y, z],
-        query.viewportWidthCssPx,
-        query.viewportHeightCssPx,
-      );
-      if (projected === null || Math.abs(projected.ndcZ) > 1) continue;
-      const depth =
-        (x - ray.origin[0]) * ray.direction[0] +
-        (y - ray.origin[1]) * ray.direction[1] +
-        (z - ray.origin[2]) * ray.direction[2];
-      // `>=` written as a guard so a NaN depth rejects rather than passes.
+      const clipW = m3 * x + m7 * y + m11 * z + m15;
+      if (!Number.isFinite(clipW) || clipW <= CLIP_W_EPSILON) continue;
+      const invW = 1 / clipW;
+      // Every remaining test is written as a guard, so a non-finite clip
+      // coordinate rejects its point rather than passing through.
+      const ndcZ = (m2 * x + m6 * y + m10 * z + m14) * invW;
+      if (!(ndcZ >= -1 && ndcZ <= 1)) continue;
+      const depth = (x - rayX) * dirX + (y - rayY) * dirY + (z - rayZ) * dirZ;
       if (!(depth >= 0)) continue;
-      const distancePx = Math.hypot(
-        projected.xCssPx - query.cursorXCssPx,
-        projected.yCssPx - query.cursorYCssPx,
-      );
-      for (
-        let bucket = PICK_RADII_CSS_PX.length - 1;
-        bucket >= 0;
-        bucket -= 1
-      ) {
-        if (distancePx > PICK_RADII_CSS_PX[bucket]!) break;
-        const best = bests[bucket]!;
-        if (best === null || depth < best.depth) {
-          bests[bucket] = { depth, distancePx };
+      const offsetX =
+        (((m0 * x + m4 * y + m8 * z + m12) * invW + 1) / 2) * width -
+        cursorXCssPx;
+      const offsetY =
+        ((1 - (m1 * x + m5 * y + m9 * z + m13) * invW) / 2) * height -
+        cursorYCssPx;
+      const distanceSq = offsetX * offsetX + offsetY * offsetY;
+      if (!(distanceSq <= widestRadiusSq)) continue;
+      for (let bucket = bucketCount - 1; bucket >= 0; bucket -= 1) {
+        if (distanceSq > PICK_RADII_SQ[bucket]!) break;
+        if (!(depth >= bestDepth[bucket]!)) {
+          bestDepth[bucket] = depth;
+          bestDistanceSq[bucket] = distanceSq;
         }
       }
     }
   }
-  const best = bests.find((entry) => entry !== null);
-  if (best === undefined || best === null) return MISS;
-  return {
-    status: "hit",
-    pointOnRay: [
-      ray.origin[0] + ray.direction[0] * best.depth,
-      ray.origin[1] + ray.direction[1] * best.depth,
-      ray.origin[2] + ray.direction[2] * best.depth,
-    ],
-    distancePx: best.distancePx,
-  };
+  for (let bucket = 0; bucket < bucketCount; bucket += 1) {
+    const depth = bestDepth[bucket]!;
+    if (Number.isNaN(depth)) continue;
+    return {
+      status: "hit",
+      pointOnRay: [
+        rayX + dirX * depth,
+        rayY + dirY * depth,
+        rayZ + dirZ * depth,
+      ],
+      distancePx: Math.sqrt(bestDistanceSq[bucket]!),
+    };
+  }
+  return MISS;
 };
 
 /**
