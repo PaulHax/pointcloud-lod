@@ -245,6 +245,26 @@ export type LodControllerStats = {
   readonly selection: LodSelectionStats;
 };
 
+/**
+ * What a host reports about this cloud on every frame.
+ *
+ * A view governor needs the memory ceiling to bound the aggregate budget
+ * before splitting it, the projected importance to weight this cloud's share,
+ * and the physical operation counts to know whether work is still landing; a
+ * renderer needs the byte share to size its reuse pool. All of it is already
+ * held, so this costs nothing to read — unlike {@link LodControllerStats},
+ * which walks the selected set and the submitted set to answer questions no
+ * frame asks. Every field here is the same number under the same name there.
+ */
+export type LodGovernorInputs = {
+  readonly memoryBudgetBytes: number;
+  readonly memoryCeilingPoints: number;
+  /** The selection's root screen-space error; `selection.projectedImportance`. */
+  readonly projectedImportance: number;
+  readonly physicalTileOperations: number;
+  readonly physicalHierarchyOperations: number;
+};
+
 export type LodSelectionStats = {
   readonly generation: number;
   /** Increments only when the selected key set changes. */
@@ -349,6 +369,12 @@ export type LodController = {
    * the byte-bounded CPU cache. Re-enabling selects against the latest camera.
    */
   setActive(active: boolean): void;
+  /**
+   * The per-frame numbers for a view governor and a resource pool. Prefer it
+   * to `stats()` in a render loop: `stats()` is a diagnostic snapshot and
+   * builds the whole thing.
+   */
+  governorInputs(): LodGovernorInputs;
   stats(): LodControllerStats;
   /**
    * Read-only pick against exactly the tile set last handed to the consumer
@@ -1887,6 +1913,16 @@ export const createLodController = (
       // removals for exactly the actors the consumer was last handed.
       for (const keyString of resident.keys()) releaseResident(keyString);
       scheduleFlush();
+    },
+
+    governorInputs() {
+      return {
+        memoryBudgetBytes: memoryBudgetBytes(),
+        memoryCeilingPoints: memoryCeilingPoints(),
+        projectedImportance: selectionStats.projectedImportance,
+        physicalTileOperations,
+        physicalHierarchyOperations,
+      };
     },
 
     stats() {

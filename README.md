@@ -295,6 +295,7 @@ These methods are useful when application policy lives outside the library:
 | `adapter.setVisible(false)`                          | Hide drawing only. Actors, GPU resources, selection, and streaming remain live for an immediate show.                                                                    |
 | `controller.setActive(false)`                        | Stop selection and tile fetches, emit removals that move actors into the bounded adapter pool, and retain decoded payloads in the bounded CPU cache.                     |
 | `controller.setSource(source)`                       | Replace the dataset or revision, dropping old hierarchy, residency, cache, and pending results before bootstrapping the new source.                                      |
+| `controller.governorInputs()`                        | The five numbers a governor member and an adapter resource ceiling need, read straight from held state. Prefer it to `stats()` on a per-frame path.                      |
 | `adapter.setBaseMatrix(matrix)`                      | Apply or update the registration transform without rebuilding tile payloads.                                                                                             |
 
 The main dials and their tradeoffs are:

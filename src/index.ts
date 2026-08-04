@@ -50,6 +50,7 @@ export {
   type LodController,
   type LodControllerOptions,
   type LodControllerStats,
+  type LodGovernorInputs,
   type LodSelectionStats,
   type LodDrawPlanStats,
   type PointPresentation,

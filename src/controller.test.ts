@@ -1976,6 +1976,39 @@ describe("createLodController — selection stats", () => {
     expect(controller.stats().selection.targetTiles).toBe(0);
     controller.dispose();
   });
+
+  it("reports the same per-frame numbers as the full snapshot", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await settle();
+
+    // Before any camera, mid-stream with a read outstanding, and settled: the
+    // narrow read a host polls per frame must never disagree with the
+    // diagnostic snapshot it was carved out of.
+    const agrees = () => {
+      const stats = controller.stats();
+      expect(controller.governorInputs()).toEqual({
+        memoryBudgetBytes: stats.memoryBudgetBytes,
+        memoryCeilingPoints: stats.memoryCeilingPoints,
+        projectedImportance: stats.selection.projectedImportance,
+        physicalTileOperations: stats.physicalTileOperations,
+        physicalHierarchyOperations: stats.physicalHierarchyOperations,
+      });
+    };
+
+    agrees();
+    controller.setCamera(VIEW);
+    await settle();
+    agrees();
+    expect(controller.governorInputs().projectedImportance).toBeGreaterThan(0);
+
+    for (const d of deferred.values()) d.resolve();
+    await settle();
+    agrees();
+
+    controller.setActive(false);
+    agrees();
+    controller.dispose();
+  });
 });
 
 describe("createLodController — batch coalescing", () => {
