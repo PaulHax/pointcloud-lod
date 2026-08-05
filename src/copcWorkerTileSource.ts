@@ -1,4 +1,5 @@
 import type {
+  CopcWorkerError,
   CopcWorkerRequest,
   CopcWorkerResponse,
 } from "./copcWorkerProtocol";
@@ -25,7 +26,7 @@ type PendingRequest = {
 const abortReason = (signal: AbortSignal | undefined): unknown =>
   signal?.reason ?? new DOMException("The operation was aborted", "AbortError");
 
-const remoteError = (input: { name: string; message: string }): Error => {
+const remoteError = (input: CopcWorkerError): Error => {
   const error = new Error(input.message);
   error.name = input.name;
   return error;
@@ -80,20 +81,24 @@ export const createCopcWorkerTileSource = async (
     }
   };
 
-  const workerFailure = (message: string): void => {
-    if (disposed) return;
-    disposed = true;
-    rejectAll(new Error(message));
-    worker.terminate();
-  };
-
   const onError = (event: ErrorEvent): void =>
-    workerFailure(event.message || "COPC worker failed");
+    teardown(new Error(event.message || "COPC worker failed"));
   const onMessageError = (): void =>
-    workerFailure("COPC worker returned an unreadable message");
+    teardown(new Error("COPC worker returned an unreadable message"));
   worker.addEventListener("message", onMessage);
   worker.addEventListener("error", onError);
   worker.addEventListener("messageerror", onMessageError);
+
+  /** Idempotent: detach, fail everything still in flight, and stop the worker. */
+  const teardown = (error: unknown): void => {
+    if (disposed) return;
+    disposed = true;
+    worker.removeEventListener("message", onMessage);
+    worker.removeEventListener("error", onError);
+    worker.removeEventListener("messageerror", onMessageError);
+    rejectAll(error);
+    worker.terminate();
+  };
 
   const send = (
     request: CopcWorkerRequest,
@@ -135,15 +140,15 @@ export const createCopcWorkerTileSource = async (
       lazPerfWasmUrl: options.lazPerfWasmUrl ?? defaultWasmUrl(),
     });
   } catch (error) {
-    disposed = true;
-    rejectAll(error);
-    worker.terminate();
+    teardown(error);
     throw error;
   }
   if (opened.type !== "opened") {
-    disposed = true;
-    worker.terminate();
-    throw new Error(`COPC worker returned ${opened.type} while opening`);
+    const error = new Error(
+      `COPC worker returned ${opened.type} while opening`,
+    );
+    teardown(error);
+    throw error;
   }
   const metadata = opened.metadata;
 
@@ -173,13 +178,7 @@ export const createCopcWorkerTileSource = async (
     },
 
     dispose() {
-      if (disposed) return;
-      disposed = true;
-      worker.removeEventListener("message", onMessage);
-      worker.removeEventListener("error", onError);
-      worker.removeEventListener("messageerror", onMessageError);
-      rejectAll(new Error("COPC source is disposed"));
-      worker.terminate();
+      teardown(new Error("COPC source is disposed"));
     },
   };
 };

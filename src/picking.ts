@@ -45,6 +45,11 @@ const PICK_RADII_SQ: readonly number[] = PICK_RADII_CSS_PX.map(
   (radius) => radius * radius,
 );
 
+/** The outermost bucket: nothing further out is a candidate or a hit. */
+const WIDEST_PICK_RADIUS_CSS_PX =
+  PICK_RADII_CSS_PX[PICK_RADII_CSS_PX.length - 1]!;
+const WIDEST_PICK_RADIUS_SQ = PICK_RADII_SQ[PICK_RADII_SQ.length - 1]!;
+
 /** One pickable tile: a submitted payload plus its hierarchy bounds. */
 export type PickTile = {
   /** World-space origin the tile-local positions are relative to. */
@@ -114,12 +119,11 @@ export const tileIsPickCandidate = (
       }
     }
   }
-  const radius = PICK_RADII_CSS_PX[PICK_RADII_CSS_PX.length - 1]!;
   return (
-    query.cursorXCssPx >= minX - radius &&
-    query.cursorXCssPx <= maxX + radius &&
-    query.cursorYCssPx >= minY - radius &&
-    query.cursorYCssPx <= maxY + radius
+    query.cursorXCssPx >= minX - WIDEST_PICK_RADIUS_CSS_PX &&
+    query.cursorXCssPx <= maxX + WIDEST_PICK_RADIUS_CSS_PX &&
+    query.cursorYCssPx >= minY - WIDEST_PICK_RADIUS_CSS_PX &&
+    query.cursorYCssPx <= maxY + WIDEST_PICK_RADIUS_CSS_PX
   );
 };
 
@@ -170,7 +174,6 @@ export const sweepPickPoints = (
   const [rayX, rayY, rayZ] = ray.origin;
   const [dirX, dirY, dirZ] = ray.direction;
   const bucketCount = PICK_RADII_SQ.length;
-  const widestRadiusSq = PICK_RADII_SQ[bucketCount - 1]!;
   /**
    * NaN marks an empty bucket: `!(depth >= NaN)` holds, so the first
    * qualifying point fills a bucket and every later one has to beat it.
@@ -200,7 +203,7 @@ export const sweepPickPoints = (
         ((1 - (m1 * x + m5 * y + m9 * z + m13) * invW) / 2) * height -
         cursorYCssPx;
       const distanceSq = offsetX * offsetX + offsetY * offsetY;
-      if (!(distanceSq <= widestRadiusSq)) continue;
+      if (!(distanceSq <= WIDEST_PICK_RADIUS_SQ)) continue;
       for (let bucket = bucketCount - 1; bucket >= 0; bucket -= 1) {
         if (distanceSq > PICK_RADII_SQ[bucket]!) break;
         if (!(depth >= bestDepth[bucket]!)) {

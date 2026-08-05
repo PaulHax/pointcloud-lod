@@ -470,6 +470,11 @@ let currentDevicePixelRatio = window.devicePixelRatio;
 let loadGeneration = 0;
 let fixedPointDiameterCssPx = 2;
 let autoPointScale = 0.5;
+/**
+ * The draw density fixed quality is asked for. Adaptive quality derives its
+ * own from measured frame time and takes no preference.
+ */
+let fixedDensityFraction = 1;
 
 const telemetryEnvironment = (): TelemetryEnvironment =>
   captureTelemetryEnvironment(
@@ -735,8 +740,10 @@ const applyBudgetMode = (): void => {
   member = null;
   fixedBudget ??= createViewBudgetCoordinator({
     pointBudget: fixedPointBudget(),
+    densityFraction: fixedDensityFraction,
   });
   fixedBudget.setPointBudget(fixedPointBudget());
+  fixedBudget.setDensityFraction(fixedDensityFraction);
   fixedMember ??= fixedBudget.register({
     id: loadedName || "cloud",
     setPointBudget: (budget) => controller?.setPointBudget(budget),
@@ -2130,8 +2137,14 @@ Object.assign(window, {
       adapter?.setDevicePixelRatio(ratio);
       scheduleRender();
     },
+    /**
+     * The view-wide allocator owns the controller's density: writing it into
+     * the controller directly would be overwritten by the next allocation
+     * pass. Only fixed quality takes a preference.
+     */
     setDensityFraction: (fraction: number) => {
-      controller?.setDensityFraction(fraction);
+      fixedDensityFraction = fraction;
+      fixedBudget?.setDensityFraction(fraction);
       scheduleRender();
     },
     /** Report every frame as this duration; null restores real measurement. */

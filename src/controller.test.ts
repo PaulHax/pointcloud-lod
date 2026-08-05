@@ -457,6 +457,59 @@ describe("createLodController", () => {
     controller.dispose();
   });
 
+  it("raises the budget against the current view, not the pending one", async () => {
+    const tree: Record<string, FakeEntry> = {
+      "0-0-0-0": {
+        pointCount: 10,
+        spacing: 10,
+        bounds: { min: [-1, -1, -0.5], max: [1, 1, 0.5] },
+        children: ["1-0-0-0", "1-1-0-0"],
+      },
+      "1-0-0-0": {
+        pointCount: 80,
+        spacing: 1,
+        bounds: { min: [-0.5, -0.2, -0.5], max: [-0.1, 0.2, 0.5] },
+      },
+      "1-1-0-0": {
+        pointCount: 30,
+        spacing: 1,
+        bounds: { min: [0.1, -0.2, -0.5], max: [0.5, 0.2, 0.5] },
+      },
+    };
+    // Shifts clip x by +1: only world x <= 0 stays inside the frustum, so the
+    // right-hand child is culled while the root and the left-hand child remain.
+    const LEFT_ONLY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1];
+    vi.useFakeTimers();
+    try {
+      const { controller, loadCalls } = makeController(tree, {
+        pointBudget: 50,
+        selectionDelayMs: 150,
+      });
+      await settle();
+      controller.setCamera({ ...VIEW, position: [0.5, 0, 2] });
+      await settle();
+      expect(loadCalls).toEqual(["0-0-0-0", "1-1-0-0"]);
+
+      // The camera turns away from the 30-point child; its selection pass is
+      // still debounced, so the retained target names a node this view culls.
+      controller.setCamera({
+        ...VIEW,
+        viewProj: LEFT_ONLY,
+        position: [-0.5, 0, 2],
+      });
+      await settle();
+
+      // 10 + 80 fits in 110; nothing may be held back for the culled child.
+      controller.setPointBudget(110);
+      await settle();
+      expect(loadCalls).toEqual(["0-0-0-0", "1-1-0-0", "1-0-0-0"]);
+      expect(controller.stats().selection.targetPoints).toBe(90);
+      controller.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps a near-tied selected tile until a challenger is materially more important", async () => {
     const tree: Record<string, FakeEntry> = {
       "0-0-0-0": {
@@ -2457,8 +2510,7 @@ describe("createLodController — bounded physical work", () => {
   it("reads each tile key once however often the camera churns", async () => {
     // Cancellation never destroys a decoded payload: the read either stays
     // physically alive or lands in the cache. A reselect must therefore adopt
-    // one or spend the other — re-reading the same bytes was ~40% of all tile
-    // I/O under a panning camera.
+    // one or spend the other, never re-read the same bytes.
     const graph = createPageGraphSource({
       depth: 2,
       branching: 4,

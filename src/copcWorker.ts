@@ -3,6 +3,7 @@ import { createLazPerf } from "laz-perf/lib/worker";
 import { createCopcTileSource } from "./copcTileSource";
 import type { RangeGetter } from "./copcTileSource";
 import type {
+  CopcWorkerError,
   CopcWorkerRequest,
   CopcWorkerResponse,
 } from "./copcWorkerProtocol";
@@ -16,7 +17,7 @@ type WorkerScope = {
   postMessage(message: CopcWorkerResponse, transfer?: Transferable[]): void;
 };
 
-const serializedError = (error: unknown): { name: string; message: string } =>
+const serializedError = (error: unknown): CopcWorkerError =>
   error instanceof Error
     ? { name: error.name, message: error.message }
     : { name: "Error", message: String(error) };
@@ -37,8 +38,8 @@ export const serveCopcTileSourceWorker = (
   let source: TileSource | null = null;
   const operations = new Map<number, AbortController>();
 
-  const respond = (response: CopcWorkerResponse, transfer?: Transferable[]) =>
-    scope.postMessage(response, transfer);
+  const respondError = (id: number, error: unknown): void =>
+    scope.postMessage({ type: "error", id, error: serializedError(error) });
 
   const run = async (request: CopcWorkerRequest): Promise<void> => {
     if (request.type === "cancel") {
@@ -58,17 +59,13 @@ export const serveCopcTileSourceWorker = (
               : blobGetter(request.source),
           lazPerf,
         });
-        respond({
+        scope.postMessage({
           type: "opened",
           id: request.id,
           metadata: source.metadata(),
         });
       } catch (error) {
-        respond({
-          type: "error",
-          id: request.id,
-          error: serializedError(error),
-        });
+        respondError(request.id, error);
       }
       return;
     }
@@ -82,7 +79,7 @@ export const serveCopcTileSourceWorker = (
           signal: operation.signal,
         });
         operation.signal.throwIfAborted();
-        respond({ type: "nodes", id: request.id, nodes });
+        scope.postMessage({ type: "nodes", id: request.id, nodes });
       } else {
         const tile = await source.loadTile(request.key, {
           signal: operation.signal,
@@ -90,14 +87,10 @@ export const serveCopcTileSourceWorker = (
         operation.signal.throwIfAborted();
         const transfer: Transferable[] = [tile.positions.buffer];
         if (tile.rgb !== undefined) transfer.push(tile.rgb.buffer);
-        respond({ type: "tile", id: request.id, tile }, transfer);
+        scope.postMessage({ type: "tile", id: request.id, tile }, transfer);
       }
     } catch (error) {
-      respond({
-        type: "error",
-        id: request.id,
-        error: serializedError(error),
-      });
+      respondError(request.id, error);
     } finally {
       operations.delete(request.id);
     }

@@ -220,8 +220,7 @@ describe("example controls", () => {
 
       await session.page.mouse.move(x, y);
       // vtk.js starts a new mouse-move burst after 200 ms of quiet. This is
-      // the ordinary click-after-looking case that used to discard its first
-      // movement event.
+      // the ordinary click-after-looking case.
       await session.page.waitForTimeout(250);
       const before = await session.readCamera();
       await session.page.mouse.down();
@@ -355,7 +354,7 @@ describe("example controls", () => {
 
       // Pace the opening steps so Chromium presents several distinct frames.
       // Both values and the graph should then describe cadence, while the
-      // existing "last frame" diagnostic continues to describe render cost.
+      // "last frame" diagnostic describes render cost.
       await wheelAtViewerCenter(session, 12, 20);
       await session.page.waitForFunction(
         () =>

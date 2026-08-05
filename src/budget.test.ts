@@ -162,36 +162,69 @@ describe("selectNodes", () => {
       keyToString(key) === "1-0-0-0" ? 100 : 1;
     // This parent-closed seed can come from an earlier view in which the
     // cheaper child had higher priority.
-    const initial = {
-      selected: new Set(["0-0-0-0", "1-1-0-0"]),
-      totalPoints: 40,
-    };
+    const seed = new Set(["0-0-0-0", "1-1-0-0"]);
 
     const grown = selectNodes({
       root: ROOT_KEY,
       getNode: hierarchyOf(counts),
       priority,
       pointBudget: 90,
-      seed: {
-        selected: initial.selected,
-        totalPoints: initial.totalPoints,
-      },
+      seed,
     });
-    expect(grown.selected).toEqual(initial.selected);
-    expect(grown.totalPoints).toBe(initial.totalPoints);
+    expect(grown.selected).toEqual(seed);
+    expect(grown.totalPoints).toBe(40);
 
     const enoughForBoth = selectNodes({
       root: ROOT_KEY,
       getNode: hierarchyOf(counts),
       priority,
       pointBudget: 120,
-      seed: {
-        selected: initial.selected,
-        totalPoints: initial.totalPoints,
-      },
+      seed,
     });
     expect(enoughForBoth.selected).toEqual(new Set(Object.keys(counts)));
     expect(enoughForBoth.totalPoints).toBe(120);
+  });
+
+  it("a seeded node the view no longer offers reserves nothing", () => {
+    const counts = {
+      "0-0-0-0": 10,
+      "1-0-0-0": 80,
+    };
+    // '1-1-0-0' (30 points) was seeded from an earlier view that still showed
+    // it; this view culls it, so its cost must not be held back.
+    const result = selectNodes({
+      root: ROOT_KEY,
+      getNode: hierarchyOf(counts),
+      priority: flatPriority,
+      pointBudget: 90,
+      seed: new Set(["0-0-0-0", "1-1-0-0"]),
+    });
+
+    expect(result.selected).toEqual(new Set(["0-0-0-0", "1-0-0-0"]));
+    expect(result.totalPoints).toBe(90);
+  });
+
+  it("a seeded node behind a culled ancestor reserves nothing", () => {
+    const counts = {
+      "0-0-0-0": 10,
+      "1-0-0-0": 80,
+      "1-1-0-0": 30,
+      "2-2-0-0": 40,
+    };
+    // The whole '1-1-0-0' branch is gone from this view: the seeded grandchild
+    // is unreachable even though the hierarchy still knows its point count.
+    const visible = hierarchyOf(counts);
+    const result = selectNodes({
+      root: ROOT_KEY,
+      getNode: (key) =>
+        keyToString(key) === "1-1-0-0" ? undefined : visible(key),
+      priority: flatPriority,
+      pointBudget: 90,
+      seed: new Set(["0-0-0-0", "1-1-0-0", "2-2-0-0"]),
+    });
+
+    expect(result.selected).toEqual(new Set(["0-0-0-0", "1-0-0-0"]));
+    expect(result.totalPoints).toBe(90);
   });
 
   it("skips nodes the hierarchy does not know (unloaded pages)", () => {

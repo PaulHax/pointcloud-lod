@@ -978,7 +978,7 @@ describe("createViewGovernor ceilings", () => {
     member.update({ memoryCeilingPoints: 1_200_000 });
 
     // Frames far under target: on a machine with headroom the loop would grow
-    // by maxIncreaseStep for ever, because only the aggregate was clamped.
+    // by maxIncreaseStep for ever if only the aggregate were clamped.
     for (let round = 0; round < 30; round += 1) {
       frames(governor, 1, 10);
       vi.advanceTimersByTime(500);

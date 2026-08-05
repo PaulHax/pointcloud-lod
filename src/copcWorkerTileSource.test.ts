@@ -37,6 +37,15 @@ class FakeWorker {
   }
 }
 
+/**
+ * A timer turn runs only once the microtask queue is empty, so any settlement
+ * chained off the abort — however many `then` hops deep — has landed by then.
+ */
+const drainMicrotasks = (): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, 0);
+  });
+
 const openSource = async (worker: FakeWorker) => {
   const sourcePromise = createCopcWorkerTileSource({
     source: "https://example.test/cloud.copc.laz",
@@ -115,7 +124,7 @@ describe("COPC worker tile source", () => {
     );
 
     abort.abort();
-    await Promise.resolve();
+    await drainMicrotasks();
     expect(settled).toBe(false);
     expect(worker.sent.at(-1)).toEqual({
       type: "cancel",

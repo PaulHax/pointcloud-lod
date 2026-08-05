@@ -480,6 +480,8 @@ const spacingQuantiles = (
   };
 };
 
+const ROOT_KEY_STRING = keyToString(ROOT_KEY);
+
 const DEFAULT_PRESENTATION: FixedPointPresentation = {
   mode: "fixed",
   diameterCssPx: 2,
@@ -612,13 +614,7 @@ const emptyReadyTerminalFrontier =
     tileBlockedNodes: 0,
     budgetBlockedNodes: 0,
     drawBlockedNodes: 0,
-    projectedSpacingCssPx: {
-      p25: null,
-      p50: null,
-      p75: null,
-      p95: null,
-      max: null,
-    },
+    projectedSpacingCssPx: spacingQuantiles([]),
   });
 
 /**
@@ -923,7 +919,7 @@ export const createLodController = (
     // has moved past. Before the first camera selection cannot run at all,
     // and the bootstrap page is then the only page there is to ask for.
     if (view !== null) runSelection();
-    else if (keyString === keyToString(ROOT_KEY)) queueRootPage();
+    else if (keyString === ROOT_KEY_STRING) queueRootPage();
   };
 
   /** Tiles currently delivered to the consumer. */
@@ -992,6 +988,15 @@ export const createLodController = (
     partialTiles: 0,
     skippedTiles: 0,
   };
+
+  /**
+   * What a submitted tile actually draws: the planned prefix, clamped to the
+   * payload the consumer holds. The plan is allocated from hierarchy point
+   * counts, which need not match the decoded tile.
+   */
+  const drawnPointsOf = (keyString: string, tile: TileData): number =>
+    Math.min(tile.pointCount, drawPrefixes.get(keyString) ?? 0);
+
   type TileRead = {
     readonly abort: AbortController;
     wanted: boolean;
@@ -1239,7 +1244,7 @@ export const createLodController = (
       selectionStats.targetPoints * densityFraction,
     );
     const allocation = allocatePointPrefixes({
-      root: keyToString(ROOT_KEY),
+      root: ROOT_KEY_STRING,
       pointBudget,
       getCandidate: (keyString) => {
         if (!target.has(keyString)) return undefined;
@@ -1423,7 +1428,7 @@ export const createLodController = (
       presentation.mode !== "auto" ||
       view === null ||
       drawPlanStats.plannedPoints <= 0 ||
-      !target.has(keyToString(ROOT_KEY))
+      !target.has(ROOT_KEY_STRING)
     ) {
       return;
     }
@@ -1450,11 +1455,10 @@ export const createLodController = (
    * The ready frontier, computed on demand and held until something that can
    * move it happens.
    *
-   * It is a diagnostic, and `stats()` is its only reader, but computing it
-   * eagerly meant a full recursive walk and a quantile sort on every tile
-   * arrival — for a number no frame depends on. The invalidation points are
-   * exactly where the walk used to run, so a host that reads `stats()` on
-   * every frame pays what it always did and one that never reads it pays
+   * It is a diagnostic, and `stats()` is its only reader, so computing it
+   * eagerly would cost a full recursive walk and a quantile sort on every tile
+   * arrival — for a number no frame depends on. A host that reads `stats()` on
+   * every frame pays one walk per invalidation; one that never reads it pays
    * nothing.
    */
   let frontierCache: LodSelectionStats["readyTerminalFrontier"] | null = null;
@@ -1470,7 +1474,7 @@ export const createLodController = (
         currentView === null ||
         !active ||
         drawPlanStats.plannedPoints <= 0 ||
-        !target.has(keyToString(ROOT_KEY))
+        !target.has(ROOT_KEY_STRING)
       ) {
         frontierCache = null;
         return emptyReadyTerminalFrontier();
@@ -1602,10 +1606,7 @@ export const createLodController = (
     }
   };
 
-  const runSelection = (seed?: {
-    readonly selected: ReadonlySet<string>;
-    readonly totalPoints: number;
-  }): void => {
+  const runSelection = (seed?: ReadonlySet<string>): void => {
     if (disposed || !active || view === null) return;
     const budget = currentBudget();
     const currentView = view;
@@ -1685,11 +1686,10 @@ export const createLodController = (
     // controller with nothing to draw and no way to ask again. Level 0 sorts
     // to the front, and queuePages drops anything already held, in flight, or
     // resting, so this costs nothing on the normal path.
-    const rootString = keyToString(ROOT_KEY);
     queuePages(
-      pagesLoaded.has(rootString)
+      pagesLoaded.has(ROOT_KEY_STRING)
         ? neededPages.map(keyToString)
-        : [rootString, ...neededPages.map(keyToString)],
+        : [ROOT_KEY_STRING, ...neededPages.map(keyToString)],
     );
 
     // Deselected submitted tiles leave renderer/GPU residency immediately.
@@ -1826,7 +1826,7 @@ export const createLodController = (
   };
 
   /** Bootstrap path for the root page, used before any camera exists. */
-  const queueRootPage = (): void => queuePages([keyToString(ROOT_KEY)]);
+  const queueRootPage = (): void => queuePages([ROOT_KEY_STRING]);
 
   // Bootstrap: an active controller loads hierarchy eagerly; an inactive one
   // waits until activation so a hidden cloud performs no hierarchy I/O.
@@ -1864,8 +1864,7 @@ export const createLodController = (
       if (disposed || sameMatrix(appliedModelMatrix, matrix ?? null)) return;
       appliedModelMatrix = matrix ? Array.from(matrix) : null;
       modelFrame = matrix ? modelFrameOf(matrix) : null;
-      modelMatrixUsable =
-        matrix === null || matrix === undefined ? true : modelFrame !== null;
+      modelMatrixUsable = matrix ? modelFrame !== null : true;
       applyWorldView();
     },
 
@@ -1891,10 +1890,7 @@ export const createLodController = (
         nextBudget > previousBudget &&
           target.size > 0 &&
           selectionStats.targetPoints <= nextBudget
-          ? {
-              selected: target,
-              totalPoints: selectionStats.targetPoints,
-            }
+          ? target
           : undefined,
       );
     },
@@ -2012,10 +2008,7 @@ export const createLodController = (
       }
       let drawnPoints = 0;
       for (const [keyString, tile] of submitted) {
-        drawnPoints += Math.min(
-          tile.pointCount,
-          drawPrefixes.get(keyString) ?? 0,
-        );
+        drawnPoints += drawnPointsOf(keyString, tile);
       }
       const workPending =
         physicalTileOperations > 0 ||
@@ -2079,10 +2072,7 @@ export const createLodController = (
         : pickView;
       const tiles: PickTile[] = [];
       for (const [keyString, tile] of submitted) {
-        const pointCount = Math.min(
-          tile.pointCount,
-          drawPrefixes.get(keyString) ?? 0,
-        );
+        const pointCount = drawnPointsOf(keyString, tile);
         if (pointCount === 0) continue;
         tiles.push({
           origin: tile.origin,

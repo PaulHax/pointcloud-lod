@@ -14,6 +14,8 @@ export type ViewBudgetMemberOptions = {
   setDensityFraction(densityFraction: number): void;
   /** Names this cloud in diagnostics. */
   id?: string;
+  /** Whether the cloud draws; defaults to true. A hidden cloud takes no share. */
+  active?: boolean;
 };
 
 export type ViewBudgetMemberUpdate = {
@@ -145,6 +147,10 @@ const DISTRIBUTE_DEADBAND = 0.01;
  */
 const DENSITY_DEADBAND = 0.05;
 
+/** A null ceiling is no ceiling: the value passes through uncapped. */
+const cappedBy = (value: number, ceiling: number | null): number =>
+  ceiling === null ? value : Math.min(value, ceiling);
+
 export const createViewBudgetCoordinator = (
   options: ViewBudgetCoordinatorOptions = {},
 ): ViewBudgetCoordinator => {
@@ -184,10 +190,8 @@ export const createViewBudgetCoordinator = (
         : (total ?? 0) + member.memoryCeilingPoints,
     );
 
-  const effectiveSelectionBudget = (): number => {
-    const ceiling = memoryCeilingPoints();
-    return ceiling === null ? pointBudget : Math.min(pointBudget, ceiling);
-  };
+  const effectiveSelectionBudget = (): number =>
+    cappedBy(pointBudget, memoryCeilingPoints());
 
   const effectiveDrawBudget = (): number =>
     Math.min(drawBudget, effectiveSelectionBudget());
@@ -213,10 +217,9 @@ export const createViewBudgetCoordinator = (
       projectedImportance: member.importance,
       allocatedShare: share,
       memoryCeilingPoints: ceiling,
-      effectiveBudget: ceiling === null ? share : Math.min(share, ceiling),
+      effectiveBudget: cappedBy(share, ceiling),
       selectionShare,
-      effectiveSelectionBudget:
-        ceiling === null ? selectionShare : Math.min(selectionShare, ceiling),
+      effectiveSelectionBudget: cappedBy(selectionShare, ceiling),
       densityFraction: Math.max(member.densityFraction, 0),
     };
     return {
@@ -264,12 +267,11 @@ export const createViewBudgetCoordinator = (
 
       const nextDraw = shareOf(member, drawTotal);
       const ceiling = member.memoryCeilingPoints;
-      const effectiveSelection =
-        ceiling === null
-          ? Math.max(member.selectionBudget, 0)
-          : Math.min(Math.max(member.selectionBudget, 0), ceiling);
-      const effectiveDraw =
-        ceiling === null ? nextDraw : Math.min(nextDraw, ceiling);
+      const effectiveSelection = cappedBy(
+        Math.max(member.selectionBudget, 0),
+        ceiling,
+      );
+      const effectiveDraw = cappedBy(nextDraw, ceiling);
       const nextDensity =
         effectiveSelection > 0
           ? Math.min(1, effectiveDraw / effectiveSelection)
@@ -314,7 +316,7 @@ export const createViewBudgetCoordinator = (
         setPointBudget: options.setPointBudget,
         setDensityFraction: options.setDensityFraction,
         id: options.id ?? null,
-        active: true,
+        active: options.active ?? true,
         importance: null,
         memoryCeilingPoints: null,
         drawBudget: -1,

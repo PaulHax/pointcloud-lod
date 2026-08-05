@@ -200,8 +200,8 @@ export const createRendererAdapter = (
   let disposed = false;
 
   // Running totals rather than a walk per question. Trimming asks how many
-  // bytes are held once per evicted entry, so re-summing both maps there made
-  // shedding a large pool quadratic in its size — and the pool is largest
+  // bytes are held once per evicted entry, so re-summing both maps there would
+  // make shedding a large pool quadratic in its size — and the pool is largest
   // exactly when a cloud has just been deactivated and the ceiling dropped to
   // nothing, which is when the walk is longest and the answer needed soonest.
   // Every mutation of either map goes through the four helpers below.
@@ -404,9 +404,9 @@ export const createRendererAdapter = (
       }
       // Removals alone must still bring the pool back under its ceiling. A
       // deactivated cloud sends nothing but removals, and trimming only on the
-      // addition path left its actors on the GPU until something else happened
-      // to add a tile — which, for a cloud the host just switched off, is
-      // never.
+      // addition path would leave its actors on the GPU until something else
+      // happened to add a tile — which, for a cloud the host just switched
+      // off, is never.
       trimPool();
       if (changed) {
         workRevision += 1;

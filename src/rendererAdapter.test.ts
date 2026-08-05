@@ -428,9 +428,9 @@ describe("adapter resource pool", () => {
       pooledTiles: 0,
     });
 
-    // Deactivating a cloud sends exactly this: removals and nothing else. The
-    // pool used to be trimmed only while adding, so these actors stayed on the
-    // GPU until some other cloud happened to add a tile.
+    // Deactivating a cloud sends exactly this: removals and nothing else.
+    // Trimming the pool only while adding would leave these actors on the GPU
+    // until some other cloud happened to add a tile.
     drop(adapter, KEY_A, KEY_B);
 
     expect(adapter.stats()).toMatchObject({

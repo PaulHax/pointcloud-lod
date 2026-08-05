@@ -689,7 +689,7 @@ export const createViewGovernor = (
       const state: MemberState = {
         budgetMember,
         id: memberOptions.id ?? null,
-        active: true,
+        active: memberOptions.active ?? true,
         physicalTileOperations: 0,
         physicalHierarchyOperations: 0,
         workPending: false,
@@ -771,9 +771,7 @@ export const createViewGovernor = (
       if (!inferredBurst) inferredBurst = takeMotionReference("inferred");
       if (inferredBurstTimer !== null) clearTimeout(inferredBurstTimer);
       inferredBurstTimer = setTimeout(() => {
-        inferredBurstTimer = null;
-        inferredBurst?.release();
-        inferredBurst = null;
+        endInferredBurst();
         // The settled regime cannot refine quality it never measures, so
         // hand the host one frame to start from.
         scheduleRender?.();

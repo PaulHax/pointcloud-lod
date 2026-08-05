@@ -37,13 +37,12 @@ export type SelectNodesOptions = {
   /** Maximum total points across all selected nodes. */
   pointBudget: number;
   /**
-   * Parent-closed selection to retain while a larger budget adds detail.
-   * `totalPoints` reserves its exact cost before optional candidates compete.
+   * Parent-closed selection to retain while a larger budget adds detail. Its
+   * cost is reserved before optional candidates compete, measured against the
+   * hierarchy this call sees: a seeded key the view no longer offers reserves
+   * nothing, so it cannot starve the new selection.
    */
-  seed?: {
-    readonly selected: ReadonlySet<string>;
-    readonly totalPoints: number;
-  };
+  seed?: ReadonlySet<string>;
 };
 
 export type NodeSelection = {
@@ -65,8 +64,51 @@ export type NodeSelection = {
   readonly budgetSkipped: ReadonlySet<string>;
 };
 
+type ResolveNode = (
+  key: VoxelKey,
+  keyString: string,
+) => HierarchyNode | undefined;
+
+/**
+ * Cost of the seed under the hierarchy this call sees: a breadth-first walk of
+ * the seeded keys from the root. An unavailable one — culled, or on a page that
+ * has gone away — ends the walk there, so neither it nor its descendants (which
+ * are unreachable in a parent-closed set) reserve any points.
+ */
+const seedPoints = (
+  root: VoxelKey,
+  seed: ReadonlySet<string>,
+  resolve: ResolveNode,
+): number => {
+  let total = 0;
+  let frontier: VoxelKey[] = [root];
+  while (frontier.length > 0) {
+    const next: VoxelKey[] = [];
+    for (const key of frontier) {
+      const keyString = keyToString(key);
+      if (!seed.has(keyString)) continue;
+      const node = resolve(key, keyString);
+      if (node === undefined) continue;
+      total += node.pointCount;
+      next.push(...node.children);
+    }
+    frontier = next;
+  }
+  return total;
+};
+
 export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
   const { root, getNode, priority, pointBudget, seed } = options;
+
+  // The seed walk visits keys the main walk visits again; `getNode` is allowed
+  // to be observed once per key.
+  const resolved = new Map<string, HierarchyNode | undefined>();
+  const resolve: ResolveNode = (key, keyString) => {
+    if (resolved.has(keyString)) return resolved.get(keyString);
+    const node = getNode(key);
+    resolved.set(keyString, node);
+    return node;
+  };
 
   const selected = new Set<string>();
   const budgetSkipped = new Set<string>();
@@ -74,7 +116,7 @@ export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
   let consideredNodes = 0;
   let availableNodes = 0;
   let budgetSkippedPoints = 0;
-  let reservedSeedPoints = seed?.totalPoints ?? 0;
+  let reservedSeedPoints = seed ? seedPoints(root, seed, resolve) : 0;
   let candidates: VoxelKey[] = [root];
   // Once one node in breadth-first priority order cannot fit, selection has
   // reached this budget's spatial boundary. Do not spend the leftover on
@@ -85,20 +127,23 @@ export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
 
   while (candidates.length > 0) {
     consideredNodes += candidates.length;
-    const ranked: { key: VoxelKey; node: HierarchyNode; priority: number }[] =
-      [];
+    const ranked: {
+      keyString: string;
+      node: HierarchyNode;
+      priority: number;
+    }[] = [];
     for (const key of candidates) {
-      const node = getNode(key);
+      const keyString = keyToString(key);
+      const node = resolve(key, keyString);
       if (node === undefined) continue;
-      ranked.push({ key, node, priority: priority(key) });
+      ranked.push({ keyString, node, priority: priority(key) });
     }
     ranked.sort((a, b) => b.priority - a.priority);
     availableNodes += ranked.length;
 
     const nextCandidates: VoxelKey[] = [];
-    for (const { key, node } of ranked) {
-      const keyString = keyToString(key);
-      const required = seed?.selected.has(keyString) ?? false;
+    for (const { keyString, node } of ranked) {
+      const required = seed?.has(keyString) ?? false;
       const reservedAfter = required
         ? Math.max(0, reservedSeedPoints - node.pointCount)
         : reservedSeedPoints;

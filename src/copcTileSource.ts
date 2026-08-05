@@ -118,10 +118,10 @@ const httpRangeGetter =
     const expectedLength = end - begin;
     if (expectedLength === 0) return new Uint8Array();
     let lastError: unknown = null;
-    let attemptsMade = 0;
+    let attempt = 0;
 
-    for (let attempt = 1; attempt <= HTTP_RANGE_ATTEMPTS; attempt += 1) {
-      attemptsMade = attempt;
+    while (attempt < HTTP_RANGE_ATTEMPTS) {
+      attempt += 1;
       let retryable = true;
       try {
         const response = await fetch(url, {
@@ -166,7 +166,7 @@ const httpRangeGetter =
       lastError instanceof Error ? lastError.message : String(lastError);
     throw new Error(
       `Could not fetch bytes ${begin}-${end - 1} from ${url} after ` +
-        `${attemptsMade} ${attemptsMade === 1 ? "attempt" : "attempts"}: ${detail}`,
+        `${attempt} ${attempt === 1 ? "attempt" : "attempts"}: ${detail}`,
       { cause: lastError },
     );
   };
@@ -318,7 +318,7 @@ export const createCopcTileSource = async (
    * Only the root page, and only because it is the one page with several
    * readers at open: the RGB sample below needs the root node's byte range, a
    * host framing the scene reads the hierarchy, and the controller bootstraps
-   * from it. Without this each of them paid for the same range read. Deeper
+   * from it. Without this each of them pays for the same range read. Deeper
    * pages are read once each by the controller, which tracks what it holds, so
    * caching them would grow with the octree and buy nothing.
    */
@@ -333,7 +333,7 @@ export const createCopcTileSource = async (
    * read of the root tile takes them.
    *
    * The sample has to decode that node, and the controller's very first tile
-   * request is for the same one, so without this a coloured cloud decoded its
+   * request is for the same one, so without this a coloured cloud decodes its
    * root twice before drawing anything. Released on use; only a source whose
    * root is never drawn keeps it, and that node is the smallest in the file.
    */

@@ -37,9 +37,9 @@ const betterCandidate = (left: DrawCandidate, right: DrawCandidate): number =>
  * The admission frontier as a binary heap under {@link betterCandidate}.
  *
  * Each admission takes the best tile and puts that tile's children back, so
- * the frontier changes by a handful of entries per step. Re-sorting the whole
- * list every time made the pass quadratic in the tiles a plan holds, which on
- * a dense view is thousands, for an order a heap maintains incrementally.
+ * the frontier changes by a handful of entries per step — an order a heap
+ * maintains incrementally, without re-sorting the thousands of entries a
+ * dense view's plan holds.
  */
 const createFrontier = () => {
   const heap: DrawCandidate[] = [];
@@ -100,9 +100,7 @@ export const allocatePointPrefixes = (
 ): PointPrefixAllocation => {
   const pointBudget = Math.max(0, Math.floor(options.pointBudget));
   // One pass over the reachable tree, for both the candidates admission walks
-  // and the tile count its skips are measured against. Asking the host again
-  // during admission made it rebuild every candidate's key, children and
-  // priority a second time.
+  // and the tile count its skips are measured against.
   const candidates = new Map<string, DrawCandidate>();
   const seen = new Set<string>();
   let drawableTiles = 0;
@@ -148,13 +146,9 @@ export const allocatePointPrefixes = (
     for (const child of candidate.children) admit(child);
   }
 
-  const plannedPoints = [...prefixes.values()].reduce(
-    (sum, count) => sum + count,
-    0,
-  );
   return {
     prefixes,
-    plannedPoints,
+    plannedPoints: pointBudget - remaining,
     fullTiles,
     partialTiles,
     skippedTiles: Math.max(0, drawableTiles - prefixes.size),

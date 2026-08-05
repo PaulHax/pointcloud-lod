@@ -257,11 +257,6 @@ export const captureTelemetryEnvironment = (
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
-const mergedDetail = (
-  initial: TelemetryDetail,
-  final: TelemetryDetail,
-): TelemetryDetail => ({ ...initial, ...final });
-
 const filenameTimestamp = (date: Date): string =>
   date.toISOString().replaceAll(":", "-").replaceAll(".", "-");
 
@@ -389,6 +384,13 @@ export const createTelemetryRecorder = (options: {
     };
   };
 
+  /** Discard whatever was recorded and open a fresh recording. */
+  const beginRecording = (): void => {
+    reset();
+    append({ ...baseEvent(), type: "session", phase: "start" });
+    observeLongTasks();
+  };
+
   const trace = (): TelemetryTrace =>
     clone({
       schemaVersion: 1 as const,
@@ -402,10 +404,8 @@ export const createTelemetryRecorder = (options: {
   const recorder: TelemetryRecorder = {
     start() {
       if (active) return;
-      reset();
+      beginRecording();
       active = true;
-      append({ ...baseEvent(), type: "session", phase: "start" });
-      observeLongTasks();
     },
 
     stop() {
@@ -418,13 +418,8 @@ export const createTelemetryRecorder = (options: {
     },
 
     clear() {
-      const wasActive = active;
-      reset();
-      active = wasActive;
-      if (active) {
-        append({ ...baseEvent(), type: "session", phase: "start" });
-        observeLongTasks();
-      }
+      if (active) beginRecording();
+      else reset();
     },
 
     dispose() {
@@ -471,7 +466,7 @@ export const createTelemetryRecorder = (options: {
           pendingWork,
           durationMs: Math.max(0, now() - beganAt),
           status,
-          detail: mergedDetail(detail, finalDetail),
+          detail: { ...detail, ...finalDetail },
         });
       };
     },
@@ -541,21 +536,19 @@ export const createTelemetryRecorder = (options: {
     trace,
 
     download(filename) {
-      const documentRef = document;
-      const urlRef = URL;
       const blob = new Blob([JSON.stringify(trace(), null, 2)], {
         type: "application/json",
       });
-      const url = urlRef.createObjectURL(blob);
-      const anchor = documentRef.createElement("a");
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
       anchor.href = url;
       anchor.download =
         filename ?? `pointcloud-telemetry-${filenameTimestamp(wallNow())}.json`;
       anchor.hidden = true;
-      documentRef.body.append(anchor);
+      document.body.append(anchor);
       anchor.click();
       anchor.remove();
-      setTimeout(() => urlRef.revokeObjectURL(url), 0);
+      setTimeout(() => URL.revokeObjectURL(url), 0);
     },
   };
 

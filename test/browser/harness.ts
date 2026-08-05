@@ -357,11 +357,7 @@ export const closeBrowser = async (): Promise<void> => {
   sharedBrowser = null;
 };
 
-/**
- * The render viewport every session starts at: the browser's own default
- * window, which is what these checks were written against back when the canvas
- * filled it.
- */
+/** The render viewport every session starts at. */
 export const DEFAULT_VIEWPORT: Viewport = { width: 1280, height: 720 };
 
 const POLL_INTERVAL_MS = 50;

@@ -329,12 +329,18 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
           x: box.x + box.width / 2,
           y: box.y + box.height / 2,
         };
+        // The knob asks the view-wide allocator for a density; the allocator
+        // answers with the one it can hold under this cloud's memory ceiling.
+        // The capture reports what it drew at, not what it asked for.
+        let appliedInteractionDensity: number | null = null;
         const markMotionBoundary = async (
           label: string,
           moving: boolean,
         ): Promise<void> => {
           if (moving && budgetMode === "fixed") {
             await session.setDensityFraction(fixedInteractionDensity);
+            appliedInteractionDensity =
+              (await session.stats()).controller?.densityFraction ?? null;
           }
           await session.markTelemetry(label);
           if (!moving && budgetMode === "fixed") {
@@ -429,8 +435,7 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
         await session.markTelemetry("horizontal-rotation-ended");
 
         // Pick another support depth below the horizontal focal point and drag
-        // that projected point to centre. This is the close-view pan the
-        // previous fixed 560 px gesture failed to express.
+        // that projected point to centre.
         await session.frame();
         const horizontalTarget = await pickBelowFocus(session, box, 0.6);
         await session.markTelemetry("horizontal-pan-start");
@@ -540,7 +545,8 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
                 ? {
                     mode: "fixed",
                     points: Math.floor(fixedPointBudget),
-                    interactionDensity: fixedInteractionDensity,
+                    requestedInteractionDensity: fixedInteractionDensity,
+                    appliedInteractionDensity,
                   }
                 : { mode: "adaptive" },
           })}\nTELEMETRY_ARTIFACT ${outputPath}\n`,

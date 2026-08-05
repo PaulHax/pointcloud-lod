@@ -70,6 +70,18 @@ export const createGpuFrameTimer = (
     gpuMs: number | null = null,
   ): void => options.onResult({ id, status, gpuMs });
 
+  /** Retire one pending query: forget it, free it, and report its result. */
+  const settle = (
+    id: number,
+    query: WebGLQuery,
+    status: GpuTimerResult["status"],
+    gpuMs: number | null = null,
+  ): void => {
+    pending.delete(id);
+    deleteQuery(query);
+    emit(id, status, gpuMs);
+  };
+
   const ensurePoll = (): void => {
     if (disposed || pending.size === 0 || pollHandle !== null) return;
     pollHandle = schedulePoll(() => {
@@ -114,19 +126,11 @@ export const createGpuFrameTimer = (
       if (disposed || !supported || pending.size === 0) return;
       try {
         if (gl.getParameter(extension.GPU_DISJOINT_EXT) === true) {
-          for (const [id, query] of pending) {
-            pending.delete(id);
-            deleteQuery(query);
-            emit(id, "disjoint");
-          }
+          for (const [id, query] of pending) settle(id, query, "disjoint");
           return;
         }
       } catch {
-        for (const [id, query] of pending) {
-          pending.delete(id);
-          deleteQuery(query);
-          emit(id, "error");
-        }
+        for (const [id, query] of pending) settle(id, query, "error");
         return;
       }
 
@@ -139,21 +143,17 @@ export const createGpuFrameTimer = (
             query,
             gl.QUERY_RESULT,
           );
-          pending.delete(id);
-          deleteQuery(query);
           if (
             typeof nanoseconds === "number" &&
             Number.isFinite(nanoseconds) &&
             nanoseconds >= 0
           ) {
-            emit(id, "valid", nanoseconds / 1_000_000);
+            settle(id, query, "valid", nanoseconds / 1_000_000);
           } else {
-            emit(id, "error");
+            settle(id, query, "error");
           }
         } catch {
-          pending.delete(id);
-          deleteQuery(query);
-          emit(id, "error");
+          settle(id, query, "error");
         }
       }
       ensurePoll();

@@ -30,6 +30,24 @@ describe("createViewBudgetCoordinator", () => {
     });
   });
 
+  it("registers a member inactive when it says so", () => {
+    const coordinator = createViewBudgetCoordinator({
+      pointBudget: 1_000_000,
+    });
+    const hidden = vi.fn();
+    const shown = vi.fn();
+    coordinator.register({
+      ...memberOptions(hidden),
+      id: "hidden",
+      active: false,
+    });
+    coordinator.register({ ...memberOptions(shown), id: "shown" });
+
+    // A hidden cloud that joined as active would halve the visible one's share
+    // until its first update landed.
+    expect(shown).toHaveBeenLastCalledWith(1_000_000);
+  });
+
   it("splits one target by projected importance", () => {
     const coordinator = createViewBudgetCoordinator({
       pointBudget: 1_000_000,
