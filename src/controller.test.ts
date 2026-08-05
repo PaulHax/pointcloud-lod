@@ -2043,6 +2043,8 @@ describe("createLodController — selection stats", () => {
         memoryBudgetBytes: stats.memoryBudgetBytes,
         memoryCeilingPoints: stats.memoryCeilingPoints,
         projectedImportance: stats.selection.projectedImportance,
+        demandPoints:
+          stats.selection.targetPoints + stats.selection.budgetSkippedPoints,
         physicalTileOperations: stats.physicalTileOperations,
         physicalHierarchyOperations: stats.physicalHierarchyOperations,
       });

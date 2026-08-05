@@ -1385,8 +1385,9 @@ const scheduleRender = (): void => {
 /**
  * The per-frame report. `governorInputs()` reads held state only: the governor
  * needs the memory ceiling to bound the aggregate before it splits it, the
- * projected importance to weight this cloud's share, and the physical work
- * counts to know whether another frame is still worth painting. `stats()`
+ * projected importance and the demand to size this cloud's share, and the
+ * physical work counts to know whether another frame is still worth painting.
+ * `stats()`
  * would answer all of that too, but by walking the selected and submitted
  * sets — a diagnostic snapshot no frame should be paying for.
  */
@@ -1398,6 +1399,7 @@ const updateMember = (): void => {
     active: true,
     projectedImportance: inputs.projectedImportance,
     memoryCeilingPoints: inputs.memoryCeilingPoints,
+    demandPoints: inputs.demandPoints,
     physicalTileOperations: inputs.physicalTileOperations,
     physicalHierarchyOperations: inputs.physicalHierarchyOperations,
   });
@@ -1405,6 +1407,7 @@ const updateMember = (): void => {
     active: true,
     projectedImportance: inputs.projectedImportance,
     memoryCeilingPoints: inputs.memoryCeilingPoints,
+    demandPoints: inputs.demandPoints,
   });
 };
 

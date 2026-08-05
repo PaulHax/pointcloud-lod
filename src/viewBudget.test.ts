@@ -216,6 +216,152 @@ describe("createViewBudgetCoordinator", () => {
     );
   });
 
+  it("gives a cloud no more than it can use and spends the rest elsewhere", () => {
+    const coordinator = createViewBudgetCoordinator({ pointBudget: 1_000_000 });
+    const sparse = vi.fn();
+    const dense = vi.fn();
+    // The sparse cloud's coarser spacing projects the *larger* screen-space
+    // error, so importance alone hands the smaller cloud the bigger share.
+    coordinator
+      .register({ ...memberOptions(sparse), id: "sparse" })
+      .update({ projectedImportance: 3, demandPoints: 138_000 });
+    coordinator
+      .register({ ...memberOptions(dense), id: "dense" })
+      .update({ projectedImportance: 1, demandPoints: 9_000_000 });
+
+    expect(sparse).toHaveBeenLastCalledWith(138_000);
+    expect(dense).toHaveBeenLastCalledWith(862_000);
+  });
+
+  it("draws a satisfied cloud whole while the view is thinned", () => {
+    const coordinator = createViewBudgetCoordinator({ pointBudget: 1_000_000 });
+    const sparseDensity = vi.fn();
+    const denseDensity = vi.fn();
+    coordinator
+      .register({ ...memberOptions(vi.fn(), sparseDensity), id: "sparse" })
+      .update({ projectedImportance: 1, demandPoints: 138_000 });
+    const denseMember = coordinator.register({
+      ...memberOptions(vi.fn(), denseDensity),
+      id: "dense",
+    });
+    denseMember.update({ projectedImportance: 1, demandPoints: 9_000_000 });
+
+    // Frame time gets tight and the view halves what it draws. The sparse
+    // cloud still fits inside its share whole, so it loses nothing: its points
+    // cost almost nothing and there are few enough that each one matters.
+    coordinator.setTargets(1_000_000, 500_000);
+
+    expect(sparseDensity).toHaveBeenLastCalledWith(1);
+    expect(denseDensity).toHaveBeenLastCalledWith(362_000 / 862_000);
+    expect(denseMember.stats()).toMatchObject({
+      activeConstraint: "target",
+    });
+  });
+
+  it("names demand as the bound when a cloud draws everything it asked for", () => {
+    const coordinator = createViewBudgetCoordinator({ pointBudget: 1_000_000 });
+    const member = coordinator.register({
+      ...memberOptions(vi.fn()),
+      id: "sparse",
+    });
+    member.update({ demandPoints: 138_000 });
+
+    expect(member.stats()).toMatchObject({
+      demandPoints: 138_000,
+      allocatedShare: 138_000,
+      effectiveSelectionBudget: 138_000,
+      densityFraction: 1,
+      activeConstraint: "demand",
+    });
+  });
+
+  it("treats a zero demand as unreported rather than as wanting nothing", () => {
+    const coordinator = createViewBudgetCoordinator({ pointBudget: 1_000_000 });
+    const setPointBudget = vi.fn();
+    const member = coordinator.register(memberOptions(setPointBudget));
+
+    // A cloud reports demand from its own selection, so a member allocated the
+    // nothing an empty first selection asks for would never select again.
+    member.update({ demandPoints: 0 });
+
+    expect(setPointBudget).toHaveBeenLastCalledWith(1_000_000);
+    expect(member.stats().demandPoints).toBeNull();
+  });
+
+  it("lets a satisfied cloud grow back when its demand rises", () => {
+    const coordinator = createViewBudgetCoordinator({ pointBudget: 1_000_000 });
+    const near = vi.fn();
+    const far = vi.fn();
+    const nearMember = coordinator.register({
+      ...memberOptions(near),
+      id: "near",
+    });
+    nearMember.update({ projectedImportance: 1, demandPoints: 100_000 });
+    coordinator
+      .register({ ...memberOptions(far), id: "far" })
+      .update({ projectedImportance: 1, demandPoints: 5_000_000 });
+    expect(near).toHaveBeenLastCalledWith(100_000);
+    expect(far).toHaveBeenLastCalledWith(900_000);
+
+    // The camera moves in and the near cloud has hierarchy to spend on. A
+    // cloud reports demand out of a selection its own share bounded, so being
+    // satisfied once must never pin it there. It rises to its weighted half,
+    // not to the whole 800_000: the far cloud wants more than a half too.
+    nearMember.update({ demandPoints: 800_000 });
+
+    expect(near).toHaveBeenLastCalledWith(500_000);
+    expect(far).toHaveBeenLastCalledWith(500_000);
+  });
+
+  it("takes the last small step onto a demand the deadband would swallow", () => {
+    const coordinator = createViewBudgetCoordinator({ pointBudget: 1_000_000 });
+    const setPointBudget = vi.fn();
+    const member = coordinator.register(memberOptions(setPointBudget));
+
+    // A cloud finds its last points a handful at a time. The deadband is
+    // relative, so for this cloud it spans 1_386 points — enough to strand it
+    // just short of whole, which is the one place the thinning is visible.
+    member.update({ demandPoints: 138_000 });
+    expect(setPointBudget).toHaveBeenLastCalledWith(138_000);
+    member.update({ demandPoints: 138_633 });
+
+    expect(setPointBudget).toHaveBeenLastCalledWith(138_633);
+    expect(member.stats().effectiveSelectionBudget).toBe(138_633);
+  });
+
+  it("shares by weight once no demand is small enough to satisfy", () => {
+    const coordinator = createViewBudgetCoordinator({ pointBudget: 1_000_000 });
+    const near = vi.fn();
+    const far = vi.fn();
+    coordinator
+      .register({ ...memberOptions(far), id: "far" })
+      .update({ projectedImportance: 1, demandPoints: 4_000_000 });
+    coordinator
+      .register({ ...memberOptions(near), id: "near" })
+      .update({ projectedImportance: 3, demandPoints: 4_000_000 });
+
+    expect(far).toHaveBeenLastCalledWith(250_000);
+    expect(near).toHaveBeenLastCalledWith(750_000);
+  });
+
+  it("keeps a member's own memory ceiling ahead of its demand", () => {
+    const coordinator = createViewBudgetCoordinator({ pointBudget: 1_000_000 });
+    const member = coordinator.register({
+      ...memberOptions(vi.fn()),
+      id: "capped",
+    });
+    member.update({ demandPoints: 900_000, memoryCeilingPoints: 300_000 });
+
+    // The cloud wants more than it can hold, so what it draws is explained by
+    // the memory it has, not by everything it asked for.
+    expect(member.stats()).toMatchObject({
+      demandPoints: 900_000,
+      allocatedShare: 300_000,
+      effectiveBudget: 300_000,
+      activeConstraint: "memory",
+    });
+  });
+
   it("keeps exact adaptive draw targets instead of round-tripping a ratio", () => {
     const coordinator = createViewBudgetCoordinator({ pointBudget: 3 });
     coordinator.setTargets(3, 2);

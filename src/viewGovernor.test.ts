@@ -1190,6 +1190,7 @@ describe("createViewGovernor diagnostics", () => {
         projectedImportance: 2.5,
         allocatedShare: 1_000_000,
         memoryCeilingPoints: 9_000_000,
+        demandPoints: null,
         effectiveBudget: 1_000_000,
         selectionShare: 1_000_000,
         effectiveSelectionBudget: 1_000_000,

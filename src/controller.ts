@@ -272,6 +272,15 @@ export type LodGovernorInputs = {
   readonly memoryCeilingPoints: number;
   /** The selection's root screen-space error; `selection.projectedImportance`. */
   readonly projectedImportance: number;
+  /**
+   * Points this cloud could use at the current camera: what it selected plus
+   * what its budget turned away. Exact whenever the budget is not binding —
+   * nothing is turned away, so this is the whole of what the camera asks for —
+   * and otherwise it only has to exceed the share, which it does, because
+   * something was turned away. A governor allocates no more than this, so a
+   * small cloud stops holding points it has nothing to spend them on.
+   */
+  readonly demandPoints: number;
   readonly physicalTileOperations: number;
   readonly physicalHierarchyOperations: number;
 };
@@ -1989,6 +1998,8 @@ export const createLodController = (
         memoryBudgetBytes: memoryBudgetBytes(),
         memoryCeilingPoints: memoryCeilingPoints(),
         projectedImportance: selectionStats.projectedImportance,
+        demandPoints:
+          selectionStats.targetPoints + selectionStats.budgetSkippedPoints,
         physicalTileOperations,
         physicalHierarchyOperations,
       };

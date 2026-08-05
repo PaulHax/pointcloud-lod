@@ -114,11 +114,16 @@ export type ViewGovernorOptions = AdaptiveBudgetOptions & {
   motionDebounceMs?: number;
 };
 
-/** Which bound explains the budget a cloud is currently drawing to. */
+/**
+ * Which bound explains the budget a cloud is currently drawing to. `demand` is
+ * the answer no budget explains: the cloud is drawing everything the camera
+ * asks of it, so raising anything would change nothing.
+ */
 export type BudgetConstraint =
   | "adaptive"
   | "configured-maximum"
   | "memory"
+  | "demand"
   | "inactive";
 
 /**
