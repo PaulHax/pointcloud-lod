@@ -474,6 +474,7 @@ export const createViewGovernor = (
   const constraintOf = (
     active: number,
     memory: number | null,
+    spendable: number | null,
   ): BudgetConstraint => {
     if (active === 0) return "inactive";
     const track = budget.budget(interacting());
@@ -485,6 +486,10 @@ export const createViewGovernor = (
         return "memory";
       }
     }
+    // Demand outranks the configured maximum for the same reason: a view
+    // already drawing all it was asked for would not draw one point more if
+    // that maximum were lifted.
+    if (spendable !== null && spendable <= track) return "demand";
     if (configuredMaxPoints !== null && configuredMaxPoints <= track) {
       return "configured-maximum";
     }
@@ -493,12 +498,19 @@ export const createViewGovernor = (
 
   const distribute = (): void => {
     if (disposed) return;
-    const ceiling = viewBudget.memoryCeiling();
-    // Hand the loop the memory ceiling before reading it. Clamping only the
+    const ceiling = viewBudget.spendableCeiling();
+    // Hand the loop the spendable ceiling before reading it. Clamping only the
     // aggregate would let the track integrate toward frame-time headroom the
-    // memory ceiling never allows it to spend: the effective budget would sit
-    // still while the track climbed for ever, so it would never report itself
+    // view never allows it to spend: the effective budget would sit still
+    // while the track climbed for ever, so it would never report itself
     // pinned and a host watching `needsFrame()` would repaint for ever.
+    //
+    // Demand bounds that headroom exactly as memory does. A cloud already
+    // drawing everything its camera asks for renders no slower for a larger
+    // budget, so every frame reads as headroom and the loop climbs until some
+    // other bound stops it — on a cloud whose demand sits well under its
+    // memory ceiling, that is a long climb spent repainting an image that
+    // cannot change.
     budget.setCeiling(ceiling);
     const drawTotal = aggregateBudget(ceiling);
     const selectionTotal = selectionBudget(ceiling);
@@ -813,7 +825,11 @@ export const createViewGovernor = (
       const pending = pendingWork();
       const allocation = viewBudget.stats();
       const viewCeiling = allocation.memoryCeilingPoints;
-      const viewConstraint = constraintOf(active, viewCeiling);
+      const viewConstraint = constraintOf(
+        active,
+        viewCeiling,
+        allocation.spendableCeilingPoints,
+      );
       const memberStats = [...members].map(
         (member): ViewGovernorMemberStats => {
           const allocated = member.budgetMember.stats();

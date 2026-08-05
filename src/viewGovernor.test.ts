@@ -1028,6 +1028,81 @@ describe("createViewGovernor ceilings", () => {
     expect(governor.stats().trackBudget).toBe(500_000);
   });
 
+  it("stops the loop at what the view can draw, not at what memory allows", () => {
+    // A cloud drawing everything its camera asks for renders no slower for a
+    // larger budget, so every frame reads as headroom. Bounded only by
+    // memory, the loop climbs the whole way to a ceiling it can never spend
+    // — and `needsFrame()` keeps the host repainting an unchanging image for
+    // the length of the climb.
+    const governor = createViewGovernor(FAST_ADAPT);
+    const member = governor.register(memberOptions(vi.fn()));
+    member.update({
+      memoryCeilingPoints: 100_000_000,
+      demandPoints: 2_000_000,
+    });
+
+    for (let round = 0; round < 40; round += 1) {
+      frames(governor, 1, 10);
+      vi.advanceTimersByTime(50);
+    }
+
+    const stats = governor.stats();
+    expect(stats.trackBudget).toBe(2_000_000);
+    expect(stats.activeConstraint).toBe("demand");
+    expect(stats.members[0]?.activeConstraint).toBe("demand");
+    expect(governor.needsFrame()).toBe(false);
+  });
+
+  it("refines again once the camera asks for more", () => {
+    const governor = createViewGovernor(FAST_ADAPT);
+    const member = governor.register(memberOptions(vi.fn()));
+    member.update({
+      memoryCeilingPoints: 100_000_000,
+      demandPoints: 2_000_000,
+    });
+    for (let round = 0; round < 40; round += 1) {
+      frames(governor, 1, 10);
+      vi.advanceTimersByTime(50);
+    }
+    expect(governor.needsFrame()).toBe(false);
+
+    // Moving closer asks more of the cloud, so the bound the budget was
+    // pinned to lifts and the loop owes the view the frames refinement needs.
+    member.update({ demandPoints: 20_000_000 });
+    expect(governor.needsFrame()).toBe(true);
+
+    for (let round = 0; round < 40; round += 1) {
+      frames(governor, 1, 10);
+      vi.advanceTimersByTime(50);
+    }
+    expect(governor.stats().trackBudget).toBeGreaterThan(2_000_000);
+  });
+
+  it("bounds the loop by each cloud's own limit, not by either total", () => {
+    // One cloud bound by memory and another bound by demand can together draw
+    // far less than the tighter of the two sums suggests: summing demand
+    // gives 21,000,000 and summing memory gives 21,000,000, while the view
+    // can only ever put 2,000,000 points on screen. A loop handed either
+    // total climbs through the whole difference.
+    const governor = createViewGovernor(FAST_ADAPT);
+    governor.register({ ...memberOptions(vi.fn()), id: "satisfied" }).update({
+      projectedImportance: 1,
+      memoryCeilingPoints: 20_000_000,
+      demandPoints: 1_000_000,
+    });
+    governor.register({ ...memberOptions(vi.fn()), id: "starved" }).update({
+      projectedImportance: 1,
+      memoryCeilingPoints: 1_000_000,
+      demandPoints: 20_000_000,
+    });
+
+    for (let round = 0; round < 40; round += 1) {
+      frames(governor, 1, 10);
+      vi.advanceTimersByTime(50);
+    }
+    expect(governor.stats().trackBudget).toBe(2_000_000);
+  });
+
   it("lets memory hold the budget under the adaptive floor", () => {
     const governor = createViewGovernor({
       initialBudget: 1_000_000,

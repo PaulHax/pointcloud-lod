@@ -106,6 +106,8 @@ export type ViewBudgetStats = {
   /** Requested aggregate draw target before memory limits. */
   readonly drawBudget: number;
   readonly memoryCeilingPoints: number | null;
+  /** What the view could draw at the current camera; null when unbounded. */
+  readonly spendableCeilingPoints: number | null;
   /** Effective aggregate draw budget after memory limits. */
   readonly aggregateBudget: number;
   /** Effective aggregate selection budget after memory limits. */
@@ -129,6 +131,12 @@ export type ViewBudgetCoordinator = {
    * the rest of the diagnostic snapshot.
    */
   memoryCeiling(): number | null;
+  /**
+   * The most points the view could draw at the current camera, or null when
+   * any active member is bounded by neither demand nor memory. Read per pass
+   * for the same reason as {@link memoryCeiling}.
+   */
+  spendableCeiling(): number | null;
   stats(): ViewBudgetStats;
   dispose(): void;
 };
@@ -254,6 +262,36 @@ export const createViewBudgetCoordinator = (
         ? total
         : (total ?? 0) + member.memoryCeilingPoints,
     );
+
+  /**
+   * The tightest bound known for one member: it can draw no more than the
+   * camera asks of it, and no more than its memory allows. Either may be
+   * unreported, and a member with neither is unbounded.
+   */
+  const memberCeiling = (member: MemberState): number =>
+    Math.min(
+      member.demand ?? Number.POSITIVE_INFINITY,
+      member.memoryCeilingPoints ?? Number.POSITIVE_INFINITY,
+    );
+
+  /**
+   * The most points this view could actually put on screen, and so the bound
+   * an adaptive loop must not integrate past. Summing each member's tightest
+   * bound is not the same as taking the tighter of the two sums: a view
+   * holding one cloud bound by memory and another bound by demand can spend
+   * far less than either aggregate suggests, and a loop given the aggregate
+   * would climb through the difference for nothing.
+   *
+   * Unreported reads as unbounded here, the opposite of the memory ceiling's
+   * reading of it. Under-counting memory only clamps harder, but a cloud whose
+   * first selection has not run has no demand to report, and counting that as
+   * nothing would clamp the view below what it needs to run one.
+   */
+  const spendableCeiling = (): number | null => {
+    if (activeCount() === 0) return null;
+    const total = reduceActive(0, (sum, member) => sum + memberCeiling(member));
+    return Number.isFinite(total) ? total : null;
+  };
 
   const effectiveSelectionBudget = (): number =>
     cappedBy(pointBudget, memoryCeilingPoints());
@@ -463,6 +501,10 @@ export const createViewBudgetCoordinator = (
       return memoryCeilingPoints();
     },
 
+    spendableCeiling() {
+      return spendableCeiling();
+    },
+
     stats() {
       const active = activeCount();
       const viewConstraint = constraint(active);
@@ -471,6 +513,7 @@ export const createViewBudgetCoordinator = (
         densityFraction,
         drawBudget,
         memoryCeilingPoints: memoryCeilingPoints(),
+        spendableCeilingPoints: spendableCeiling(),
         aggregateBudget: effectiveDrawBudget(),
         selectionBudget: effectiveSelectionBudget(),
         activeConstraint: viewConstraint,

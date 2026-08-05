@@ -216,6 +216,53 @@ describe("createViewBudgetCoordinator", () => {
     );
   });
 
+  it("reports what the view can draw as each cloud's own tightest bound", () => {
+    const coordinator = createViewBudgetCoordinator({ pointBudget: 4_000_000 });
+    coordinator.register(memberOptions(vi.fn())).update({
+      memoryCeilingPoints: 20_000_000,
+      demandPoints: 1_000_000,
+    });
+    coordinator.register(memberOptions(vi.fn())).update({
+      memoryCeilingPoints: 1_000_000,
+      demandPoints: 20_000_000,
+    });
+
+    // Both totals come to 21,000,000; neither is what this view can draw.
+    expect(coordinator.spendableCeiling()).toBe(2_000_000);
+    expect(coordinator.stats().spendableCeilingPoints).toBe(
+      coordinator.spendableCeiling(),
+    );
+  });
+
+  it("reads an unreported demand as unbounded rather than as nothing", () => {
+    const coordinator = createViewBudgetCoordinator({ pointBudget: 4_000_000 });
+    // A cloud whose first selection has not run reports no demand. Counting
+    // that as nothing would bound the view below what running one needs.
+    const member = coordinator.register(memberOptions(vi.fn()));
+    expect(coordinator.spendableCeiling()).toBeNull();
+
+    // Until it does, memory is the only bound it has.
+    member.update({ memoryCeilingPoints: 5_000_000 });
+    expect(coordinator.spendableCeiling()).toBe(5_000_000);
+
+    member.update({ demandPoints: 800_000 });
+    expect(coordinator.spendableCeiling()).toBe(800_000);
+  });
+
+  it("leaves the view unbounded while any active cloud is", () => {
+    const coordinator = createViewBudgetCoordinator({ pointBudget: 4_000_000 });
+    coordinator
+      .register(memberOptions(vi.fn()))
+      .update({ memoryCeilingPoints: 1_000_000, demandPoints: 500_000 });
+    const unbounded = coordinator.register(memberOptions(vi.fn()));
+
+    expect(coordinator.spendableCeiling()).toBeNull();
+
+    // An inactive cloud draws nothing, so it bounds nothing either way.
+    unbounded.update({ active: false });
+    expect(coordinator.spendableCeiling()).toBe(500_000);
+  });
+
   it("gives a cloud no more than it can use and spends the rest elsewhere", () => {
     const coordinator = createViewBudgetCoordinator({ pointBudget: 1_000_000 });
     const sparse = vi.fn();
