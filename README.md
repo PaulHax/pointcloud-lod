@@ -183,9 +183,9 @@ Selection is parent-closed: a child adds points without replacing its parent.
 While a selected child is still loading, missing from the hierarchy, or
 excluded by the point budget, the closest ready ancestor continues to cover
 that region. At a same-level point-budget boundary, an already selected node
-keeps a 10% projected-detail advantage within the same centre cone. This
-hysteresis prevents nearly tied tiles from trading places under tiny depth
-changes while allowing culling,
+keeps an eight-CSS-pixel-equivalent centre-cone advantage. This hysteresis
+prevents nearly tied tiles from trading places under tiny camera changes while
+allowing culling,
 refinement-cutoff transitions, and materially better candidates to take effect.
 Candidates are visited breadth-first and in concentric 3D cones around the
 camera's centre ray, with projected detail breaking ties. When the next

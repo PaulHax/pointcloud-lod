@@ -23,7 +23,6 @@ export type {
 export {
   frustumPlanes,
   boundsIntersectsFrustum,
-  boundsCenterRayOffset,
   distanceToBounds,
   perspectiveScreenSpaceError,
   orthographicScreenSpaceError,

@@ -572,37 +572,44 @@ describe("createLodController", () => {
       "0-0-0-0": {
         pointCount: 100,
         spacing: 1,
-        bounds: { min: [-1, -1, -0.5], max: [1, 1, 0.5] },
+        bounds: { min: [-1, -1, -6], max: [1, 1, -4] },
         children: ["1-0-0-0", "1-1-0-0"],
       },
       "1-0-0-0": {
         pointCount: 60,
         spacing: 0.1,
-        bounds: { min: [-0.5, -0.2, -0.5], max: [-0.1, 0.2, 0.5] },
+        bounds: { min: [-0.6, -0.1, -5.1], max: [-0.4, 0.1, -4.9] },
       },
       "1-1-0-0": {
         pointCount: 60,
         spacing: 0.1,
-        bounds: { min: [0.1, -0.2, -0.5], max: [0.5, 0.2, 0.5] },
+        bounds: { min: [0.4, -0.1, -5.1], max: [0.6, 0.1, -4.9] },
       },
+    };
+    const viewAt = (x: number): PerspectiveCameraView => {
+      const viewProj = Array.from(FRAMED_VIEW.viewProj);
+      // Same -Z-facing camera translated along X; projection scale is one.
+      viewProj[12] = -x;
+      return { ...FRAMED_VIEW, viewProj, position: [x, 0, 0] };
     };
     const { controller, loadCalls } = makeController(tree, {
       pointBudget: 160,
     });
     await settle();
 
-    controller.setCamera({ ...VIEW, position: [-0.5, 0, 2] });
+    controller.setCamera(viewAt(-0.5));
     await settle();
     expect(loadCalls).toEqual(["0-0-0-0", "1-0-0-0"]);
 
-    // The right child becomes about 8% more important. That is too small a
-    // difference to replace a large actor at the budget boundary.
-    controller.setCamera({ ...VIEW, position: [0.5, 0, 2] });
+    // The centre ray crosses toward the right child by less than the
+    // eight-pixel hysteresis band, so the selected left tile stays put.
+    controller.setCamera(viewAt(0.2));
     await settle();
     expect(loadCalls).toEqual(["0-0-0-0", "1-0-0-0"]);
 
-    // Once the difference clears the hysteresis band, the selection follows.
-    controller.setCamera({ ...VIEW, position: [1, 0, 2] });
+    // Once the right child is more than eight pixels closer to the centre ray,
+    // selection follows it.
+    controller.setCamera(viewAt(0.5));
     await settle();
     expect(loadCalls).toEqual(["0-0-0-0", "1-0-0-0", "1-1-0-0"]);
     controller.dispose();
