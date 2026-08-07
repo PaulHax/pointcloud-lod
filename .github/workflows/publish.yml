@@ -33,14 +33,13 @@ jobs:
           node-version: "22"
           cache: "npm"
       - run: npm ci
-      # Pull requests are squash-merged, so their title becomes the release
-      # commit semantic-release analyzes on main.
-      - name: Lint pull request title
+      - name: Lint pull request commits
         if: github.event_name == 'pull_request'
         env:
-          COMMIT_TITLE: ${{ github.event.pull_request.title }}
-        run: printf '%s\n' "$COMMIT_TITLE" | npm run commitlint
-      # Also guard direct pushes and the final squash commit on main.
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: npm run commitlint -- --from "$BASE_SHA" --to "$HEAD_SHA" --verbose
+      # Also guard commits pushed directly to the repository.
       - name: Lint pushed commits
         if: github.event_name == 'push'
         env:
