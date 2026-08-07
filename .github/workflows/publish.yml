@@ -26,11 +26,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: "npm"
       - run: npm ci
+      # Pull requests are squash-merged, so their title becomes the release
+      # commit semantic-release analyzes on main.
+      - name: Lint pull request title
+        if: github.event_name == 'pull_request'
+        env:
+          COMMIT_TITLE: ${{ github.event.pull_request.title }}
+        run: printf '%s\n' "$COMMIT_TITLE" | npm run commitlint
+      # Also guard direct pushes and the final squash commit on main.
+      - name: Lint pushed commits
+        if: github.event_name == 'push'
+        env:
+          BASE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: npm run commitlint -- --from "$BASE_SHA" --to "$HEAD_SHA" --verbose
       - run: npm run lint
       - run: npm run format:check
       - run: npm run typecheck
