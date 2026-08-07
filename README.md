@@ -183,10 +183,12 @@ Selection is parent-closed: a child adds points without replacing its parent.
 While a selected child is still loading, missing from the hierarchy, or
 excluded by the point budget, the closest ready ancestor continues to cover
 that region. At a same-level point-budget boundary, an already selected node
-keeps a 10% priority advantage. This hysteresis prevents nearly tied tiles from
-trading places under tiny camera changes while still allowing culling,
+keeps a 10% projected-detail advantage within the same centre cone. This
+hysteresis prevents nearly tied tiles from trading places under tiny depth
+changes while allowing culling,
 refinement-cutoff transitions, and materially better candidates to take effect.
-Candidates are visited breadth-first and foreground-to-horizon. When the next
+Candidates are visited breadth-first and in concentric 3D cones around the
+camera's centre ray, with projected detail breaking ties. When the next
 candidate does not fit, that pass stops adding optional detail instead of
 spending the remainder on either a cheaper horizon tile or a deeper foreground
 child. The next budget increase therefore extends the current band before
@@ -701,8 +703,9 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
     origin + tile-local Float32 positions + Uint8 RGB) for servers that
     reproject or transform points per tile.
 - **LOD controller** (`createLodController`) — decides which nodes are
-  resident: frustum culling, screen-space error priority, a visible-point
-  budget with a parent-closed selection invariant (COPC hierarchies are
+  resident: frustum culling, 3D centre-ray cone priority with projected-detail
+  tie-breaking, and a visible-point budget with a parent-closed selection
+  invariant (COPC hierarchies are
   additive, so that invariant alone guarantees hole-free refinement),
   coarse-first fetching with bounded concurrency and cancellation,
   byte-budgeted LRU caching of deselected tiles, and batched delivery.

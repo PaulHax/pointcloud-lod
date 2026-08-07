@@ -7,6 +7,7 @@ import {
   type PageGraphSource,
 } from "../test/fixtures/pageGraph";
 import {
+  boundsCenterRayOffset,
   distanceToBounds,
   type CameraView,
   type OrthographicCameraView,
@@ -41,6 +42,19 @@ const LOOK_AWAY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -10, 0, 0, 1];
 const VIEW: PerspectiveCameraView = {
   projection: "perspective",
   viewProj: IDENTITY,
+  position: [0, 0, 0],
+  fovY: Math.PI / 2,
+  viewportWidthCssPx: 100,
+  viewportHeightCssPx: 100,
+};
+
+const FRAMED_VIEW: PerspectiveCameraView = {
+  projection: "perspective",
+  // Symmetric 90° perspective camera at the origin, looking down -Z.
+  viewProj: [
+    1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1.002002002002002, -1, 0, 0,
+    -0.20020020020020018, 0,
+  ],
   position: [0, 0, 0],
   fovY: Math.PI / 2,
   viewportWidthCssPx: 100,
@@ -548,6 +562,41 @@ describe("createLodController", () => {
     controller.setCamera({ ...VIEW, position: [1, 0, 2] });
     await settle();
     expect(loadCalls).toEqual(["0-0-0-0", "1-0-0-0", "1-1-0-0"]);
+    controller.dispose();
+  });
+
+  it("loads a distant centre-ray tile before a nearby bottom tile", async () => {
+    const tree: Record<string, FakeEntry> = {
+      "0-0-0-0": {
+        pointCount: 10,
+        spacing: 10,
+        bounds: { min: [-3, -3, -21], max: [3, 3, -4] },
+        children: ["1-0-0-0", "1-1-0-0"],
+      },
+      "1-0-0-0": {
+        pointCount: 10,
+        spacing: 1,
+        bounds: { min: [-0.1, -0.1, -20.1], max: [0.1, 0.1, -19.9] },
+      },
+      "1-1-0-0": {
+        pointCount: 10,
+        spacing: 1,
+        bounds: { min: [-0.1, -2.1, -5.1], max: [0.1, -1.9, -4.9] },
+      },
+    };
+    const { controller, loadCalls, deferred } = makeController(tree, {
+      fetchConcurrency: 1,
+      pointBudget: 30,
+      refinementCutoffPx: 0,
+    });
+    await settle();
+    controller.setCamera(FRAMED_VIEW);
+    await settle();
+    expect(loadCalls).toEqual(["0-0-0-0"]);
+
+    deferred.get("0-0-0-0")!.resolve();
+    await settle();
+    expect(loadCalls).toEqual(["0-0-0-0", "1-0-0-0"]);
     controller.dispose();
   });
 
@@ -2627,21 +2676,29 @@ describe("createLodController — bounded physical work", () => {
     controller.dispose();
   });
 
-  it("orders same-level pages by screen-space error", async () => {
+  it("orders same-level pages by 3D centre ray, then camera distance", async () => {
     const position: [number, number, number] = [0.4, 0.3, 0.2];
+    const view = { ...VIEW, position };
     const graph = createPageGraphSource({ depth: 1, branching: 8 });
     const { controller } = makeScheduled(graph, { hierarchyConcurrency: 1 });
     await settle();
-    controller.setCamera({ ...VIEW, position });
+    controller.setCamera(view);
     await drainPages(graph);
 
-    // Same level and same spacing, so descending error is ascending distance.
+    // The cone offset is primary. Same-cone nodes have the same spacing, so
+    // descending projected error then reduces to ascending camera distance.
     const expected = childKeys(ROOT_KEY)
       .map((key) => ({
         keyString: keyToString(key),
+        centerOffset: boundsCenterRayOffset(nodeBounds(ROOT_CUBE, key), view),
         distance: distanceToBounds(position, nodeBounds(ROOT_CUBE, key)),
       }))
-      .sort((a, b) => a.distance - b.distance)
+      .sort(
+        (a, b) =>
+          a.centerOffset - b.centerOffset ||
+          a.distance - b.distance ||
+          a.keyString.localeCompare(b.keyString),
+      )
       .map((node) => node.keyString);
     expect(graph.pageCalls).toEqual(["0-0-0-0", ...expected]);
     controller.dispose();

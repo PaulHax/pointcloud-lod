@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   boundsIntersectsFrustum,
+  boundsCenterRayOffset,
   cursorRay,
   distanceToBounds,
   frustumPlanes,
@@ -346,6 +347,51 @@ describe("projectPointToCssPx", () => {
     ).toBeNull();
     const broken = [...IDENTITY.slice(0, 15), Number.NaN];
     expect(projectPointToCssPx(broken, [0, 0, 0], 200, 100)).toBeNull();
+  });
+});
+
+describe("boundsCenterRayOffset", () => {
+  const perspectiveView: PerspectiveCameraView = {
+    projection: "perspective",
+    viewProj: perspective(Math.PI / 2, 1, 0.1, 100),
+    position: [0, 0, 0],
+    fovY: Math.PI / 2,
+    viewportWidthCssPx: 400,
+    viewportHeightCssPx: 400,
+  };
+
+  it("prefers a distant volume on the 3D centre ray over a nearby side volume", () => {
+    const distantCenter = bounds([0, 0, -20], [0.1, 0.1, 0.1]);
+    const nearbyBottom = bounds([0, -2, -5], [0.1, 0.1, 0.1]);
+
+    expect(boundsCenterRayOffset(distantCenter, perspectiveView)).toBe(0);
+    expect(
+      boundsCenterRayOffset(nearbyBottom, perspectiveView),
+    ).toBeGreaterThan(0);
+  });
+
+  it("orders same-sized 3D volumes by their centre-ray angle", () => {
+    const inner = bounds([0.5, 0, -5], [0.1, 0.1, 0.1]);
+    const outer = bounds([2, 0, -5], [0.1, 0.1, 0.1]);
+    expect(boundsCenterRayOffset(inner, perspectiveView)).toBeLessThan(
+      boundsCenterRayOffset(outer, perspectiveView),
+    );
+  });
+
+  it("orders parallel volumes by perpendicular clearance from the centre ray", () => {
+    const view: OrthographicCameraView = {
+      projection: "orthographic",
+      viewProj: orthographic(5, 1, 0.1, 100),
+      position: [0, 0, 0],
+      parallelScale: 5,
+      viewportWidthCssPx: 400,
+      viewportHeightCssPx: 400,
+    };
+    const center = bounds([0, 0, -20], [0.1, 0.1, 0.1]);
+    const side = bounds([2, 0, -5], [0.1, 0.1, 0.1]);
+
+    expect(boundsCenterRayOffset(center, view)).toBe(0);
+    expect(boundsCenterRayOffset(side, view)).toBeGreaterThan(0);
   });
 });
 
