@@ -78,6 +78,12 @@ h1 {
   gap: 8px;
 }
 
+.example-link {
+  color: #8dcdf4;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 button.reset-view {
   height: 30px;
   padding: 0 12px;

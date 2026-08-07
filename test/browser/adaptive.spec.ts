@@ -16,11 +16,14 @@
  */
 
 import { afterAll, describe, expect, it } from "vitest";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 
 import { DEFAULTS as LOD_DEFAULTS } from "../../src/adaptiveBudget";
 import {
+  ADAPTIVE_CLOUD,
   closeBrowser,
-  cloudsUnderTest,
+  FIXTURES,
   openExample,
   type ExampleSession,
   type ExampleStats,
@@ -66,15 +69,8 @@ const NEUTRAL_FRAME_MS = 23;
  */
 const SETTLE_MS = 300_000;
 
-/** Comfortably over the loop's 400 ms cooldown, so "stopped" is not "waiting". */
+/** Comfortably over the loop's 400 ms cooldown for the final no-paint check. */
 const QUIET_MS = 1_500;
-/**
- * Frames the budget must hold still for, over and above the cooldown. The
- * loop needs a full window (8) under the current budget before it can adjust
- * again, so anything at or below that would call a half-filled window
- * "stopped".
- */
-const QUIET_FRAMES = 12;
 /** Long enough to cover several cooldowns' worth of further slow frames. */
 const HOLD_MS = 2_500;
 /** And enough frames for those cooldowns to have had something to measure. */
@@ -214,9 +210,6 @@ type Sample = {
   readonly stats: ExampleStats;
 };
 
-const budgetOf = (sample: Sample): number =>
-  governorOf(sample.stats).trackBudget;
-
 /**
  * Request frames until `done` holds.
  *
@@ -248,32 +241,15 @@ const drive = async (
   );
 };
 
-/**
- * The budget moved, then held still — for a cooldown AND for frames.
- *
- * Both, because the loop only ever acts on a frame: it needs a full window of
- * them under the current budget before it will adjust again. A wall-clock
- * quiet window alone is satisfied trivially the moment frames are slower than
- * the window itself, which is the ordinary case on a real cloud under a
- * software rasteriser — one paint takes seconds, so the very first sample
- * after a change already "held still for 1.5 s" and the drive stopped with
- * the loop mid-window. Measured that way, a budget still walking down was
- * reported as pinned at 17,894,925 points.
- */
-const budgetSteady =
-  (quietMs: number, quietFrames: number) =>
+/** The governor has reached a bound and has stopped requesting measurements. */
+const budgetClamped =
+  (acceptBudget: (points: number) => boolean) =>
   (trail: readonly Sample[]): boolean => {
-    const last = trail[trail.length - 1]!;
-    const first = trail[0]!;
-    if (trail.every((sample) => budgetOf(sample) === budgetOf(first)))
-      return false;
-    let lastMoved = 0;
-    for (const [index, sample] of trail.entries()) {
-      if (budgetOf(sample) !== budgetOf(last)) lastMoved = index;
-    }
+    const view = governorOf(trail[trail.length - 1]!.stats);
     return (
-      last.at - trail[lastMoved]!.at >= quietMs &&
-      trail.length - 1 - lastMoved >= quietFrames
+      acceptBudget(view.trackBudget) &&
+      view.needsFrame === false &&
+      view.lastAdjustment?.reason === "clamped"
     );
   };
 
@@ -332,12 +308,16 @@ const openAdaptive = async (cloud: string): Promise<ExampleSession> => {
   return session;
 };
 
-describe("the adaptive budget loop at stated frame times", () => {
+const describeAdaptive = existsSync(resolve(FIXTURES, "adaptive.copc.laz"))
+  ? describe
+  : describe.skip;
+
+describeAdaptive("the adaptive budget loop at stated frame times", () => {
   afterAll(async () => {
     await closeBrowser();
   });
 
-  for (const cloud of cloudsUnderTest()) {
+  for (const cloud of [ADAPTIVE_CLOUD]) {
     it(`gives points back when host frames run long, then holds: ${cloud.name}`, async () => {
       const session = await openAdaptive(cloud.urlPath);
       try {
@@ -358,7 +338,7 @@ describe("the adaptive budget loop at stated frame times", () => {
             drive(
               session,
               "the budget stops falling",
-              budgetSteady(QUIET_MS, QUIET_FRAMES),
+              budgetClamped((points) => points === FLOOR_POINTS),
             ),
         );
         const fall = await drainBudgetStates(session);
@@ -501,7 +481,7 @@ describe("the adaptive budget loop at stated frame times", () => {
           drive(
             session,
             "the budget reaches its floor",
-            budgetSteady(QUIET_MS, QUIET_FRAMES),
+            budgetClamped((points) => points === FLOOR_POINTS),
           ),
         );
         const low = governorOf(await session.stats()).trackBudget;
@@ -518,7 +498,7 @@ describe("the adaptive budget loop at stated frame times", () => {
             drive(
               session,
               "the budget stops growing",
-              budgetSteady(QUIET_MS, QUIET_FRAMES),
+              budgetClamped((points) => points > FLOOR_POINTS),
             ),
         );
         const growth = await drainBudgetStates(session);

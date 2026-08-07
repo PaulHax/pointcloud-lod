@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>pointcloud-lod simple vtk.js example</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <aside>
+      <header>
+        <h1>pointcloud-lod · simple</h1>
+        <a href="../">Complete example</a>
+      </header>
+      <p>
+        Load a COPC file or URL into a fixed-budget vtk.js scene. Drag to orbit,
+        shift-drag to pan, and scroll to zoom.
+      </p>
+      <label for="cloud-url">COPC URL</label>
+      <div class="url-row">
+        <input
+          id="cloud-url"
+          type="url"
+          placeholder="https://example.com/cloud.copc.laz"
+          spellcheck="false"
+        />
+        <button id="load-url" type="button">Load</button>
+      </div>
+      <div class="divider"><span>or</span></div>
+      <label for="cloud-file">Local COPC file</label>
+      <input id="cloud-file" type="file" accept=".laz,.copc.laz" />
+      <output id="status" role="status">Choose a COPC file or URL.</output>
+    </aside>
+    <main id="viewer"></main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
