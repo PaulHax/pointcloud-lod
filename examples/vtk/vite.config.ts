@@ -64,5 +64,11 @@ export default defineConfig({
     // Names the entry chunk for scripts/verifyChain.mjs, so the chain check
     // reads the bundler's own record instead of guessing the output layout.
     manifest: true,
+    rollupOptions: {
+      input: {
+        complete: resolve(exampleRoot, "index.html"),
+        simple: resolve(exampleRoot, "simple/index.html"),
+      },
+    },
   },
 });

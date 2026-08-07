@@ -93,7 +93,7 @@ export type PickQuery = {
  * unconditionally, as do missing bounds — conservative bounds only cost extra
  * sweep work, while a wrong skip is an unpickable visible tile.
  */
-export const tileIsPickCandidate = (
+const tileIsPickCandidate = (
   query: PickQuery,
   bounds: Bounds | undefined,
 ): boolean => {

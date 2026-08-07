@@ -119,7 +119,7 @@ export type AdaptiveBudgetOptions = {
   minSamples?: number;
 };
 
-export type AdaptiveBudgetTrackStats = {
+type AdaptiveBudgetTrackStats = {
   readonly budget: number;
   readonly samples: number;
   /** Percentile estimate of the current window, or null if empty. */
@@ -129,7 +129,7 @@ export type AdaptiveBudgetTrackStats = {
   readonly lastAdjustment: BudgetAdjustment | null;
 };
 
-export type AdaptiveBudgetStats = {
+type AdaptiveBudgetStats = {
   readonly minBudget: number;
   /** Configured maximum, or null when none was configured. */
   readonly maxBudget: number | null;
@@ -139,7 +139,7 @@ export type AdaptiveBudgetStats = {
   readonly interaction: AdaptiveBudgetTrackStats;
 };
 
-export type RecordFrameOptions = {
+type RecordFrameOptions = {
   /** Whether the camera was moving when this frame was rendered. */
   readonly interacting: boolean;
   /** Monotonic-ish timestamp in ms (the caller passes `Date.now()`). */

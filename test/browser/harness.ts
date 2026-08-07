@@ -62,6 +62,8 @@ export const FIXTURE_URL_PATH = "/fixtures/fixture.copc.laz";
  * multi-level tile traffic run at all.
  */
 export const MULTIPAGE_URL_PATH = "/fixtures/multipage.copc.laz";
+/** High-demand fixture used only by the adaptive feedback-loop scenarios. */
+export const ADAPTIVE_URL_PATH = "/fixtures/adaptive.copc.laz";
 
 /**
  * Extra clouds to run the matrix against, as a path list in
@@ -110,6 +112,14 @@ export const MULTIPAGE_CLOUD: CloudUnderTest = {
   files: {},
   deep: false,
   multipage: true,
+};
+
+export const ADAPTIVE_CLOUD: CloudUnderTest = {
+  name: "the adaptive fixture",
+  urlPath: ADAPTIVE_URL_PATH,
+  files: {},
+  deep: true,
+  multipage: false,
 };
 
 export const cloudsUnderTest = (): CloudUnderTest[] => [

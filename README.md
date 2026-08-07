@@ -327,17 +327,27 @@ dispose both       → release controller state and every adapter-owned actor
 Always dispose both the controller and adapter when the cloud is permanently
 removed.
 
-### vtk.js example
+### vtk.js examples
 
-The runnable example in [`examples/vtk`](./examples/vtk/) loads either a local
-`.copc.laz` file (read through `Blob.slice()` in its source worker) or a COPC
-URL (HTTP Range from that worker), frames it automatically, and streams it
-through the same three pieces an application wires: one controller, one
-renderer adapter, and one view governor for the view.
+The runnable app in [`examples/vtk`](./examples/vtk/) contains two examples:
 
-The example defaults to Auto presentation at `0.5×`, using half the estimated
-point spacing as its diameter. Its sidebar can switch to a constant Fixed
-CSS-pixel diameter when comparing presentation policies.
+- **Simple** (`/simple/`) is the integration starting point: one worker-backed
+  COPC source, one fixed-budget controller, one renderer adapter, and the
+  default vtk.js camera interaction. It intentionally has no governor,
+  performance chart, telemetry recorder, diagnostic table, or browser-test
+  API.
+- **Complete** (`/`) demonstrates adaptive quality, fixed/adaptive presentation,
+  custom point-cloud camera interaction, local telemetry, and the diagnostic
+  hooks exercised by the browser suite.
+
+Both load either a local `.copc.laz` file (read through `Blob.slice()` in a
+source worker) or a COPC URL (HTTP Range from that worker), frame it
+automatically, and stream it through a controller and renderer adapter. The
+complete example also wires one view governor for the view.
+
+The complete example defaults to Auto presentation at `0.5×`, using half the
+estimated point spacing as its diameter. Its sidebar can switch to a constant
+Fixed CSS-pixel diameter when comparing presentation policies.
 
 Its controls are all runtime, so one build loads any dataset:
 
@@ -380,6 +390,9 @@ Install a vtk.js build containing `vtkPointGaussianMapper` as described in
 npm run example
 ```
 
+Vite serves the complete example at the printed root URL and the simple example
+at `/simple/`.
+
 If that vtk.js build is outside this package's `node_modules`, point the example
 at its ESM package directory:
 
@@ -387,8 +400,9 @@ at its ESM package directory:
 VTK_JS_DIR=/path/to/vtk-js/dist/esm npm run example
 ```
 
-A `?url=` query parameter loads a cloud on startup. Add `&telemetry=1` to begin
-a local performance trace before that source opens.
+A `?url=` query parameter loads a cloud on startup in either example. On the
+complete example, add `&telemetry=1` to begin a local performance trace before
+that source opens.
 
 The **Local telemetry** controls record only in the current browser tab. Start,
 stop, clear, and download produce a bounded JSON trace; nothing is uploaded.

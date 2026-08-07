@@ -110,16 +110,30 @@ const checkExampleBundle = () => {
     ? JSON.parse(readFileSync(manifestPath, "utf8"))
     : {};
   const entries = Object.values(manifest).filter((chunk) => chunk.isEntry);
-  if (entries.length !== 1) {
+  const completeEntry = entries.find((chunk) => chunk.src === "index.html");
+  const simpleEntry = entries.find(
+    (chunk) => chunk.src === "simple/index.html",
+  );
+  if (!completeEntry || !simpleEntry) {
     fail(
-      `expected exactly one built example entry chunk in ${manifestPath}, found ${entries.length} — run 'npm run example:build' first`,
+      `complete or simple example entry is missing from ${manifestPath} — run 'npm run example:build' first`,
     );
   }
-  const file = join(output, entries[0].file);
-  const bytes = readFileSync(file);
-  const text = bytes.toString("utf8");
 
-  const required = {
+  const entryBundle = (entry) => {
+    const files = new Set();
+    const visit = (chunk) => {
+      if (files.has(chunk.file)) return;
+      files.add(chunk.file);
+      for (const imported of chunk.imports ?? []) visit(manifest[imported]);
+    };
+    visit(entry);
+    return Buffer.concat(
+      [...files].map((name) => readFileSync(join(output, name))),
+    );
+  };
+
+  const requiredFeatures = (text) => ({
     // The mapper the renderer adapter instantiates.
     vtkPointGaussianMapper: registers(text, "vtkPointGaussianMapper"),
     // Without the OpenGL override the mapper draws nothing.
@@ -139,20 +153,28 @@ const checkExampleBundle = () => {
     // an older/stale vtk.js build still carries every class above but would
     // fail only when the first tile actor applies its draw cap.
     maximumPointCount: text.includes("maximumPointCount"),
-  };
-  const missing = Object.entries(required)
-    .filter(([, present]) => !present)
-    .map(([name]) => name);
-  if (missing.length) {
-    fail(
-      `${file} is missing ${missing.join(", ")} — built against a vtk.js without the point-gaussian work, or the Geometry profile import was dropped`,
-    );
+  });
+  for (const [name, entry] of [
+    ["complete", completeEntry],
+    ["simple", simpleEntry],
+  ]) {
+    const required = requiredFeatures(entryBundle(entry).toString("utf8"));
+    const missing = Object.entries(required)
+      .filter(([, present]) => !present)
+      .map(([feature]) => feature);
+    if (missing.length) {
+      fail(
+        `${name} example is missing ${missing.join(", ")} — built against a vtk.js without the point-gaussian work, or the Geometry profile import was dropped`,
+      );
+    }
   }
+  const file = join(output, completeEntry.file);
+  const bytes = entryBundle(completeEntry);
   return {
     file,
     sha256: createHash("sha256").update(bytes).digest("hex"),
     bytes: bytes.length,
-    present: Object.keys(required),
+    present: Object.keys(requiredFeatures(bytes.toString("utf8"))),
   };
 };
 

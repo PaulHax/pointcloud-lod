@@ -21,10 +21,13 @@
  * proves exist are actually fetched while the cloud loads.
  */
 
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { Copc, Getter, type Hierarchy } from "copc";
 import { describe, expect, it } from "vitest";
+
+import { DEFAULTS } from "../../src/adaptiveBudget";
 
 const fixture = (name: string): string =>
   fileURLToPath(new URL(name, import.meta.url));
@@ -62,6 +65,16 @@ const hierarchyShape = async (file: string): Promise<HierarchyShape> => {
 };
 
 describe("the committed COPC fixtures", () => {
+  const adaptiveFixture = fixture("adaptive.copc.laz");
+  it.skipIf(!existsSync(adaptiveFixture))(
+    "gives the generated adaptive fixture demand above the policy floor",
+    async () => {
+      const getter = Getter.file(adaptiveFixture);
+      const copc = await Copc.create(getter);
+      expect(copc.header.pointCount).toBeGreaterThan(DEFAULTS.minBudget);
+    },
+  );
+
   it("give multipage.copc.laz a hierarchy spanning several pages", async () => {
     const shape = await hierarchyShape(fixture("multipage.copc.laz"));
     expect(
