@@ -2,10 +2,10 @@
  * Pure per-tile draw allocation.
  *
  * A tile becomes eligible only after its parent received its complete prefix.
- * This preserves coarse coverage while allowing the most important visible
- * branch to refine ahead of peripheral branches. The last admitted tile may
- * consume a partial progressive prefix, so the draw budget has no tile-sized
- * discontinuity.
+ * Eligible tiles are admitted coarse-level-first, preserving broad coverage
+ * before the most important visible branch refines. The last admitted tile
+ * may consume a partial progressive prefix, so the draw budget has no
+ * tile-sized discontinuity.
  */
 
 export type DrawCandidate = {
@@ -30,11 +30,21 @@ export type AllocatePointPrefixesOptions = {
   readonly getCandidate: (key: string) => DrawCandidate | undefined;
 };
 
+type FrontierCandidate = {
+  readonly candidate: DrawCandidate;
+  readonly depth: number;
+};
+
 /** A total order on distinct keys, so admission is fully deterministic. */
-const betterCandidate = (left: DrawCandidate, right: DrawCandidate): number =>
-  right.priority - left.priority ||
-  (right.secondaryPriority ?? 0) - (left.secondaryPriority ?? 0) ||
-  left.key.localeCompare(right.key);
+const betterCandidate = (
+  left: FrontierCandidate,
+  right: FrontierCandidate,
+): number =>
+  left.depth - right.depth ||
+  right.candidate.priority - left.candidate.priority ||
+  (right.candidate.secondaryPriority ?? 0) -
+    (left.candidate.secondaryPriority ?? 0) ||
+  left.candidate.key.localeCompare(right.candidate.key);
 
 /**
  * The admission frontier as a binary heap under {@link betterCandidate}.
@@ -45,7 +55,7 @@ const betterCandidate = (left: DrawCandidate, right: DrawCandidate): number =>
  * dense view's plan holds.
  */
 const createFrontier = () => {
-  const heap: DrawCandidate[] = [];
+  const heap: FrontierCandidate[] = [];
 
   const swap = (left: number, right: number): void => {
     const held = heap[left]!;
@@ -54,7 +64,7 @@ const createFrontier = () => {
   };
 
   return {
-    push(candidate: DrawCandidate): void {
+    push(candidate: FrontierCandidate): void {
       heap.push(candidate);
       let index = heap.length - 1;
       while (index > 0) {
@@ -66,7 +76,7 @@ const createFrontier = () => {
     },
 
     /** The best remaining candidate, or undefined once the frontier is spent. */
-    pop(): DrawCandidate | undefined {
+    pop(): FrontierCandidate | undefined {
       const best = heap[0];
       const last = heap.pop();
       if (last !== undefined && heap.length > 0) {
@@ -121,23 +131,24 @@ export const allocatePointPrefixes = (
 
   const prefixes = new Map<string, number>();
   const frontier = createFrontier();
-  const admit = (key: string): void => {
+  const admit = (key: string, depth: number): void => {
     const candidate = candidates.get(key);
     if (candidate === undefined) return;
     if (candidate.pointCount <= 0) {
-      for (const child of candidate.children) admit(child);
+      for (const child of candidate.children) admit(child, depth + 1);
       return;
     }
-    frontier.push(candidate);
+    frontier.push({ candidate, depth });
   };
-  admit(options.root);
+  admit(options.root, 0);
 
   let remaining = pointBudget;
   let fullTiles = 0;
   let partialTiles = 0;
   while (remaining > 0) {
-    const candidate = frontier.pop();
-    if (candidate === undefined) break;
+    const next = frontier.pop();
+    if (next === undefined) break;
+    const { candidate, depth } = next;
     const count = Math.min(candidate.pointCount, remaining);
     prefixes.set(candidate.key, count);
     remaining -= count;
@@ -146,7 +157,7 @@ export const allocatePointPrefixes = (
       break;
     }
     fullTiles += 1;
-    for (const child of candidate.children) admit(child);
+    for (const child of candidate.children) admit(child, depth + 1);
   }
 
   return {

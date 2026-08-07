@@ -429,6 +429,49 @@ describe("createLodController", () => {
     controller.dispose();
   });
 
+  it("keeps coarse peripheral coverage when moving density reduces the draw budget", async () => {
+    const tree: Record<string, FakeEntry> = {
+      "0-0-0-0": {
+        pointCount: 10,
+        bounds: { min: [-1, -1, -2], max: [1, 1, -1] },
+        children: ["1-0-0-0", "1-1-0-0"],
+      },
+      "1-0-0-0": {
+        pointCount: 10,
+        bounds: { min: [-0.1, -0.1, -2], max: [0.1, 0.1, -1] },
+        children: ["2-0-0-0"],
+      },
+      "1-1-0-0": {
+        pointCount: 10,
+        bounds: { min: [0.5, -0.1, -2], max: [0.7, 0.1, -1] },
+      },
+      "2-0-0-0": {
+        pointCount: 10,
+        bounds: { min: [-0.05, -0.05, -1.5], max: [0.05, 0.05, -1] },
+      },
+    };
+    const onDrawPlan = vi.fn();
+    const { controller } = makeController(tree, {
+      pointBudget: 40,
+      onDrawPlan,
+    });
+    await settle();
+    controller.setCamera(FRAMED_VIEW);
+    await settle();
+
+    controller.setDensityFraction(0.875);
+
+    expect(onDrawPlan).toHaveBeenLastCalledWith({
+      entries: [
+        { key: keyFromString("0-0-0-0"), pointCount: 10 },
+        { key: keyFromString("1-0-0-0"), pointCount: 10 },
+        { key: keyFromString("1-1-0-0"), pointCount: 10 },
+        { key: keyFromString("2-0-0-0"), pointCount: 5 },
+      ],
+    });
+    controller.dispose();
+  });
+
   it("never replaces selected tiles when only the point budget grows", async () => {
     const tree: Record<string, FakeEntry> = {
       "0-0-0-0": {
