@@ -3,16 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>pointcloud-lod complete vtk.js example</title>
+    <title>pointcloud-lod vtk.js example</title>
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <section class="panel" aria-label="Point-cloud controls">
       <header class="title-row">
-        <h1>pointcloud-lod · complete</h1>
+        <h1>pointcloud-lod</h1>
         <div class="title-actions">
-          <a class="example-link" href="./simple/">Simple example</a>
           <button id="reset-view" type="button" class="reset-view">
             Reset view
           </button>
@@ -88,7 +87,21 @@
 
       <div class="field-grid">
         <div>
-          <label for="budget-mode">Point budget</label>
+          <div class="control-label">
+            <label for="budget-mode">Point budget</label>
+            <button
+              type="button"
+              class="info-tip"
+              aria-label="About point budget"
+              aria-describedby="budget-mode-help"
+            >
+              i
+            </button>
+            <span id="budget-mode-help" class="control-tooltip" role="tooltip"
+              >Adaptive changes the visible-point budget to meet frame-time
+              targets; Fixed uses the configured point count.</span
+            >
+          </div>
           <select id="budget-mode">
             <option value="adaptive" selected>Adaptive</option>
             <option value="fixed">Fixed</option>
@@ -100,30 +113,6 @@
             <option value="perspective" selected>Perspective</option>
             <option value="orthographic">Orthographic</option>
           </select>
-        </div>
-      </div>
-
-      <div class="field-grid">
-        <div>
-          <label for="point-size-mode">Point size</label>
-          <select id="point-size-mode">
-            <option value="fixed">Fixed</option>
-            <option value="auto" selected>Auto</option>
-          </select>
-        </div>
-        <div>
-          <label id="point-size-label" for="point-size">Size (CSS px)</label>
-          <div class="range-output">
-            <input
-              id="point-size"
-              type="range"
-              min="0.25"
-              max="8"
-              step="0.25"
-              value="2"
-            />
-            <output id="point-size-value" for="point-size">2.00 px</output>
-          </div>
         </div>
       </div>
 
@@ -141,7 +130,24 @@
       <div id="adaptive-controls">
         <div class="field-grid">
           <div>
-            <label for="moving-target">Moving target (ms)</label>
+            <div class="control-label">
+              <label for="moving-target">Moving target (ms)</label>
+              <button
+                type="button"
+                class="info-tip"
+                aria-label="About moving target"
+                aria-describedby="moving-target-help"
+              >
+                i
+              </button>
+              <span
+                id="moving-target-help"
+                class="control-tooltip"
+                role="tooltip"
+                >Sets the frame-time target used to tune quality while the
+                camera is moving.</span
+              >
+            </div>
             <input
               id="moving-target"
               type="number"
@@ -151,7 +157,24 @@
             />
           </div>
           <div>
-            <label for="stationary-target">Settled target (ms)</label>
+            <div class="control-label tooltip-end">
+              <label for="stationary-target">Settled target (ms)</label>
+              <button
+                type="button"
+                class="info-tip"
+                aria-label="About settled target"
+                aria-describedby="stationary-target-help"
+              >
+                i
+              </button>
+              <span
+                id="stationary-target-help"
+                class="control-tooltip"
+                role="tooltip"
+                >Sets the frame-time target used to tune quality after camera
+                movement stops.</span
+              >
+            </div>
             <input
               id="stationary-target"
               type="number"
@@ -161,9 +184,23 @@
             />
           </div>
         </div>
-        <label for="max-points"
-          >Maximum budget (points, blank = memory only)</label
-        >
+        <div class="control-label tooltip-end">
+          <label for="max-points"
+            >Maximum budget (points, blank = memory only)</label
+          >
+          <button
+            type="button"
+            class="info-tip"
+            aria-label="About maximum budget"
+            aria-describedby="max-points-help"
+          >
+            i
+          </button>
+          <span id="max-points-help" class="control-tooltip" role="tooltip"
+            >Caps the adaptive visible-point budget; leave blank to use only the
+            memory-derived ceiling.</span
+          >
+        </div>
         <input
           id="max-points"
           type="number"
@@ -171,6 +208,61 @@
           step="100000"
           placeholder="none"
         />
+      </div>
+
+      <div class="field-grid">
+        <div>
+          <div class="control-label">
+            <label for="point-size-mode">Point size</label>
+            <button
+              type="button"
+              class="info-tip"
+              aria-label="About point size"
+              aria-describedby="point-size-mode-help"
+            >
+              i
+            </button>
+            <span
+              id="point-size-mode-help"
+              class="control-tooltip"
+              role="tooltip"
+              >Auto derives point diameter from projected density; Fixed uses a
+              constant CSS-pixel diameter.</span
+            >
+          </div>
+          <select id="point-size-mode">
+            <option value="fixed">Fixed</option>
+            <option value="auto" selected>Auto</option>
+          </select>
+        </div>
+        <div>
+          <div class="control-label tooltip-end">
+            <label id="point-size-label" for="point-size">Size (CSS px)</label>
+            <button
+              type="button"
+              class="info-tip"
+              aria-label="About auto scale or fixed size"
+              aria-describedby="point-size-help"
+            >
+              i
+            </button>
+            <span id="point-size-help" class="control-tooltip" role="tooltip"
+              >Auto scale multiplies the density-derived point diameter; Fixed
+              size sets its CSS-pixel diameter directly.</span
+            >
+          </div>
+          <div class="range-output">
+            <input
+              id="point-size"
+              type="range"
+              min="0.25"
+              max="8"
+              step="0.25"
+              value="2"
+            />
+            <output id="point-size-value" for="point-size">2.00 px</output>
+          </div>
+        </div>
       </div>
 
       <section aria-labelledby="telemetry-heading">

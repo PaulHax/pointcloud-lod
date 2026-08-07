@@ -78,12 +78,6 @@ h1 {
   gap: 8px;
 }
 
-.example-link {
-  color: #8dcdf4;
-  font-size: 12px;
-  white-space: nowrap;
-}
-
 button.reset-view {
   height: 30px;
   padding: 0 12px;
@@ -261,6 +255,79 @@ label {
   font-weight: 650;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+.control-label {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 12px 0 6px;
+}
+
+.control-label > label {
+  min-width: 0;
+  margin: 0;
+}
+
+button.info-tip {
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0;
+  border-color: rgba(141, 205, 244, 0.48);
+  border-radius: 50%;
+  color: #8dcdf4;
+  background: transparent;
+  font:
+    700 10px/14px Georgia,
+    serif;
+  text-transform: none;
+}
+
+button.info-tip:hover,
+button.info-tip:focus-visible {
+  border-color: #8dcdf4;
+  color: #d5efff;
+  background: rgba(72, 162, 215, 0.16);
+  outline: none;
+}
+
+.control-tooltip {
+  position: absolute;
+  z-index: 10;
+  bottom: calc(100% + 5px);
+  left: 0;
+  width: max-content;
+  max-width: min(250px, calc(100vw - 32px));
+  padding: 7px 9px;
+  border: 1px solid rgba(141, 205, 244, 0.25);
+  border-radius: 6px;
+  opacity: 0;
+  color: #d7e5ef;
+  background: #162532;
+  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.38);
+  font-size: 11px;
+  font-weight: 450;
+  letter-spacing: normal;
+  line-height: 1.4;
+  pointer-events: none;
+  text-transform: none;
+  transform: translateY(2px);
+  transition:
+    opacity 100ms ease,
+    transform 100ms ease;
+}
+
+.tooltip-end > .control-tooltip {
+  right: 0;
+  left: auto;
+}
+
+.info-tip:hover + .control-tooltip,
+.info-tip:focus-visible + .control-tooltip {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 input,
