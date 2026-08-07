@@ -30,83 +30,11 @@ export type AllocatePointPrefixesOptions = {
   readonly getCandidate: (key: string) => DrawCandidate | undefined;
 };
 
-type FrontierCandidate = {
-  readonly candidate: DrawCandidate;
-  readonly depth: number;
-};
-
 /** A total order on distinct keys, so admission is fully deterministic. */
-const betterCandidate = (
-  left: FrontierCandidate,
-  right: FrontierCandidate,
-): number =>
-  left.depth - right.depth ||
-  right.candidate.priority - left.candidate.priority ||
-  (right.candidate.secondaryPriority ?? 0) -
-    (left.candidate.secondaryPriority ?? 0) ||
-  left.candidate.key.localeCompare(right.candidate.key);
-
-/**
- * The admission frontier as a binary heap under {@link betterCandidate}.
- *
- * Each admission takes the best tile and puts that tile's children back, so
- * the frontier changes by a handful of entries per step — an order a heap
- * maintains incrementally, without re-sorting the thousands of entries a
- * dense view's plan holds.
- */
-const createFrontier = () => {
-  const heap: FrontierCandidate[] = [];
-
-  const swap = (left: number, right: number): void => {
-    const held = heap[left]!;
-    heap[left] = heap[right]!;
-    heap[right] = held;
-  };
-
-  return {
-    push(candidate: FrontierCandidate): void {
-      heap.push(candidate);
-      let index = heap.length - 1;
-      while (index > 0) {
-        const parent = (index - 1) >> 1;
-        if (betterCandidate(heap[parent]!, heap[index]!) <= 0) break;
-        swap(parent, index);
-        index = parent;
-      }
-    },
-
-    /** The best remaining candidate, or undefined once the frontier is spent. */
-    pop(): FrontierCandidate | undefined {
-      const best = heap[0];
-      const last = heap.pop();
-      if (last !== undefined && heap.length > 0) {
-        heap[0] = last;
-        let index = 0;
-        for (;;) {
-          const left = index * 2 + 1;
-          const right = left + 1;
-          let next = index;
-          if (
-            left < heap.length &&
-            betterCandidate(heap[left]!, heap[next]!) < 0
-          ) {
-            next = left;
-          }
-          if (
-            right < heap.length &&
-            betterCandidate(heap[right]!, heap[next]!) < 0
-          ) {
-            next = right;
-          }
-          if (next === index) break;
-          swap(index, next);
-          index = next;
-        }
-      }
-      return best;
-    },
-  };
-};
+const betterCandidate = (left: DrawCandidate, right: DrawCandidate): number =>
+  right.priority - left.priority ||
+  (right.secondaryPriority ?? 0) - (left.secondaryPriority ?? 0) ||
+  left.key.localeCompare(right.key);
 
 export const allocatePointPrefixes = (
   options: AllocatePointPrefixesOptions,
@@ -130,34 +58,33 @@ export const allocatePointPrefixes = (
   }
 
   const prefixes = new Map<string, number>();
-  const frontier = createFrontier();
-  const admit = (key: string, depth: number): void => {
-    const candidate = candidates.get(key);
-    if (candidate === undefined) return;
-    if (candidate.pointCount <= 0) {
-      for (const child of candidate.children) admit(child, depth + 1);
-      return;
-    }
-    frontier.push({ candidate, depth });
-  };
-  admit(options.root, 0);
-
   let remaining = pointBudget;
   let fullTiles = 0;
   let partialTiles = 0;
-  while (remaining > 0) {
-    const next = frontier.pop();
-    if (next === undefined) break;
-    const { candidate, depth } = next;
-    const count = Math.min(candidate.pointCount, remaining);
-    prefixes.set(candidate.key, count);
-    remaining -= count;
-    if (count < candidate.pointCount) {
-      partialTiles += 1;
-      break;
+  let frontier = [options.root];
+  allocation: while (remaining > 0 && frontier.length > 0) {
+    const ranked = frontier
+      .map((key) => candidates.get(key))
+      .filter((candidate) => candidate !== undefined)
+      .sort(betterCandidate);
+    const next: string[] = [];
+    for (const candidate of ranked) {
+      if (candidate.pointCount <= 0) {
+        next.push(...candidate.children);
+        continue;
+      }
+      const count = Math.min(candidate.pointCount, remaining);
+      prefixes.set(candidate.key, count);
+      remaining -= count;
+      if (count < candidate.pointCount) {
+        partialTiles += 1;
+        break allocation;
+      }
+      fullTiles += 1;
+      if (remaining === 0) break allocation;
+      next.push(...candidate.children);
     }
-    fullTiles += 1;
-    for (const child of candidate.children) admit(child, depth + 1);
+    frontier = next;
   }
 
   return {

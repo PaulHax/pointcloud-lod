@@ -499,15 +499,16 @@ const DEFAULT_PRESENTATION: FixedPointPresentation = {
 const DEFAULT_AUTO_MIN_DIAMETER_CSS_PX = 1.5;
 const DEFAULT_AUTO_MAX_DIAMETER_CSS_PX = 4;
 const INITIAL_AUTO_DIAMETER_CSS_PX = 2;
-/**
- * Keep a selected node while a same-cone challenger is only marginally more
- * detailed. Without this band, nodes straddling the point-budget boundary
- * trade places under tiny depth changes, replacing large actors even though
- * the view has barely changed. Nodes outside the frustum or below the
- * refinement cutoff never become candidates, so those changes remain
- * immediate.
- */
-const SELECTION_PRIORITY_HYSTERESIS = 0.1;
+/** Screen-centre improvement required to replace a selected boundary tile. */
+const SELECTION_CENTER_HYSTERESIS_CSS_PX = 8;
+
+const centerOffsetHysteresis = (view: CameraView): number => {
+  const normalized =
+    (2 * SELECTION_CENTER_HYSTERESIS_CSS_PX) / view.viewportHeightCssPx;
+  return view.projection === "perspective"
+    ? Math.atan(normalized * Math.tan(view.fovY / 2))
+    : normalized;
+};
 
 /** What `checkPresentation` returns: Auto bounds are always resolved. */
 type NormalizedPresentation =
@@ -753,9 +754,9 @@ export const createLodController = (
 
   const hierarchy = new Map<string, HierarchyEntry>();
 
-  // Screen-space error depends only on a node and the current view, so values
-  // stay valid until the view moves. Selection and the ready-frontier walk
-  // both need them, and the frontier walk reruns on every tile arrival.
+  // Both priority metrics depend only on a node and the current view, so their
+  // values stay valid until the view moves. Selection and the ready-frontier
+  // walk both need them, and the frontier walk reruns on every tile arrival.
   // A node whose hierarchy entry has not landed yet is deliberately NOT
   // cached: it scores 0 now, and its page may arrive before the view moves.
   const sseByKey = new Map<string, number>();
@@ -779,7 +780,7 @@ export const createLodController = (
     return value;
   };
   /**
-   * Request order for both queues: coarse levels first, then the largest
+   * Request order for both queues: coarse levels first, then the smallest
    * 3D centre-ray offset, then screen-space error. That makes the selected
    * frontier grow as concentric cones through the octree, so a
    * hierarchy page is fetched in the order the pages it unblocks would be.
@@ -1644,11 +1645,13 @@ export const createLodController = (
     const planes = frustumPlanes(currentView.viewProj);
     const sse = (key: VoxelKey): number => sseFor(keyToString(key));
     const previousTarget = target;
-    const secondaryPriority = (key: VoxelKey): number => {
-      const value = sse(key);
-      return previousTarget.has(keyToString(key))
-        ? value * (1 + SELECTION_PRIORITY_HYSTERESIS)
-        : value;
+    const centerHysteresis = centerOffsetHysteresis(currentView);
+    const centerPriority = (key: VoxelKey): number => {
+      const keyString = keyToString(key);
+      return (
+        -centerOffsetFor(keyString) +
+        (previousTarget.has(keyString) ? centerHysteresis : 0)
+      );
     };
 
     const neededPages: VoxelKey[] = [];
@@ -1657,8 +1660,8 @@ export const createLodController = (
     const selection = selectNodes({
       root: ROOT_KEY,
       pointBudget: budget,
-      priority: (key) => -centerOffsetFor(keyToString(key)),
-      secondaryPriority,
+      priority: centerPriority,
+      secondaryPriority: sse,
       seed,
       getNode: (key) => {
         const keyString = keyToString(key);
