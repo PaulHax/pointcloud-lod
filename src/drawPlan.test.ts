@@ -34,13 +34,13 @@ const TREE: readonly DrawCandidate[] = [
 ];
 
 describe("allocatePointPrefixes", () => {
-  it("reserves parent coverage before refining the most important branch", () => {
+  it("draws broad coarse coverage before refining the center branch", () => {
     const result = allocation(TREE, 50);
 
     expect([...result.prefixes]).toEqual([
       ["root", 10],
       ["near", 20],
-      ["detail", 20],
+      ["far", 20],
     ]);
     expect(result).toMatchObject({
       plannedPoints: 50,
@@ -56,7 +56,7 @@ describe("allocatePointPrefixes", () => {
     expect([...result.prefixes]).toEqual([
       ["root", 10],
       ["near", 20],
-      ["detail", 7],
+      ["far", 7],
     ]);
     expect(result).toMatchObject({
       plannedPoints: 37,
@@ -151,6 +151,45 @@ describe("allocatePointPrefixes", () => {
       "root",
       "center-near",
       "center-far",
+    ]);
+  });
+
+  it("does not drill into the center cone before coarse peripheral siblings", () => {
+    const result = allocation(
+      [
+        {
+          key: "root",
+          pointCount: 10,
+          priority: 0,
+          children: ["center", "edge"],
+        },
+        {
+          key: "center",
+          pointCount: 10,
+          priority: 10,
+          children: ["center-detail"],
+        },
+        {
+          key: "edge",
+          pointCount: 10,
+          priority: 1,
+          children: [],
+        },
+        {
+          key: "center-detail",
+          pointCount: 10,
+          priority: 100,
+          children: [],
+        },
+      ],
+      35,
+    );
+
+    expect([...result.prefixes]).toEqual([
+      ["root", 10],
+      ["center", 10],
+      ["edge", 10],
+      ["center-detail", 5],
     ]);
   });
 });
