@@ -98,6 +98,24 @@ describe("selectNodes", () => {
     expect(result.budgetSkippedPoints).toBe(60);
   });
 
+  it("uses secondary priority only after the primary priority ties", () => {
+    const counts = {
+      "0-0-0-0": 10,
+      "1-0-0-0": 20,
+      "1-1-0-0": 20,
+      "1-0-1-0": 20,
+    };
+    const result = selectNodes({
+      root: ROOT_KEY,
+      getNode: hierarchyOf(counts),
+      pointBudget: 50,
+      priority: (key) => (key.y === 0 ? 1 : 0),
+      secondaryPriority: (key) => key.x,
+    });
+
+    expect(result.selected).toEqual(new Set(["0-0-0-0", "1-1-0-0", "1-0-0-0"]));
+  });
+
   it("does not backfill the remainder with a lower-priority sibling", () => {
     const result = select(
       {

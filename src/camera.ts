@@ -348,6 +348,74 @@ export const cursorRay = (
 };
 
 /**
+ * Angular offset between a node's 3D centre and the camera's centre ray.
+ * Zero is the innermost cone; larger values form concentric cones moving away
+ * from the view centre. Selection only compares nodes at the same octree
+ * level, where their bounds have equal size, so centres give the unblurred
+ * spatial order without large coarse bounding spheres masking one another.
+ *
+ * Perspective views return radians. Parallel views have no angular spread,
+ * so they return perpendicular world-space clearance normalized by the
+ * viewport half-height. Both are dimensionless and ordered centre-out; their
+ * magnitudes are never compared across different camera views.
+ */
+export const boundsCenterRayOffset = (
+  bounds: Bounds,
+  view: CameraView,
+): number => {
+  const ray = cursorRay(
+    view.viewProj,
+    view.viewportWidthCssPx / 2,
+    view.viewportHeightCssPx / 2,
+    view.viewportWidthCssPx,
+    view.viewportHeightCssPx,
+  );
+  if (ray === null) return Number.POSITIVE_INFINITY;
+
+  const center: Vec3 = [
+    (bounds.min[0] + bounds.max[0]) / 2,
+    (bounds.min[1] + bounds.max[1]) / 2,
+    (bounds.min[2] + bounds.max[2]) / 2,
+  ];
+  let origin = ray.origin;
+  if (view.projection === "perspective") {
+    // A valid perspective eye lies on the centre line recovered from the
+    // matrix. Prefer the explicit eye (the cone's true apex), but keep the
+    // matrix-derived point when an untyped host supplies an inconsistent eye
+    // and matrix rather than inventing a skewed centre ray.
+    const eyeDx = view.position[0] - ray.origin[0];
+    const eyeDy = view.position[1] - ray.origin[1];
+    const eyeDz = view.position[2] - ray.origin[2];
+    const eyeAlong =
+      eyeDx * ray.direction[0] +
+      eyeDy * ray.direction[1] +
+      eyeDz * ray.direction[2];
+    const eyeDistanceSquared = eyeDx * eyeDx + eyeDy * eyeDy + eyeDz * eyeDz;
+    const eyeOffAxis = Math.sqrt(
+      Math.max(0, eyeDistanceSquared - eyeAlong * eyeAlong),
+    );
+    if (eyeOffAxis <= 1e-9 * Math.max(1, Math.sqrt(eyeDistanceSquared))) {
+      origin = view.position;
+    }
+  }
+  const dx = center[0] - origin[0];
+  const dy = center[1] - origin[1];
+  const dz = center[2] - origin[2];
+  const along =
+    dx * ray.direction[0] + dy * ray.direction[1] + dz * ray.direction[2];
+  const distanceSquared = dx * dx + dy * dy + dz * dz;
+  const perpendicular = Math.sqrt(Math.max(0, distanceSquared - along * along));
+
+  if (view.projection === "orthographic") {
+    return perpendicular / view.parallelScale;
+  }
+
+  const distance = Math.sqrt(distanceSquared);
+  if (distance === 0) return 0;
+  return Math.atan2(perpendicular, along);
+};
+
+/**
  * Camera-motion comparison for the inferred-motion classifier: did this view
  * move, beyond recomputation jitter, relative to a previously rendered one?
  *

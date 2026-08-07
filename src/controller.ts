@@ -1,7 +1,7 @@
 /**
  * LOD controller: turns camera movement into a bounded set of submitted tiles.
  *
- * Selection is a pure pass (frustum cull → screen-space-error priority →
+ * Selection is a pure pass (frustum cull → centre-ray cone priority →
  * parent-closed point-budget selection); the controller owns the impure rest:
  * lazy hierarchy pages, a bounded fetch queue with cancellation, an LRU for
  * deselected tiles, and batched delivery to the consumer.
@@ -13,6 +13,7 @@
 
 import {
   frustumPlanes,
+  boundsCenterRayOffset,
   modelFrameOf,
   nodeScreenSpaceError,
   boundsIntersectsFrustum,
@@ -499,11 +500,12 @@ const DEFAULT_AUTO_MIN_DIAMETER_CSS_PX = 1.5;
 const DEFAULT_AUTO_MAX_DIAMETER_CSS_PX = 4;
 const INITIAL_AUTO_DIAMETER_CSS_PX = 2;
 /**
- * Keep a selected node while a same-level challenger is only marginally more
- * important. Without this band, nodes straddling the point-budget boundary
- * trade places under tiny camera moves, replacing large actors even though the
- * view has barely changed. Nodes outside the frustum or below the refinement
- * cutoff never become candidates, so those changes remain immediate.
+ * Keep a selected node while a same-cone challenger is only marginally more
+ * detailed. Without this band, nodes straddling the point-budget boundary
+ * trade places under tiny depth changes, replacing large actors even though
+ * the view has barely changed. Nodes outside the frustum or below the
+ * refinement cutoff never become candidates, so those changes remain
+ * immediate.
  */
 const SELECTION_PRIORITY_HYSTERESIS = 0.1;
 
@@ -757,6 +759,7 @@ export const createLodController = (
   // A node whose hierarchy entry has not landed yet is deliberately NOT
   // cached: it scores 0 now, and its page may arrive before the view moves.
   const sseByKey = new Map<string, number>();
+  const centerOffsetByKey = new Map<string, number>();
   const sseFor = (keyString: string): number => {
     const cached = sseByKey.get(keyString);
     if (cached !== undefined) return cached;
@@ -766,9 +769,19 @@ export const createLodController = (
     sseByKey.set(keyString, value);
     return value;
   };
+  const centerOffsetFor = (keyString: string): number => {
+    const cached = centerOffsetByKey.get(keyString);
+    if (cached !== undefined) return cached;
+    const entry = hierarchy.get(keyString);
+    if (entry === undefined || view === null) return Number.POSITIVE_INFINITY;
+    const value = boundsCenterRayOffset(entry.bounds, view);
+    centerOffsetByKey.set(keyString, value);
+    return value;
+  };
   /**
    * Request order for both queues: coarse levels first, then the largest
-   * screen-space error. That is the selected frontier working outwards, so a
+   * 3D centre-ray offset, then screen-space error. That makes the selected
+   * frontier grow as concentric cones through the octree, so a
    * hierarchy page is fetched in the order the pages it unblocks would be.
    *
    * Each key's level and error are read once and sorted alongside it rather
@@ -781,9 +794,16 @@ export const createLodController = (
       .map((keyString) => ({
         keyString,
         level: levelFromString(keyString),
+        centerOffset: centerOffsetFor(keyString),
         sse: sseFor(keyString),
       }))
-      .sort((a, b) => (a.level !== b.level ? a.level - b.level : b.sse - a.sse))
+      .sort((a, b) =>
+        a.level !== b.level
+          ? a.level - b.level
+          : a.centerOffset - b.centerOffset ||
+            b.sse - a.sse ||
+            a.keyString.localeCompare(b.keyString),
+      )
       .map((entry) => entry.keyString);
 
   const pagesLoaded = new Set<string>();
@@ -1190,6 +1210,7 @@ export const createLodController = (
             // the source's convention, not this cache's contract — dropping
             // the value costs one recomputation and removes the requirement.
             sseByKey.delete(infoString);
+            centerOffsetByKey.delete(infoString);
             hierarchy.set(infoString, {
               pointCount: info.pointCount,
               bounds: info.bounds,
@@ -1263,7 +1284,8 @@ export const createLodController = (
         return {
           key: keyString,
           pointCount: entry.pointCount,
-          priority: sseFor(keyString),
+          priority: -centerOffsetFor(keyString),
+          secondaryPriority: sseFor(keyString),
           children: childrenOf(key, entry)
             .map(keyToString)
             .filter((child) => target.has(child)),
@@ -1622,7 +1644,7 @@ export const createLodController = (
     const planes = frustumPlanes(currentView.viewProj);
     const sse = (key: VoxelKey): number => sseFor(keyToString(key));
     const previousTarget = target;
-    const priority = (key: VoxelKey): number => {
+    const secondaryPriority = (key: VoxelKey): number => {
       const value = sse(key);
       return previousTarget.has(keyToString(key))
         ? value * (1 + SELECTION_PRIORITY_HYSTERESIS)
@@ -1635,7 +1657,8 @@ export const createLodController = (
     const selection = selectNodes({
       root: ROOT_KEY,
       pointBudget: budget,
-      priority,
+      priority: (key) => -centerOffsetFor(keyToString(key)),
+      secondaryPriority,
       seed,
       getNode: (key) => {
         const keyString = keyToString(key);
@@ -1793,6 +1816,7 @@ export const createLodController = (
     pageQueue = [];
     hierarchy.clear();
     sseByKey.clear();
+    centerOffsetByKey.clear();
     pagesLoaded.clear();
     pageFailures.clear();
     tileFailures.clear();
@@ -1858,6 +1882,7 @@ export const createLodController = (
     if (worldView === null || !modelMatrixUsable) return;
     view = modelFrame ? viewInModelFrame(worldView, modelFrame) : worldView;
     sseByKey.clear();
+    centerOffsetByKey.clear();
     if (active) requestSelection();
   };
 

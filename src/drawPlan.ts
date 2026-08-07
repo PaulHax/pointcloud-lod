@@ -12,6 +12,7 @@ export type DrawCandidate = {
   readonly key: string;
   readonly pointCount: number;
   readonly priority: number;
+  readonly secondaryPriority?: number;
   readonly children: readonly string[];
 };
 
@@ -31,7 +32,9 @@ export type AllocatePointPrefixesOptions = {
 
 /** A total order on distinct keys, so admission is fully deterministic. */
 const betterCandidate = (left: DrawCandidate, right: DrawCandidate): number =>
-  right.priority - left.priority || left.key.localeCompare(right.key);
+  right.priority - left.priority ||
+  (right.secondaryPriority ?? 0) - (left.secondaryPriority ?? 0) ||
+  left.key.localeCompare(right.key);
 
 /**
  * The admission frontier as a binary heap under {@link betterCandidate}.

@@ -118,4 +118,39 @@ describe("allocatePointPrefixes", () => {
       ["a", 2],
     ]);
   });
+
+  it("uses secondary priority only for an equal centre-cone priority", () => {
+    const result = allocation(
+      [
+        {
+          key: "root",
+          pointCount: 1,
+          priority: 0,
+          children: ["outer", "center-near", "center-far"],
+        },
+        { key: "outer", pointCount: 2, priority: -1, children: [] },
+        {
+          key: "center-near",
+          pointCount: 2,
+          priority: 0,
+          secondaryPriority: 3,
+          children: [],
+        },
+        {
+          key: "center-far",
+          pointCount: 2,
+          priority: 0,
+          secondaryPriority: 2,
+          children: [],
+        },
+      ],
+      5,
+    );
+
+    expect([...result.prefixes].map(([key]) => key)).toEqual([
+      "root",
+      "center-near",
+      "center-far",
+    ]);
+  });
 });

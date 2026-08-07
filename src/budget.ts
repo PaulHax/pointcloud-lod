@@ -34,6 +34,8 @@ export type SelectNodesOptions = {
    * Only compared between candidates of the same level.
    */
   priority: (key: VoxelKey) => number;
+  /** Secondary descending priority used only when primary priorities tie. */
+  secondaryPriority?: (key: VoxelKey) => number;
   /** Maximum total points across all selected nodes. */
   pointBudget: number;
   /**
@@ -98,7 +100,14 @@ const seedPoints = (
 };
 
 export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
-  const { root, getNode, priority, pointBudget, seed } = options;
+  const {
+    root,
+    getNode,
+    priority,
+    secondaryPriority = () => 0,
+    pointBudget,
+    seed,
+  } = options;
 
   // The seed walk visits keys the main walk visits again; `getNode` is allowed
   // to be observed once per key.
@@ -131,14 +140,25 @@ export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
       keyString: string;
       node: HierarchyNode;
       priority: number;
+      secondaryPriority: number;
     }[] = [];
     for (const key of candidates) {
       const keyString = keyToString(key);
       const node = resolve(key, keyString);
       if (node === undefined) continue;
-      ranked.push({ keyString, node, priority: priority(key) });
+      ranked.push({
+        keyString,
+        node,
+        priority: priority(key),
+        secondaryPriority: secondaryPriority(key),
+      });
     }
-    ranked.sort((a, b) => b.priority - a.priority);
+    ranked.sort(
+      (a, b) =>
+        b.priority - a.priority ||
+        b.secondaryPriority - a.secondaryPriority ||
+        a.keyString.localeCompare(b.keyString),
+    );
     availableNodes += ranked.length;
 
     const nextCandidates: VoxelKey[] = [];
