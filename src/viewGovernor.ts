@@ -1,23 +1,34 @@
 /**
  * One adaptive point budget per view.
  *
- * The governor owns the regime (camera moving vs settled), the adaptive loop
- * that sizes the aggregate view budget, the ceilings that bound it, and the
- * split of that aggregate across the clouds drawing into the view. It does not
- * own the render loop: the host reports every completed frame through
- * `recordHostFrame` and asks `needsFrame()` whether another one is required.
+ * The governor owns the regime (camera moving vs settled) and the adaptive
+ * loop that sizes the aggregate view budget. A shared view-budget coordinator
+ * applies memory bounds and distributes that target across clouds. The
+ * governor does not own the render loop: the host reports every completed
+ * frame through frame pressure and clean capacity samples, then asks
+ * `needsFrame()` whether another one is required.
  */
 
 import {
   createAdaptiveBudget,
+  DEFAULTS,
   type AdaptiveBudget,
   type AdaptiveBudgetOptions,
   type BudgetAdjustment,
   type BudgetRegime,
 } from "./adaptiveBudget";
+import { cameraMoved, type CameraView } from "./camera";
 import { finiteAtLeast, finiteNonNegative, finiteWithin } from "./numeric";
+import {
+  createViewBudgetCoordinator,
+  memberConstraint,
+  type ViewBudgetMember,
+  type ViewBudgetMemberOptions,
+  type ViewBudgetMemberStats,
+  type ViewBudgetMemberUpdate,
+} from "./viewBudget";
 
-export type HostFrameMetrics = {
+export type TransientFrameMetrics = {
   /** Complete host frame time, including non-VTK work. */
   readonly hostFrameMs: number;
   /** Time spent painting VTK content within the host frame. */
@@ -37,6 +48,25 @@ export type HostFrameMetrics = {
   readonly now?: number;
 };
 
+export type HostFrameMetrics = TransientFrameMetrics & {
+  /**
+   * Whether this frame is allowed to change lasting capacity. Omit only when
+   * the host has no asynchronous work or upload tracking and the frame is its
+   * clean fallback sample.
+   */
+  readonly capacitySampleEligible?: boolean;
+};
+
+export type CapacitySampleMetrics = {
+  /** Frame cost normalized to the complete host-frame allowance. */
+  readonly frameMs: number;
+  /** Regime that drew the measured frame, captured before async GPU readback. */
+  readonly regime: BudgetRegime;
+  /** False keeps the measurement diagnostic without changing either track. */
+  readonly eligible: boolean;
+  readonly now?: number;
+};
+
 /**
  * What is holding the moving regime. Explicit sources are user gestures the
  * host reports directly; inferred sources are rendered-camera motion a
@@ -51,23 +81,16 @@ export type MotionReference = {
   release(): void;
 };
 
-export type ViewGovernorMemberOptions = {
-  setPointBudget(points: number): void;
-  /** Names this cloud in the diagnostics. */
-  id?: string;
-};
+export type ViewGovernorMemberOptions = ViewBudgetMemberOptions;
 
 /** Everything a member reports; each field is ignored when not usable. */
-export type ViewGovernorMemberUpdate = {
-  active?: boolean;
-  /** Root projected screen-space error from the controller's selection stats. */
-  projectedImportance?: number;
-  /** The controller's memory-derived point ceiling. */
-  memoryCeilingPoints?: number;
+export type ViewGovernorMemberUpdate = ViewBudgetMemberUpdate & {
   /** Tile fetch/decode operations physically running (`fetchConcurrency`). */
   physicalTileOperations?: number;
   /** Hierarchy page operations physically running. */
   physicalHierarchyOperations?: number;
+  /** Required selection, request, decode, or submission work remains. */
+  workPending?: boolean;
 };
 
 export type ViewGovernorMember = {
@@ -80,30 +103,37 @@ export type ViewGovernorOptions = AdaptiveBudgetOptions & {
   vtkFrameFraction?: number;
   /** Delay before switching back to stationary allocation. Default 750 ms. */
   interactionSettleMs?: number;
+  /**
+   * How long rendered cameras must hold still before the inferred motion
+   * reference is released (`noteRenderedCameras`). Long enough to bridge a
+   * dropped playback frame or a slow scrub step, short enough that a single
+   * camera jump refines almost immediately. Default 250 ms. This is regime
+   * policy, not deployment configuration: it exists as an option so a test
+   * can shorten it.
+   */
+  motionDebounceMs?: number;
 };
 
-/** Which bound explains the budget a cloud is currently drawing to. */
+/**
+ * Which bound explains the budget a cloud is currently drawing to. `demand` is
+ * the answer no budget explains: the cloud is drawing everything the camera
+ * asks of it, so raising anything would change nothing.
+ */
 export type BudgetConstraint =
   | "adaptive"
   | "configured-maximum"
   | "memory"
+  | "demand"
   | "inactive";
 
-export type ViewGovernorMemberStats = {
-  readonly id: string | null;
-  readonly active: boolean;
-  /** Null until the member reports; 0 is a real measurement, not "unknown". */
-  readonly projectedImportance: number | null;
-  /** Points this member was allocated from the aggregate view budget. */
-  readonly allocatedShare: number;
-  /** Last memory-derived ceiling the member reported, null if it never has. */
-  readonly memoryCeilingPoints: number | null;
-  /**
-   * What the cloud can actually draw: its share capped by its own memory
-   * ceiling. The controller re-applies its live ceiling to whatever it is
-   * given, so this is the governor's view of the same arithmetic.
-   */
-  readonly effectiveBudget: number;
+/**
+ * The coordinator's allocation for one cloud, re-classified in the governor's
+ * constraint vocabulary and joined to the physical work that cloud reports.
+ */
+export type ViewGovernorMemberStats = Omit<
+  ViewBudgetMemberStats,
+  "activeConstraint"
+> & {
   readonly activeConstraint: BudgetConstraint;
   readonly physicalTileOperations: number;
   readonly physicalHierarchyOperations: number;
@@ -119,6 +149,18 @@ export type ViewGovernorStats = {
     /** True while the settle debounce alone is holding the moving regime. */
     readonly settling: boolean;
   };
+  readonly activity: {
+    readonly inputActive: boolean;
+    readonly cameraStable: boolean;
+    readonly workPending: boolean;
+    /** Core activity permits a capacity sample; timer validity is host-owned. */
+    readonly measurementEligible: boolean;
+  };
+  readonly capacitySamples: {
+    readonly eligible: number;
+    readonly rejected: number;
+    readonly lastEligible: boolean | null;
+  };
   /** Frame-time target of the current regime, ms. */
   readonly targetFrameTimeMs: number;
   /** Percentile estimate of the current regime's window, null when empty. */
@@ -133,6 +175,8 @@ export type ViewGovernorStats = {
   readonly memoryCeilingPoints: number | null;
   /** min(track budget, configured maximum, memory ceiling). */
   readonly aggregateBudget: number;
+  /** Aggregate point budget kept selected for progressive drawing. */
+  readonly selectionBudget: number;
   readonly activeConstraint: BudgetConstraint;
   /** The current regime's most recent decision, including no-change ones. */
   readonly lastAdjustment: BudgetAdjustment | null;
@@ -147,21 +191,60 @@ export type ViewGovernorStats = {
 export type ViewGovernor = {
   register(options: ViewGovernorMemberOptions): ViewGovernorMember;
   /**
+   * Replace the governor's options wholesale — an absent field means the same
+   * default it means at construction, and identical options are a no-op.
+   * A change restarts both adaptive tracks fresh, because their learned
+   * budgets measured the old configuration; memberships, motion references,
+   * camera-stability state and the host clock offset all survive, so a
+   * re-configured view never reads as a torn-down one. An unusable value
+   * throws and leaves the governor exactly as it was.
+   */
+  setOptions(options?: ViewGovernorOptions): void;
+  /**
    * Hold the moving regime. References are counted across kinds, so
    * overlapping pointer, wheel, playback, and programmatic motion compose and
    * the regime ends only when the last of them is released.
    */
   beginMotion(kind: MotionSourceKind): MotionReference;
+  /** Report a rendered-camera change; one trailing timer owns camera stability. */
+  recordCameraChange(): void;
+  /**
+   * Feed the cameras a pass actually rendered, keyed by host view (any stable
+   * key — a renderer instance, an id). Motion beyond recomputation jitter in
+   * any of them holds one inferred motion reference for the burst, released
+   * after `motionDebounceMs` of stillness; every camera that reaches LOD
+   * passing through here is what covers playback, scrubbing and programmatic
+   * animation without any of them having to announce itself. A key's first
+   * camera is its baseline, not a movement. `scheduleRender` is invoked once
+   * when the burst settles, because the settled regime cannot refine quality
+   * it never measures — the governor still never schedules frames on its own.
+   */
+  noteRenderedCameras(
+    views: ReadonlyMap<unknown, CameraView | null | undefined>,
+    scheduleRender?: () => void,
+  ): void;
+  /**
+   * Forget the rendered-camera baselines. For a host whose view stops
+   * feeding cameras (its last cloud left): without this, the first camera
+   * after they return is compared against one from before they left, and all
+   * the travel between reads as a gesture nobody made.
+   */
+  resetMotionBaselines(): void;
+  /** Immediate responsiveness signal. Never feeds the damped capacity window. */
+  recordTransientFrame(metrics: TransientFrameMetrics): void;
+  /** Feed one clean or rejected stable-capacity measurement. */
+  recordCapacitySample(metrics: CapacitySampleMetrics): void;
+  /** Combined fallback for hosts without asynchronous GPU timing. */
   recordHostFrame(metrics: HostFrameMetrics): void;
   /**
    * Whether the host must schedule another frame. Poll it after reporting a
    * frame: the governor never schedules anything itself.
    *
-   * True while the camera moves, while the stationary track is still moving
-   * its budget (or has not measured enough to decide), and while any member
-   * still has physical tile or hierarchy work running. False once selection
-   * and loading converge and the budget lands inside the dead-band — at which
-   * point repainting would show exactly the same pixels.
+   * True while the camera moves, or while an uncontaminated adaptive track
+   * still needs samples to settle its budget. Required tile or hierarchy work
+   * makes samples ineligible but does not by itself make the current pixels
+   * dirty; the controller or renderer must request a frame when completion
+   * changes presentation. False while a stable view is merely waiting.
    */
   needsFrame(): boolean;
   stats(): ViewGovernorStats;
@@ -169,40 +252,93 @@ export type ViewGovernor = {
 };
 
 type MemberState = {
-  setPointBudget(points: number): void;
+  readonly budgetMember: ViewBudgetMember;
   readonly id: string | null;
   active: boolean;
-  /** Null until the member reports; 0 is a real measurement, not "unknown". */
-  importance: number | null;
-  memoryCeilingPoints: number | null;
   physicalTileOperations: number;
   physicalHierarchyOperations: number;
-  budget: number;
+  workPending: boolean;
 };
 
 /**
- * Projected importance is unbounded, so a strictly proportional split lets one
- * dominant view drive another to a handful of points. Clamping the weight
- * spread guarantees every active view at least this fraction of an even split.
+ * How many qualifying frames in a row an emergency cut requires. With frame
+ * time measured as displayed cadence, intervals quantize to whole vsyncs: on a
+ * 60 Hz display one missed vsync reads 33.3 ms, just past the 2× threshold of
+ * the 16 ms moving target, so a single-frame trigger halves the budget on any
+ * isolated hitch — a tile upload landing, a GC pause — that says nothing about
+ * the sustainable point count. Two consecutive misses is a sustained cadence,
+ * not a hitch. The isolated frame still enters the sampled window, so a scene
+ * that hitches every other frame is answered by the damped controller.
  */
-const MIN_SHARE_OF_EVEN_SPLIT = 0.25;
+const EMERGENCY_CONSECUTIVE_FRAMES = 2;
 
 /**
- * A member's share moves with its memory ceiling, and the ceiling is derived
- * from measured bytes-per-point, which shifts a little with every tile that
- * lands or leaves. Applying a share is a synchronous, undebounced reselection
- * in the controller, so a change has to be worth one before it is applied.
- * Shares are recomputed from the fresh aggregate every pass, so skipped drift
- * accumulates and is applied once it crosses the band rather than being lost.
+ * Seed for the moving track when a gesture begins from stationary rest, as a
+ * fraction of the settled budget: the machine just sustained the stationary
+ * budget at roughly twice the moving frame target, so a quarter of it is a
+ * conservative moving-density floor. The seed only ever raises the track —
+ * a moving budget the loop learned to hold higher keeps its value.
+ *
+ * This is also the moving track's recovery path. A vsync-floored display
+ * reports a healthy gesture at exactly the display cadence, which sits inside
+ * the moving target's dead-band — the track's own frames can therefore never
+ * vote to grow it, and without this seed one spurious cut would decimate every
+ * later gesture for the rest of the session. The stationary track has no such
+ * blind spot (its target is a multiple of the cadence floor), so it recovers,
+ * and each fresh gesture inherits that recovery here.
  */
-const DISTRIBUTE_DEADBAND = 0.01;
+const INTERACTION_SEED_OF_STATIONARY = 0.25;
 
-export const createViewGovernor = (
-  options: ViewGovernorOptions = {},
-): ViewGovernor => {
+/** Governor-level defaults, beside the adaptive loop's own `DEFAULTS`. */
+const GOVERNOR_DEFAULTS = {
+  vtkFrameFraction: 0.7,
+  interactionSettleMs: 750,
+  motionDebounceMs: 250,
+} as const;
+
+/**
+ * Every option resolved to the value it configures, `maxBudget`'s absence
+ * resolved to null. Two option bags that resolve equal configure the same
+ * governor, whether a field was stated or defaulted — which is what makes
+ * `setOptions` with an equivalent bag a no-op instead of a track reset.
+ */
+const RESOLVED_OPTION_DEFAULTS = {
+  ...DEFAULTS,
+  maxBudget: null,
+  ...GOVERNOR_DEFAULTS,
+} as const;
+
+const sameOptions = (a: ViewGovernorOptions, b: ViewGovernorOptions): boolean =>
+  (
+    Object.keys(RESOLVED_OPTION_DEFAULTS) as (keyof ViewGovernorOptions)[]
+  ).every(
+    (key) =>
+      (a[key] ?? RESOLVED_OPTION_DEFAULTS[key]) ===
+      (b[key] ?? RESOLVED_OPTION_DEFAULTS[key]),
+  );
+
+type GovernorConfiguration = {
+  vtkFrameFraction: number;
+  interactionSettleMs: number;
+  motionDebounceMs: number;
+  budget: AdaptiveBudget;
+  /** Read back from the loop rather than re-defaulted, so the two cannot drift. */
+  configuredMaxPoints: number | null;
+  emergencyCooldownMs: number;
+};
+
+/**
+ * Validate one options bag and build the adaptive loop it asks for. Everything
+ * that can throw happens in here, before any governor state is touched — a
+ * bad `setOptions` bag must leave the running configuration intact.
+ */
+const resolveConfiguration = (
+  options: ViewGovernorOptions,
+): GovernorConfiguration => {
   const {
-    vtkFrameFraction: rawVtkFraction = 0.7,
-    interactionSettleMs: rawSettleMs = 750,
+    vtkFrameFraction: rawVtkFraction = GOVERNOR_DEFAULTS.vtkFrameFraction,
+    interactionSettleMs: rawSettleMs = GOVERNOR_DEFAULTS.interactionSettleMs,
+    motionDebounceMs: rawDebounceMs = GOVERNOR_DEFAULTS.motionDebounceMs,
     ...budgetOptions
   } = options;
   const vtkFrameFraction = finiteWithin(
@@ -216,19 +352,49 @@ export const createViewGovernor = (
     rawSettleMs,
     0,
   );
-  const budget: AdaptiveBudget = createAdaptiveBudget(budgetOptions);
-  // Configuration, so these are fixed for the governor's life. The cooldown is
-  // read back from the loop instead of re-defaulted here, so the two cannot
-  // drift apart.
+  const motionDebounceMs = finiteAtLeast("motionDebounceMs", rawDebounceMs, 0);
+  const budget = createAdaptiveBudget(budgetOptions);
   const { maxBudget: configuredMaxPoints, cooldownMs: emergencyCooldownMs } =
     budget.stats();
+  return {
+    vtkFrameFraction,
+    interactionSettleMs,
+    motionDebounceMs,
+    budget,
+    configuredMaxPoints,
+    emergencyCooldownMs,
+  };
+};
+
+export const createViewGovernor = (
+  options: ViewGovernorOptions = {},
+): ViewGovernor => {
+  let appliedOptions: ViewGovernorOptions = { ...options };
+  let {
+    vtkFrameFraction,
+    interactionSettleMs,
+    motionDebounceMs,
+    budget,
+    configuredMaxPoints,
+    emergencyCooldownMs,
+  } = resolveConfiguration(options);
+  const viewBudget = createViewBudgetCoordinator({
+    pointBudget: budget.budget(false),
+  });
   const members = new Set<MemberState>();
   let explicitMotion = 0;
   let inferredMotion = 0;
   let disposed = false;
-  let settleTimer: ReturnType<typeof setTimeout> | null = null;
-  const settling = (): boolean => settleTimer !== null;
+  let cameraStable = true;
+  let cameraStabilityTimer: ReturnType<typeof setTimeout> | null = null;
+  const settling = (): boolean => !cameraStable && !moving();
   let emergencyCooldownUntil = Number.NEGATIVE_INFINITY;
+  let lastEmergencyCutAt = Number.NEGATIVE_INFINITY;
+  /** Qualifying moving frames seen in a row; see EMERGENCY_CONSECUTIVE_FRAMES. */
+  let emergencyStreak = 0;
+  let eligibleCapacitySamples = 0;
+  let rejectedCapacitySamples = 0;
+  let lastCapacitySampleEligible: boolean | null = null;
 
   /**
    * The governor stamps cooldowns and restarts on the same timeline the host
@@ -248,32 +414,30 @@ export const createViewGovernor = (
   const stampNow = (): number => Date.now() + (hostEpochOffsetMs ?? 0);
 
   const moving = (): boolean => explicitMotion + inferredMotion > 0;
-  const interacting = (): boolean => moving() || settling();
+  const interacting = (): boolean => moving() || !cameraStable;
   const regime = (): BudgetRegime =>
     interacting() ? "interaction" : "stationary";
 
-  const activeMembers = (): MemberState[] =>
-    [...members].filter((member) => member.active);
-
-  /**
-   * The view's memory ceiling is the sum of the ceilings its active members
-   * report: each controller owns a byte share of one pool, so their point
-   * ceilings add. Members that have never reported are left out — an unknown
-   * ceiling contributes no known headroom — and if nobody reports, the memory
-   * bound lives entirely in the controllers.
-   */
-  const memoryCeilingPoints = (
-    active: readonly MemberState[],
-  ): number | null => {
-    let total = 0;
-    let reported = false;
-    for (const member of active) {
-      if (member.memoryCeilingPoints === null) continue;
-      total += member.memoryCeilingPoints;
-      reported = true;
+  /** Fold the active members without materializing them. */
+  const reduceActive = <T>(
+    seed: T,
+    step: (accumulated: T, member: MemberState) => T,
+  ): T => {
+    let accumulated = seed;
+    for (const member of members) {
+      if (member.active) accumulated = step(accumulated, member);
     }
-    return reported ? total : null;
+    return accumulated;
   };
+
+  const someActive = (test: (member: MemberState) => boolean): boolean => {
+    for (const member of members) {
+      if (member.active && test(member)) return true;
+    }
+    return false;
+  };
+
+  const activeCount = (): number => reduceActive(0, (count) => count + 1);
 
   /**
    * The effective aggregate:
@@ -283,16 +447,36 @@ export const createViewGovernor = (
    * apply here — and it applies to the aggregate, before the split, so no
    * member's share can be sized against memory another member owns.
    */
-  const aggregateBudget = (ceiling: number | null): number => {
-    const track = budget.budget(interacting());
+  const cappedTrackBudget = (
+    interactionTrack: boolean,
+    ceiling: number | null,
+  ): number => {
+    const track = budget.budget(interactionTrack);
     return ceiling === null ? track : Math.min(track, ceiling);
   };
 
+  const aggregateBudget = (ceiling: number | null): number =>
+    cappedTrackBudget(interacting(), ceiling);
+
+  /**
+   * Motion thins the selected set instead of replacing it. Usually the
+   * stationary track is denser; if the interaction track has proved it can
+   * draw more, retain enough points to honor that budget too.
+   */
+  const selectionBudget = (ceiling: number | null): number =>
+    interacting()
+      ? Math.max(
+          cappedTrackBudget(false, ceiling),
+          cappedTrackBudget(true, ceiling),
+        )
+      : cappedTrackBudget(false, ceiling);
+
   const constraintOf = (
-    active: readonly MemberState[],
+    active: number,
     memory: number | null,
+    spendable: number | null,
   ): BudgetConstraint => {
-    if (active.length === 0) return "inactive";
+    if (active === 0) return "inactive";
     const track = budget.budget(interacting());
     if (memory !== null && memory <= track) {
       // Ties go to the harder constraint: when memory and the configured
@@ -302,6 +486,10 @@ export const createViewGovernor = (
         return "memory";
       }
     }
+    // Demand outranks the configured maximum for the same reason: a view
+    // already drawing all it was asked for would not draw one point more if
+    // that maximum were lifted.
+    if (spendable !== null && spendable <= track) return "demand";
     if (configuredMaxPoints !== null && configuredMaxPoints <= track) {
       return "configured-maximum";
     }
@@ -310,76 +498,109 @@ export const createViewGovernor = (
 
   const distribute = (): void => {
     if (disposed) return;
-    const active = activeMembers();
-    const ceiling = memoryCeilingPoints(active);
-    // Hand the loop the memory ceiling before reading it. Clamping only the
+    const ceiling = viewBudget.spendableCeiling();
+    // Hand the loop the spendable ceiling before reading it. Clamping only the
     // aggregate would let the track integrate toward frame-time headroom the
-    // memory ceiling never allows it to spend: the effective budget would sit
-    // still while the track climbed for ever, so it would never report itself
+    // view never allows it to spend: the effective budget would sit still
+    // while the track climbed for ever, so it would never report itself
     // pinned and a host watching `needsFrame()` would repaint for ever.
+    //
+    // Demand bounds that headroom exactly as memory does. A cloud already
+    // drawing everything its camera asks for renders no slower for a larger
+    // budget, so every frame reads as headroom and the loop climbs until some
+    // other bound stops it — on a cloud whose demand sits well under its
+    // memory ceiling, that is a long climb spent repainting an image that
+    // cannot change.
     budget.setCeiling(ceiling);
-    const total = aggregateBudget(ceiling);
-    // Importance is root screen-space error in CSS px, so it is legitimately
-    // below 1 for a distant cloud and exactly 0 for one that is fully culled
-    // or still loading. Neither may be treated as "unknown": a member that
-    // has never reported is the only one that needs a stand-in, and it gets
-    // the largest reported weight so registering does not starve it.
-    const maxReported = active.reduce(
-      (max, member) => Math.max(max, member.importance ?? 0),
-      0,
+    const drawTotal = aggregateBudget(ceiling);
+    const selectionTotal = selectionBudget(ceiling);
+    viewBudget.setTargets(selectionTotal, drawTotal);
+  };
+
+  const clearCameraStabilityTimer = (): void => {
+    if (cameraStabilityTimer !== null) clearTimeout(cameraStabilityTimer);
+    cameraStabilityTimer = null;
+  };
+
+  const enterInteraction = (): void => {
+    emergencyStreak = 0;
+    budget.restartAt(
+      true,
+      Math.max(
+        budget.budget(true),
+        INTERACTION_SEED_OF_STATIONARY * budget.budget(false),
+      ),
+      stampNow(),
     );
-    // Every active member reporting zero means nothing is on screen, so there
-    // is no basis to prefer one over another: equal weights split evenly.
-    const floorWeight =
-      maxReported > 0 ? maxReported * MIN_SHARE_OF_EVEN_SPLIT : 1;
-    const weightOf = (member: MemberState): number =>
-      Math.max(member.importance ?? maxReported, floorWeight);
-    const weightTotal = active.reduce((sum, m) => sum + weightOf(m), 0);
-    for (const member of members) {
-      const next = member.active
-        ? Math.max(1, Math.floor((total * weightOf(member)) / weightTotal))
-        : 0;
-      if (next === member.budget) continue;
-      // Deactivation (0) and first assignment always apply; between live
-      // budgets, jitter smaller than the dead-band is not worth the
-      // reselection it would trigger. `member.budget` keeps the applied
-      // value, so the skipped drift stays visible to the next comparison.
-      if (
-        member.budget > 0 &&
-        next > 0 &&
-        Math.abs(next - member.budget) < member.budget * DISTRIBUTE_DEADBAND
-      ) {
-        continue;
-      }
-      member.budget = next;
-      member.setPointBudget(next);
-    }
+    distribute();
   };
 
-  const clearSettle = (): void => {
-    if (settleTimer !== null) clearTimeout(settleTimer);
-    settleTimer = null;
+  const enterStationary = (): void => {
+    budget.restartAt(
+      false,
+      Math.max(budget.budget(false), budget.budget(true)),
+      stampNow(),
+    );
+    distribute();
   };
 
-  const startSettle = (): void => {
-    clearSettle();
-    settleTimer = setTimeout(() => {
-      settleTimer = null;
-      // Stationary refinement starts from exactly the density the moving
-      // regime just sustained, so releasing the camera changes nothing on
-      // screen, and measures it fresh: samples taken while moving describe a
-      // different regime and must not decide the next stationary step. The
-      // converse holds as well, and `recordHostFrame` enforces it: the frames
-      // painted inside this window are not moving frames either, so they must
-      // not decide the next interaction step.
-      budget.restartAt(false, budget.budget(true), stampNow());
-      distribute();
+  const markCameraChanged = (): void => {
+    if (disposed) return;
+    const wasInteracting = interacting();
+    cameraStable = false;
+    clearCameraStabilityTimer();
+    cameraStabilityTimer = setTimeout(() => {
+      cameraStabilityTimer = null;
+      cameraStable = true;
+      if (!moving()) enterStationary();
     }, interactionSettleMs);
+    if (!wasInteracting) enterInteraction();
+  };
+
+  const takeMotionReference = (kind: MotionSourceKind): MotionReference => {
+    let held = !disposed;
+    if (held) {
+      const wasInteracting = interacting();
+      if (kind === "explicit") explicitMotion += 1;
+      else inferredMotion += 1;
+      if (!wasInteracting) enterInteraction();
+    }
+    return {
+      release() {
+        if (!held) return;
+        held = false;
+        if (kind === "explicit") explicitMotion -= 1;
+        else inferredMotion -= 1;
+        if (disposed || moving() || !cameraStable) return;
+        enterStationary();
+      },
+    };
+  };
+
+  /**
+   * The inferred-motion classifier: baselines of the cameras each host view
+   * last rendered, and the single burst reference their motion holds. One
+   * reference per burst of motion, never one per frame — the governor
+   * restarts its moving track whenever the first reference is taken, so a
+   * per-frame reference would keep resetting the window it needs to learn
+   * from.
+   */
+  let renderedCameras: ReadonlyMap<unknown, CameraView | null | undefined> =
+    new Map();
+  let inferredBurst: MotionReference | null = null;
+  let inferredBurstTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const endInferredBurst = (): void => {
+    if (inferredBurstTimer !== null) clearTimeout(inferredBurstTimer);
+    inferredBurstTimer = null;
+    inferredBurst?.release();
+    inferredBurst = null;
   };
 
   const pendingWork = (): boolean =>
-    activeMembers().some(
+    someActive(
       (member) =>
+        member.workPending ||
         member.physicalTileOperations > 0 ||
         member.physicalHierarchyOperations > 0,
     );
@@ -398,20 +619,97 @@ export const createViewGovernor = (
     );
   };
 
-  const needsFrame = (): boolean =>
-    !disposed && (interacting() || !converged() || pendingWork());
+  const needsFrame = (pending: boolean): boolean =>
+    !disposed && (interacting() || (!pending && !converged()));
+
+  /**
+   * Adopt the host's clock offset from this metrics packet and return "now" on
+   * the host's timeline. Every timestamp the governor compares — cooldowns,
+   * emergency cuts, budget samples — has to come from one epoch.
+   */
+  const stampFrom = (metrics: { readonly now?: number }): number => {
+    const localNow = Date.now();
+    if (finiteNonNegative(metrics.now)) {
+      hostEpochOffsetMs = metrics.now - localNow;
+    }
+    return localNow + (hostEpochOffsetMs ?? 0);
+  };
+
+  /**
+   * What the frame really cost: the host's own frame time, and the vtk and GPU
+   * spans grossed up by the fraction of the frame vtk is expected to own. The
+   * worst of the three is the one the budget must answer to.
+   */
+  const observedFrameMs = (metrics: TransientFrameMetrics): number => {
+    const candidates = [metrics.hostFrameMs];
+    if (finiteNonNegative(metrics.vtkFrameMs)) {
+      candidates.push(metrics.vtkFrameMs / vtkFrameFraction);
+    }
+    if (finiteNonNegative(metrics.gpuMs)) {
+      candidates.push(metrics.gpuMs / vtkFrameFraction);
+    }
+    return Math.max(...candidates);
+  };
+
+  /**
+   * A frame may train the budget only when nothing is still streaming into it
+   * and the camera is in a settled state — either genuinely moving, or stable.
+   */
+  const coreEligible = (pending: boolean): boolean =>
+    !pending && (moving() || cameraStable);
+
+  const recordTransientFrame = (metrics: TransientFrameMetrics): number => {
+    if (disposed || !finiteNonNegative(metrics?.hostFrameMs)) return 0;
+    const now = stampFrom(metrics);
+    const severeInput =
+      (finiteNonNegative(metrics.inputDelayMs) && metrics.inputDelayMs > 50) ||
+      (finiteNonNegative(metrics.longTaskMs) && metrics.longTaskMs > 50);
+    const inMotion = moving();
+    const target = budget.target(interacting());
+    const observedMs = observedFrameMs(metrics);
+    const emergency = inMotion && (severeInput || observedMs > target * 2);
+    if (!emergency) emergencyStreak = 0;
+    if (
+      emergency &&
+      now >= emergencyCooldownUntil &&
+      ++emergencyStreak >= EMERGENCY_CONSECUTIVE_FRAMES
+    ) {
+      emergencyStreak = 0;
+      budget.reduceNow(true, now);
+      lastEmergencyCutAt = now;
+      emergencyCooldownUntil = now + emergencyCooldownMs;
+      distribute();
+    }
+    return observedMs;
+  };
+
+  const recordCapacitySample = (metrics: CapacitySampleMetrics): void => {
+    if (disposed || !finiteNonNegative(metrics?.frameMs)) return;
+    const now = stampFrom(metrics);
+    lastCapacitySampleEligible = metrics.eligible;
+    if (!metrics.eligible) {
+      rejectedCapacitySamples += 1;
+      return;
+    }
+    eligibleCapacitySamples += 1;
+    if (now <= lastEmergencyCutAt || now < emergencyCooldownUntil) return;
+    budget.recordFrame(metrics.frameMs, {
+      interacting: metrics.regime === "interaction",
+      now,
+    });
+    distribute();
+  };
 
   return {
     register(memberOptions) {
+      const budgetMember = viewBudget.register(memberOptions);
       const state: MemberState = {
-        setPointBudget: memberOptions.setPointBudget,
+        budgetMember,
         id: memberOptions.id ?? null,
-        active: true,
-        importance: null,
-        memoryCeilingPoints: null,
+        active: memberOptions.active ?? true,
         physicalTileOperations: 0,
         physicalHierarchyOperations: 0,
-        budget: -1,
+        workPending: false,
       };
       members.add(state);
       distribute();
@@ -419,12 +717,7 @@ export const createViewGovernor = (
         update(next) {
           if (disposed || !members.has(state)) return;
           if (next.active !== undefined) state.active = next.active;
-          if (finiteNonNegative(next.projectedImportance)) {
-            state.importance = next.projectedImportance;
-          }
-          if (finiteNonNegative(next.memoryCeilingPoints)) {
-            state.memoryCeilingPoints = Math.floor(next.memoryCeilingPoints);
-          }
+          budgetMember.update(next);
           if (finiteNonNegative(next.physicalTileOperations)) {
             state.physicalTileOperations = Math.floor(
               next.physicalTileOperations,
@@ -435,139 +728,121 @@ export const createViewGovernor = (
               next.physicalHierarchyOperations,
             );
           }
+          if (next.workPending !== undefined) {
+            state.workPending = next.workPending;
+          }
           distribute();
         },
         release() {
           if (!members.delete(state)) return;
+          budgetMember.release();
           distribute();
         },
       };
     },
 
-    beginMotion(kind) {
-      let held = !disposed;
-      if (held) {
-        if (kind === "explicit") explicitMotion += 1;
-        else inferredMotion += 1;
-        if (explicitMotion + inferredMotion === 1) {
-          // Motion that resumes inside the settle window is the same burst
-          // for sampling purposes: wheel ticks and scrub steps arrive as many
-          // short begin/release pairs, and restarting the track on every one
-          // would clear its window faster than `minSamples` frames can fill
-          // it — the moving regime would never adapt at all. Only motion that
-          // begins from genuine stationary rest restarts the track: those
-          // samples measured a scene and a load that have since moved on.
-          const resuming = settling();
-          clearSettle();
-          if (!resuming) {
-            budget.restartAt(true, budget.budget(true), stampNow());
-          }
-          distribute();
-        }
-      }
-      return {
-        release() {
-          if (!held) return;
-          held = false;
-          if (kind === "explicit") explicitMotion -= 1;
-          else inferredMotion -= 1;
-          if (disposed || moving()) return;
-          startSettle();
-        },
-      };
+    setOptions(next = {}) {
+      if (disposed || sameOptions(appliedOptions, next)) return;
+      // Resolve first: this is where unusable values throw, and they must do
+      // so before the running configuration has been touched.
+      const configuration = resolveConfiguration(next);
+      appliedOptions = { ...next };
+      ({
+        vtkFrameFraction,
+        interactionSettleMs,
+        motionDebounceMs,
+        budget,
+        configuredMaxPoints,
+        emergencyCooldownMs,
+      } = configuration);
+      // The replaced loop's history measured the old configuration: emergency
+      // bookkeeping and the capacity-sample tallies restart with it. The host
+      // clock offset survives — the host's timeline did not change.
+      emergencyStreak = 0;
+      emergencyCooldownUntil = Number.NEGATIVE_INFINITY;
+      lastEmergencyCutAt = Number.NEGATIVE_INFINITY;
+      eligibleCapacitySamples = 0;
+      rejectedCapacitySamples = 0;
+      lastCapacitySampleEligible = null;
+      // Memberships and motion references were not disturbed, so the fresh
+      // tracks re-enter the regime the view is actually in.
+      if (interacting()) enterInteraction();
+      else distribute();
     },
+
+    beginMotion: takeMotionReference,
+
+    recordCameraChange: markCameraChanged,
+
+    noteRenderedCameras(views, scheduleRender) {
+      if (disposed) return;
+      let moved = false;
+      for (const [key, view] of views) {
+        if (view && cameraMoved(renderedCameras.get(key), view)) moved = true;
+      }
+      // Replace rather than merge: a view that stops reporting must not keep
+      // a stale baseline that reads as motion when it comes back.
+      renderedCameras = new Map(views);
+      if (!moved) return;
+      markCameraChanged();
+      if (!inferredBurst) inferredBurst = takeMotionReference("inferred");
+      if (inferredBurstTimer !== null) clearTimeout(inferredBurstTimer);
+      inferredBurstTimer = setTimeout(() => {
+        endInferredBurst();
+        // The settled regime cannot refine quality it never measures, so
+        // hand the host one frame to start from.
+        scheduleRender?.();
+      }, motionDebounceMs);
+    },
+
+    resetMotionBaselines() {
+      renderedCameras = new Map();
+    },
+
+    recordTransientFrame,
+
+    recordCapacitySample,
 
     recordHostFrame(metrics) {
       if (disposed || !finiteNonNegative(metrics?.hostFrameMs)) return;
-      // One local reading for both the offset and this frame's stamp, so a
-      // stamped frame is stamped with exactly the instant the host reported.
-      const localNow = Date.now();
-      if (finiteNonNegative(metrics.now)) {
-        hostEpochOffsetMs = metrics.now - localNow;
-      }
-      const now = localNow + (hostEpochOffsetMs ?? 0);
-      const candidates = [metrics.hostFrameMs];
-      if (finiteNonNegative(metrics.vtkFrameMs)) {
-        candidates.push(metrics.vtkFrameMs / vtkFrameFraction);
-      }
-      if (finiteNonNegative(metrics.gpuMs)) {
-        candidates.push(metrics.gpuMs / vtkFrameFraction);
-      }
-      const severeInput =
-        (finiteNonNegative(metrics.inputDelayMs) &&
-          metrics.inputDelayMs > 50) ||
-        (finiteNonNegative(metrics.longTaskMs) && metrics.longTaskMs > 50);
-      const inMotion = moving();
-      const inInteractionRegime = interacting();
-      const target = budget.target(inInteractionRegime);
-      const observedMs = Math.max(...candidates);
-      // Emergency cuts protect live motion. Once motion has stopped, isolated
-      // long tasks and missed frames use the sampled stationary controller so
-      // they cannot drive a fast grow/halve density sawtooth.
-      const emergency = inMotion && (severeInput || observedMs > target * 2);
-      // A frame painted inside the settle window measures neither regime, so
-      // it decides neither track. It was drawn at the interaction budget, so
-      // it cannot size the stationary one; and it carries none of the cost of
-      // motion — no gesture handling, no camera-driven reselection — so
-      // folding it into the interaction track can only ever find headroom.
-      // With emergency cuts reserved for live motion, that leaves the moving
-      // budget with a growth path and no matching shrink path: every hover
-      // after a gesture ratchets it above the density real motion sustains,
-      // and the next gesture opens over target and has to halve back down.
-      // A settle window is under a second; discarding it costs one adjustment
-      // step, and the stationary track is seeded from the same budget the
-      // moment the window closes.
-      const settleWindowOnly = inInteractionRegime && !inMotion;
-      // After an emergency, hold the cut long enough to measure the cheaper
-      // rendering regime before allowing the normal controller to grow again:
-      // inside that window a frame decides nothing, emergency or not.
-      if (!settleWindowOnly && now >= emergencyCooldownUntil) {
-        if (emergency) {
-          budget.reduceNow(inInteractionRegime, now);
-          emergencyCooldownUntil = now + emergencyCooldownMs;
-        } else {
-          budget.recordFrame(observedMs, {
-            interacting: inInteractionRegime,
-            now,
-          });
-        }
-      }
-      distribute();
+      const observedMs = recordTransientFrame(metrics);
+      recordCapacitySample({
+        frameMs: observedMs,
+        regime: regime(),
+        eligible:
+          (metrics.capacitySampleEligible ?? true) &&
+          coreEligible(pendingWork()),
+        now: metrics.now,
+      });
     },
 
-    needsFrame,
+    needsFrame: () => needsFrame(pendingWork()),
 
     stats() {
       const adaptive = budget.stats();
       const track = interacting() ? adaptive.interaction : adaptive.stationary;
-      const active = activeMembers();
-      const viewCeiling = memoryCeilingPoints(active);
-      const viewConstraint = constraintOf(active, viewCeiling);
-      const aggregate = aggregateBudget(viewCeiling);
+      const active = activeCount();
+      const pending = pendingWork();
+      const allocation = viewBudget.stats();
+      const viewCeiling = allocation.memoryCeilingPoints;
+      const viewConstraint = constraintOf(
+        active,
+        viewCeiling,
+        allocation.spendableCeilingPoints,
+      );
       const memberStats = [...members].map(
         (member): ViewGovernorMemberStats => {
-          const ceiling = member.memoryCeilingPoints;
-          const share = member.active ? Math.max(member.budget, 0) : 0;
+          const allocated = member.budgetMember.stats();
           return {
-            id: member.id,
-            active: member.active,
-            projectedImportance: member.importance,
-            allocatedShare: share,
-            memoryCeilingPoints: ceiling,
-            effectiveBudget:
-              ceiling === null ? share : Math.min(share, ceiling),
-            activeConstraint: !member.active
-              ? "inactive"
-              : ceiling !== null && ceiling < share
-                ? "memory"
-                : viewConstraint,
+            ...allocated,
+            activeConstraint: memberConstraint(allocated, viewConstraint),
             physicalTileOperations: member.physicalTileOperations,
             physicalHierarchyOperations: member.physicalHierarchyOperations,
           };
         },
       );
       const sum = (pick: (member: MemberState) => number): number =>
-        active.reduce((total, member) => total + pick(member), 0);
+        reduceActive(0, (total, member) => total + pick(member));
       return {
         regime: regime(),
         motion: {
@@ -583,28 +858,42 @@ export const createViewGovernor = (
                   : null,
           settling: settling(),
         },
+        activity: {
+          inputActive: moving(),
+          cameraStable,
+          workPending: pending,
+          measurementEligible: coreEligible(pending),
+        },
+        capacitySamples: {
+          eligible: eligibleCapacitySamples,
+          rejected: rejectedCapacitySamples,
+          lastEligible: lastCapacitySampleEligible,
+        },
         targetFrameTimeMs: track.targetMs,
         estimateMs: track.estimateMs,
         samples: track.samples,
         trackBudget: track.budget,
         configuredMaxPoints,
         memoryCeilingPoints: viewCeiling,
-        aggregateBudget: aggregate,
+        aggregateBudget: allocation.aggregateBudget,
+        selectionBudget: allocation.selectionBudget,
         activeConstraint: viewConstraint,
         lastAdjustment: track.lastAdjustment,
-        activeMembers: active.length,
+        activeMembers: active,
         members: memberStats,
         physicalTileOperations: sum((m) => m.physicalTileOperations),
         physicalHierarchyOperations: sum((m) => m.physicalHierarchyOperations),
-        needsFrame: needsFrame(),
+        needsFrame: needsFrame(pending),
       };
     },
 
     dispose() {
       if (disposed) return;
       disposed = true;
-      clearSettle();
+      endInferredBurst();
+      clearCameraStabilityTimer();
       members.clear();
+      viewBudget.dispose();
     },
   };
 };

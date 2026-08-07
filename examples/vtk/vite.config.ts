@@ -61,5 +61,8 @@ export default defineConfig({
     emptyOutDir: true,
     sourcemap: true,
     target: "esnext",
+    // Names the entry chunk for scripts/verifyChain.mjs, so the chain check
+    // reads the bundler's own record instead of guessing the output layout.
+    manifest: true,
   },
 });

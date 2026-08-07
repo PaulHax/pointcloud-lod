@@ -43,6 +43,7 @@ const VIEW: PerspectiveCameraView = {
   viewProj: IDENTITY,
   position: [0, 0, 0],
   fovY: Math.PI / 2,
+  viewportWidthCssPx: 100,
   viewportHeightCssPx: 100,
 };
 
@@ -52,6 +53,7 @@ const ORTHOGRAPHIC_VIEW: OrthographicCameraView = {
   viewProj: IDENTITY,
   position: [0, 0, 0],
   parallelScale: 1,
+  viewportWidthCssPx: 100,
   viewportHeightCssPx: 100,
 };
 
@@ -306,6 +308,45 @@ const AUTO_LEAF: Record<string, FakeEntry> = {
 };
 
 describe("createLodController", () => {
+  it("reports required work and revisions independently of telemetry", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    const duringHierarchy = controller.stats();
+    expect(duringHierarchy.workPending).toBe(true);
+    expect(duringHierarchy.workRevision).toBeGreaterThan(0);
+
+    await bootAndLand(controller, deferred);
+    const settled = controller.stats();
+    expect(settled.workPending).toBe(false);
+    expect(settled.workRevision).toBeGreaterThan(duringHierarchy.workRevision);
+    controller.dispose();
+  });
+
+  it("reports a debounced selection until the trailing pass runs", async () => {
+    vi.useFakeTimers();
+    try {
+      const { controller } = makeController(SMALL_TREE, {
+        selectionDelayMs: 150,
+      });
+      await settle();
+      controller.setCamera(VIEW);
+      await settle();
+      const generation = controller.stats().selection.generation;
+
+      controller.setCamera({ ...VIEW, position: [1, 0, 0] });
+      expect(controller.stats().selectionPending).toBe(true);
+      expect(controller.stats().selection.generation).toBe(generation);
+
+      await vi.advanceTimersByTimeAsync(150);
+      expect(controller.stats().selectionPending).toBe(false);
+      expect(controller.stats().selection.generation).toBeGreaterThan(
+        generation,
+      );
+      controller.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("selects within the budget with a parent-closed set", async () => {
     const { controller, loadCalls, deferred, batches } = makeController(
       SMALL_TREE,
@@ -340,6 +381,37 @@ describe("createLodController", () => {
     controller.setPointBudget(1000);
     await settle();
     expect(loadCalls).toHaveLength(3);
+    controller.dispose();
+  });
+
+  it("changes progressive density without selection, I/O, or tile batches", async () => {
+    const onDrawPlan = vi.fn();
+    const { controller, deferred, loadCalls, batches } = makeController(
+      SMALL_TREE,
+      { onDrawPlan },
+    );
+    await bootAndLand(controller, deferred);
+    const before = controller.stats();
+    const beforeLoads = [...loadCalls];
+    const beforeBatches = batches.length;
+    const beforeKeys = controller.activeKeys();
+
+    controller.setDensityFraction(0.25);
+
+    const after = controller.stats();
+    expect(after.densityFraction).toBe(0.25);
+    expect(after.drawnPoints).toBe(55);
+    expect(after.selection.generation).toBe(before.selection.generation);
+    expect(after.selection.targetRevision).toBe(
+      before.selection.targetRevision,
+    );
+    expect(after.selection.targetPoints).toBe(before.selection.targetPoints);
+    expect(controller.activeKeys()).toEqual(beforeKeys);
+    expect(loadCalls).toEqual(beforeLoads);
+    expect(batches).toHaveLength(beforeBatches);
+    expect(onDrawPlan).toHaveBeenLastCalledWith({
+      entries: [{ key: ROOT_KEY, pointCount: 55 }],
+    });
     controller.dispose();
   });
 
@@ -383,6 +455,59 @@ describe("createLodController", () => {
     await settle();
     expect(loadCalls).toEqual(["0-0-0-0", "1-1-0-0", "1-0-0-0"]);
     controller.dispose();
+  });
+
+  it("raises the budget against the current view, not the pending one", async () => {
+    const tree: Record<string, FakeEntry> = {
+      "0-0-0-0": {
+        pointCount: 10,
+        spacing: 10,
+        bounds: { min: [-1, -1, -0.5], max: [1, 1, 0.5] },
+        children: ["1-0-0-0", "1-1-0-0"],
+      },
+      "1-0-0-0": {
+        pointCount: 80,
+        spacing: 1,
+        bounds: { min: [-0.5, -0.2, -0.5], max: [-0.1, 0.2, 0.5] },
+      },
+      "1-1-0-0": {
+        pointCount: 30,
+        spacing: 1,
+        bounds: { min: [0.1, -0.2, -0.5], max: [0.5, 0.2, 0.5] },
+      },
+    };
+    // Shifts clip x by +1: only world x <= 0 stays inside the frustum, so the
+    // right-hand child is culled while the root and the left-hand child remain.
+    const LEFT_ONLY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1];
+    vi.useFakeTimers();
+    try {
+      const { controller, loadCalls } = makeController(tree, {
+        pointBudget: 50,
+        selectionDelayMs: 150,
+      });
+      await settle();
+      controller.setCamera({ ...VIEW, position: [0.5, 0, 2] });
+      await settle();
+      expect(loadCalls).toEqual(["0-0-0-0", "1-1-0-0"]);
+
+      // The camera turns away from the 30-point child; its selection pass is
+      // still debounced, so the retained target names a node this view culls.
+      controller.setCamera({
+        ...VIEW,
+        viewProj: LEFT_ONLY,
+        position: [-0.5, 0, 2],
+      });
+      await settle();
+
+      // 10 + 80 fits in 110; nothing may be held back for the culled child.
+      controller.setPointBudget(110);
+      await settle();
+      expect(loadCalls).toEqual(["0-0-0-0", "1-1-0-0", "1-0-0-0"]);
+      expect(controller.stats().selection.targetPoints).toBe(90);
+      controller.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps a near-tied selected tile until a challenger is materially more important", async () => {
@@ -448,6 +573,64 @@ describe("createLodController", () => {
     expect(removed).toContain("0-0-0-0");
     expect(controller.stats().residentTiles).toBe(0);
     expect(controller.stats().inFlight).toBe(0);
+    controller.dispose();
+  });
+
+  it("adopts a recent camera-deselected fetch before aborting it", async () => {
+    vi.useFakeTimers();
+    const { controller, deferred, loadCalls } = makeController(
+      { "0-0-0-0": { pointCount: 100 } },
+      { selectionDelayMs: 150 },
+    );
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    expect(loadCalls).toEqual(["0-0-0-0"]);
+
+    // The trailing away-selection marks the read unwanted, then gives it one
+    // selection interval in which a quick view reversal can adopt it.
+    controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
+    await vi.advanceTimersByTimeAsync(150);
+    expect(deferred.get("0-0-0-0")!.aborted).toBe(false);
+    expect(controller.stats()).toMatchObject({
+      inFlight: 0,
+      physicalTileOperations: 1,
+    });
+
+    controller.setCamera(VIEW);
+    controller.refresh();
+    await vi.advanceTimersByTimeAsync(150);
+    expect(deferred.get("0-0-0-0")!.aborted).toBe(false);
+    expect(loadCalls).toEqual(["0-0-0-0"]);
+
+    deferred.get("0-0-0-0")!.resolve();
+    await settle();
+    expect(controller.stats()).toMatchObject({
+      residentTiles: 1,
+      inFlight: 0,
+      physicalTileOperations: 0,
+    });
+    controller.dispose();
+  });
+
+  it("aborts a camera-deselected fetch after its grace expires", async () => {
+    vi.useFakeTimers();
+    const { controller, deferred } = makeController(
+      { "0-0-0-0": { pointCount: 100 } },
+      { selectionDelayMs: 150 },
+    );
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+
+    controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
+    await vi.advanceTimersByTimeAsync(150);
+    await vi.advanceTimersByTimeAsync(149);
+    expect(deferred.get("0-0-0-0")!.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(deferred.get("0-0-0-0")!.aborted).toBe(true);
+    await settle();
+    expect(controller.stats().physicalTileOperations).toBe(0);
     controller.dispose();
   });
 
@@ -684,13 +867,17 @@ describe("createLodController", () => {
   });
 
   it("coalesces same-tick arrivals into one batch and one render", async () => {
-    const { controller, deferred, batches, scheduleRender } =
-      makeController(SMALL_TREE);
+    const onWorkChange = vi.fn();
+    const { controller, deferred, batches, scheduleRender } = makeController(
+      SMALL_TREE,
+      { onWorkChange },
+    );
     await settle();
     controller.setCamera(VIEW);
     await settle();
 
     scheduleRender.mockClear();
+    onWorkChange.mockClear();
     batches.length = 0;
     for (const d of deferred.values()) d.resolve();
     await settle();
@@ -698,6 +885,9 @@ describe("createLodController", () => {
     expect(batches).toHaveLength(1);
     expect(batches[0]!.added).toHaveLength(3);
     expect(scheduleRender).toHaveBeenCalledTimes(1);
+    // One coalesced notification for all completed reads, then one for the
+    // applied renderer batch. Neither turns into a per-tile render request.
+    expect(onWorkChange).toHaveBeenCalledTimes(2);
     controller.dispose();
   });
 
@@ -795,7 +985,6 @@ describe("createLodController — ready frontier and presentation", () => {
     return {
       diameters,
       ...makeController(tree, {
-        interactionSettleMs: 300,
         onPointDiameterCssPx: (value) => diameters.push(value),
         ...overrides,
       }),
@@ -956,6 +1145,33 @@ describe("createLodController — ready frontier and presentation", () => {
     controller.dispose();
   });
 
+  it("treats a viewport resize as a camera change, an identical view as none", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await bootAndLand(controller, deferred);
+    const generation = controller.stats().selection.generation;
+
+    // Hosts re-feed the camera every render: an identical view is a no-op.
+    controller.setCamera({ ...VIEW });
+    await settle();
+    expect(controller.stats().selection.generation).toBe(generation);
+
+    // A width-only resize changes the aspect and must re-run selection.
+    controller.setCamera({ ...VIEW, viewportWidthCssPx: 150 });
+    await settle();
+    const widened = controller.stats().selection.generation;
+    expect(widened).toBeGreaterThan(generation);
+
+    // So must a height-only resize on top of it.
+    controller.setCamera({
+      ...VIEW,
+      viewportWidthCssPx: 150,
+      viewportHeightCssPx: 150,
+    });
+    await settle();
+    expect(controller.stats().selection.generation).toBeGreaterThan(widened);
+    controller.dispose();
+  });
+
   it("keeps the ready parent terminal while a hierarchy page is unavailable", async () => {
     let resolveChildPage!: (infos: NodeInfo[]) => void;
     let resolveRootTile!: (tile: TileData) => void;
@@ -1111,6 +1327,39 @@ describe("createLodController — ready frontier and presentation", () => {
       controller.stats().selection.readyTerminalFrontier.projectedSpacingCssPx
         .max,
     ).toBeCloseTo(1);
+    controller.dispose();
+  });
+
+  it("sizes Auto points for the effective progressively thinned spacing", async () => {
+    const tree: Record<string, FakeEntry> = {
+      "0-0-0-0": { pointCount: 100, spacing: 0.08 },
+    };
+    const { controller, deferred } = makePresented(tree, {
+      presentation: {
+        mode: "auto",
+        userScale: 1,
+        minDiameterCssPx: 0.5,
+        maxDiameterCssPx: 10,
+      },
+    });
+    await settle();
+    controller.setCamera(ORTHOGRAPHIC_VIEW);
+    await settle();
+    deferred.get("0-0-0-0")!.resolve();
+    await settle();
+    expect(controller.stats().presentation.diameterCssPx).toBeCloseTo(4);
+    const generation = controller.stats().selection.generation;
+
+    controller.setDensityFraction(0.25);
+    const thinned = controller.stats();
+    expect(thinned.presentation.diameterCssPx).toBeCloseTo(8);
+    expect(
+      thinned.selection.readyTerminalFrontier.projectedSpacingCssPx.max,
+    ).toBeCloseTo(8);
+    expect(thinned.selection.generation).toBe(generation);
+
+    controller.setDensityFraction(1);
+    expect(controller.stats().presentation.diameterCssPx).toBeCloseTo(4);
     controller.dispose();
   });
 
@@ -1620,7 +1869,7 @@ describe("createLodController — budget and memory ceiling", () => {
     tree: Record<string, FakeEntry>,
     pointBudget: number,
     memory?: number,
-  ) => makeController(tree, { pointBudget, interactionSettleMs: 300, memory });
+  ) => makeController(tree, { pointBudget, memory });
 
   it("applies a budget drop immediately during interaction", async () => {
     const { controller, deferred } = makeBudgeted(SMALL_TREE, 1000);
@@ -1778,6 +2027,41 @@ describe("createLodController — selection stats", () => {
 
     controller.setSource(source);
     expect(controller.stats().selection.targetTiles).toBe(0);
+    controller.dispose();
+  });
+
+  it("reports the same per-frame numbers as the full snapshot", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await settle();
+
+    // Before any camera, mid-stream with a read outstanding, and settled: the
+    // narrow read a host polls per frame must never disagree with the
+    // diagnostic snapshot it was carved out of.
+    const agrees = () => {
+      const stats = controller.stats();
+      expect(controller.governorInputs()).toEqual({
+        memoryBudgetBytes: stats.memoryBudgetBytes,
+        memoryCeilingPoints: stats.memoryCeilingPoints,
+        projectedImportance: stats.selection.projectedImportance,
+        demandPoints:
+          stats.selection.targetPoints + stats.selection.budgetSkippedPoints,
+        physicalTileOperations: stats.physicalTileOperations,
+        physicalHierarchyOperations: stats.physicalHierarchyOperations,
+      });
+    };
+
+    agrees();
+    controller.setCamera(VIEW);
+    await settle();
+    agrees();
+    expect(controller.governorInputs().projectedImportance).toBeGreaterThan(0);
+
+    for (const d of deferred.values()) d.resolve();
+    await settle();
+    agrees();
+
+    controller.setActive(false);
+    agrees();
     controller.dispose();
   });
 });
@@ -2228,8 +2512,7 @@ describe("createLodController — bounded physical work", () => {
   it("reads each tile key once however often the camera churns", async () => {
     // Cancellation never destroys a decoded payload: the read either stays
     // physically alive or lands in the cache. A reselect must therefore adopt
-    // one or spend the other — re-reading the same bytes was ~40% of all tile
-    // I/O under a panning camera.
+    // one or spend the other, never re-read the same bytes.
     const graph = createPageGraphSource({
       depth: 2,
       branching: 4,
@@ -2530,12 +2813,12 @@ describe("createLodController — numeric configuration", () => {
       expect(() => make({ selectionDelayMs: value })).toThrow(
         /selectionDelayMs/,
       );
-      expect(() => make({ interactionSettleMs: value })).toThrow(
-        /interactionSettleMs/,
-      );
       expect(() => make({ refinementCutoffPx: value })).toThrow(
         /refinementCutoffPx/,
       );
+    }
+    for (const value of [...NON_FINITE, -0.01, 1.01]) {
+      expect(() => make({ densityFraction: value })).toThrow(/densityFraction/);
     }
   });
 
@@ -2586,6 +2869,10 @@ describe("createLodController — numeric configuration", () => {
         before.refinementCutoffPx,
       );
     }
+    for (const value of [...NON_FINITE, -0.01, 1.01]) {
+      controller.setDensityFraction(value);
+      expect(controller.stats().densityFraction).toBe(before.densityFraction);
+    }
     for (const presentation of [
       { mode: "fixed", diameterCssPx: Number.NaN },
       { mode: "fixed", diameterCssPx: -2 },
@@ -2614,6 +2901,8 @@ describe("createLodController — numeric configuration", () => {
       { ...VIEW, fovY: 0 },
       // A field of view of a half-turn or more has no usable tangent.
       { ...VIEW, fovY: Math.PI },
+      { ...VIEW, viewportWidthCssPx: 0 },
+      { ...VIEW, viewportWidthCssPx: Number.NaN },
       { ...VIEW, viewportHeightCssPx: 0 },
       { ...VIEW, viewportHeightCssPx: Number.NaN },
       { ...VIEW, viewProj: [...IDENTITY.slice(0, 15), Number.NaN] },
@@ -2652,6 +2941,182 @@ describe("createLodController — numeric configuration", () => {
     expect(stats.memoryCeilingPoints).toBe(0);
     expect(stats.memoryBudgetBytes).toBe(0);
     expect(loadCalls).toEqual([]);
+    controller.dispose();
+  });
+});
+
+describe("createLodController — pickPoint", () => {
+  // Every fake tile carries zeroed positions at the world origin, which the
+  // identity view-projection puts at the viewport center: css (50, 50). The
+  // cursor ray there runs from (0, 0, -1) along +z, so the support depth of
+  // the origin is 1 and the picked point is the origin itself.
+  const pickCenter = (controller: LodController, view: CameraView = VIEW) =>
+    controller.pickPoint(view, 50, 50);
+
+  // Rotation by 90 degrees about z, uniform scale 2, small translation:
+  // model-local origin lands at world (0.5, 0.2, 0), which the identity
+  // view-projection puts at css (75, 40) on the 100x100 viewport.
+  // prettier-ignore
+  const SIMILARITY = [
+    0, 2, 0, 0,
+    -2, 0, 0, 0,
+    0, 0, 2, 0,
+    0.5, 0.2, 0, 1,
+  ];
+  // Anisotropic scale: not a similarity, so the camera restatement refuses it.
+  // prettier-ignore
+  const NON_SIMILARITY = [
+    1, 0, 0, 0,
+    0, 2, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1,
+  ];
+
+  it("solves through the model matrix and answers in world coordinates", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await bootAndLand(controller, deferred);
+
+    controller.setModelMatrix(SIMILARITY);
+    const result = controller.pickPoint(VIEW, 75, 40);
+    expect(result?.status).toBe("hit");
+    if (result?.status !== "hit") throw new Error("unreachable");
+    expect(result.pointOnRay[0]).toBeCloseTo(0.5);
+    expect(result.pointOnRay[1]).toBeCloseTo(0.2);
+    expect(result.pointOnRay[2]).toBeCloseTo(0);
+    // A pick from elsewhere in the viewport supports through an outer radius
+    // bucket, and its pointOnRay lies on the WORLD cursor ray — for the
+    // identity view-projection, the z axis — at the supported depth.
+    const offCenter = controller.pickPoint(VIEW, 50, 50);
+    expect(offCenter?.status).toBe("hit");
+    if (offCenter?.status !== "hit") throw new Error("unreachable");
+    expect(offCenter.pointOnRay[0]).toBeCloseTo(0);
+    expect(offCenter.pointOnRay[1]).toBeCloseTo(0);
+    expect(offCenter.distancePx).toBeGreaterThan(20);
+    controller.dispose();
+  });
+
+  it("an unusable model matrix parks picks until a usable one arrives", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await bootAndLand(controller, deferred);
+    expect(pickCenter(controller)?.status).toBe("hit");
+
+    controller.setModelMatrix(NON_SIMILARITY);
+    expect(pickCenter(controller)).toBeNull();
+
+    controller.setModelMatrix(null);
+    expect(pickCenter(controller)?.status).toBe("hit");
+    controller.dispose();
+  });
+
+  it("hits over the submitted tile set, on the cursor ray", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await bootAndLand(controller, deferred);
+
+    const result = pickCenter(controller);
+    expect(result?.status).toBe("hit");
+    if (result?.status !== "hit") throw new Error("unreachable");
+    expect(result.pointOnRay[0]).toBeCloseTo(0);
+    expect(result.pointOnRay[1]).toBeCloseTo(0);
+    expect(result.pointOnRay[2]).toBeCloseTo(0);
+    expect(result.distancePx).toBeCloseTo(0);
+    controller.dispose();
+  });
+
+  it("never picks points outside the prefix currently being drawn", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await bootAndLand(controller, deferred);
+    expect(pickCenter(controller)?.status).toBe("hit");
+
+    controller.setDensityFraction(0);
+    expect(controller.stats().drawnPoints).toBe(0);
+    expect(pickCenter(controller)).toEqual({ status: "miss" });
+
+    controller.setDensityFraction(1);
+    expect(pickCenter(controller)?.status).toBe("hit");
+    controller.dispose();
+  });
+
+  it("answers miss, not null, when a valid sweep supports nothing", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    // Nothing submitted yet: a valid query over an empty set is a miss.
+    await settle();
+    expect(pickCenter(controller)).toEqual({ status: "miss" });
+
+    await bootAndLand(controller, deferred);
+    // A cursor far outside every bucket misses too.
+    expect(controller.pickPoint(VIEW, 550, 50)).toEqual({ status: "miss" });
+    controller.dispose();
+  });
+
+  it("does not pick resident tiles ahead of the renderer flush", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+
+    deferred.get("0-0-0-0")!.resolve();
+    // One turn: the payload claims residency, but the batched flush that
+    // hands it to the renderer is still queued behind this continuation.
+    await Promise.resolve();
+    expect(controller.activeKeys().resident).toContain("0-0-0-0");
+    expect(controller.activeKeys().submitted).toEqual([]);
+    // What the renderer is not yet drawing must not answer a pick.
+    expect(pickCenter(controller)).toEqual({ status: "miss" });
+
+    await settle();
+    expect(controller.activeKeys().submitted).toContain("0-0-0-0");
+    expect(pickCenter(controller)?.status).toBe("hit");
+    controller.dispose();
+  });
+
+  it("does not pick tiles that fell back to the decoded cache", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await bootAndLand(controller, deferred);
+    expect(pickCenter(controller)?.status).toBe("hit");
+
+    controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
+    await settle();
+    expect(controller.stats().cachedTiles).toBeGreaterThan(0);
+    expect(controller.stats().residentTiles).toBe(0);
+    // The payloads are still decoded, but nothing is rendered: the query
+    // view still looks straight at them, and must miss anyway.
+    expect(pickCenter(controller)).toEqual({ status: "miss" });
+    controller.dispose();
+  });
+
+  it("is unavailable while inactive and again after dispose", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await bootAndLand(controller, deferred);
+
+    controller.setActive(false);
+    await settle();
+    expect(pickCenter(controller)).toBeNull();
+
+    controller.setActive(true);
+    await settle();
+    expect(pickCenter(controller)?.status).toBe("hit");
+
+    controller.dispose();
+    expect(pickCenter(controller)).toBeNull();
+  });
+
+  it("is unavailable for an invalid view or cursor, never a miss", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await bootAndLand(controller, deferred);
+
+    const unusable: CameraView[] = [
+      { ...VIEW, viewportWidthCssPx: 0 },
+      { ...VIEW, viewportHeightCssPx: Number.NaN },
+      { ...VIEW, viewProj: [...IDENTITY.slice(0, 15), Number.NaN] },
+      // All-finite but singular: the cursor ray cannot be built.
+      { ...VIEW, viewProj: IDENTITY.map(() => 0) },
+      { ...VIEW, position: [Number.NaN, 0, 0] },
+    ];
+    for (const view of unusable) {
+      expect(pickCenter(controller, view)).toBeNull();
+    }
+    expect(controller.pickPoint(VIEW, Number.NaN, 50)).toBeNull();
+    expect(controller.pickPoint(VIEW, 50, Number.NEGATIVE_INFINITY)).toBeNull();
     controller.dispose();
   });
 });

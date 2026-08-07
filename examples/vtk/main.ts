@@ -1,12 +1,12 @@
 /**
  * pointcloud-lod vtk.js example.
  *
- * Streams any COPC dataset — a local file through `File.slice()` range reads,
- * a remote URL through HTTP Range — using the same three pieces the trame
- * bridge wires together: one LOD controller per cloud, one renderer adapter,
- * and one view governor owning the point budget for the whole view. Every
- * knob (budget mode, frame-time targets, maximum points, projection) is a
- * runtime control, so a different cloud needs no code change.
+ * Streams any COPC dataset through a source worker — a local file through
+ * `Blob.slice()` range reads, a remote URL through HTTP Range — using the same
+ * three pieces the trame bridge wires together: one LOD controller per cloud,
+ * one renderer adapter, and one view governor owning the point budget for the
+ * whole view. Every knob (budget mode, frame-time targets, maximum points,
+ * projection) is a runtime control, so a different cloud needs no code change.
  *
  * The governor never schedules a frame: this page paints, times the paint,
  * reports it, and asks `needsFrame()` whether another one is owed. That is the
@@ -26,18 +26,30 @@ import macro from "@kitware/vtk.js/macros";
 import {
   DEFAULTS,
   ROOT_KEY,
-  createCopcTileSource,
+  captureTelemetryEnvironment,
+  createCopcWorkerTileSource,
+  createGpuFrameTimer,
   createLodController,
+  createTelemetryRecorder,
+  createViewBudgetCoordinator,
   createViewGovernor,
+  keyToString,
   type CameraView,
+  type GpuTimerResult,
   type LodController,
   type MotionReference,
   type PointPresentation,
+  type TelemetryEnvironment,
+  type TelemetryFrameEvent,
+  type TelemetryRecorder,
+  type TelemetryTrace,
   type TileSource,
   type ViewGovernor,
   type ViewGovernorMember,
   type ViewGovernorOptions,
   type ViewGovernorStats,
+  type ViewBudgetCoordinator,
+  type ViewBudgetMember,
 } from "../../src";
 import {
   createRendererAdapter,
@@ -80,6 +92,10 @@ const frameRateFilteredValue = element<HTMLOutputElement>(
 );
 const frameRateTargetLine = element<SVGLineElement>("#frame-rate-target-line");
 const frameRateTarget = element<HTMLElement>("#frame-rate-target");
+const telemetryStatus = element<HTMLOutputElement>("#telemetry-status");
+const telemetryToggle = element<HTMLButtonElement>("#telemetry-toggle");
+const telemetryDownload = element<HTMLButtonElement>("#telemetry-download");
+const telemetryClear = element<HTMLButtonElement>("#telemetry-clear");
 
 const fullScreen = vtkFullScreenRenderWindow.newInstance({
   rootContainer: viewer,
@@ -228,6 +244,10 @@ const dollyToPosition = (
 /**
  * World-up orbit with pitch constrained before either pole.
  *
+ * The focal point is explicitly reprojected onto the screen-center ray when
+ * an orbit begins. Zoom-to-cursor may translate it, but orbit never inherits
+ * an off-center pivot from another interaction.
+ *
  * vtk.js's world-up trackball keeps the horizon level but lets elevation pass
  * through ±90°. At the pole the screen-right axis is undefined; crossing it
  * reverses the horizontal basis and makes the next orbit or pan feel flipped.
@@ -246,7 +266,36 @@ const createOrbitManipulator = (initialValues: object): any => {
     onButtonDown: (i: any, r: any, p: { x: number; y: number }) => void;
     onMouseMove: (i: any, r: any, p: { x: number; y: number } | null) => void;
   };
-  api.onButtonDown = (_interactor, _renderer, position) => {
+  api.onButtonDown = (interactor, renderer, position) => {
+    const orbitCamera = renderer.getActiveCamera();
+    const focalPoint = orbitCamera.getFocalPoint() as number[];
+    const style = interactor.getInteractorStyle();
+    const displayFocal = style.computeWorldToDisplay(
+      renderer,
+      focalPoint[0],
+      focalPoint[1],
+      focalPoint[2],
+    ) as number[];
+    const viewport = renderer.getViewport() as number[];
+    const [viewWidth, viewHeight] = interactor.getView().getSize() as number[];
+    const centeredFocal = style.computeDisplayToWorld(
+      renderer,
+      ((viewport[0]! + viewport[2]!) * viewWidth!) / 2,
+      ((viewport[1]! + viewport[3]!) * viewHeight!) / 2,
+      displayFocal[2],
+    ) as number[];
+    if (centeredFocal.slice(0, 3).every(Number.isFinite)) {
+      orbitCamera.setFocalPoint(
+        centeredFocal[0],
+        centeredFocal[1],
+        centeredFocal[2],
+      );
+      style.setCenterOfRotation(
+        centeredFocal[0],
+        centeredFocal[1],
+        centeredFocal[2],
+      );
+    }
     previous = position;
   };
   api.onMouseMove = (interactor, renderer, position) => {
@@ -386,14 +435,6 @@ interactorStyle.addMouseManipulator(
 );
 interactor.setInteractorStyle(interactorStyle);
 
-/** How long the camera must hold still before inferred motion is released. */
-const MOTION_DEBOUNCE_MS = 250;
-/**
- * Relative, so the same threshold works for a cloud in metres and one in
- * degrees: recomputing the camera product every frame jitters in the last
- * bits, and no real camera change is that small.
- */
-const MOTION_RELATIVE_EPSILON = 1e-9;
 /** The panel is an instrument, so it repaints on its own slower clock. */
 const DIAGNOSTICS_INTERVAL_MS = 100;
 
@@ -403,13 +444,13 @@ type Projection = "perspective" | "orthographic";
 
 let controller: LodController | null = null;
 let adapter: RendererAdapter | null = null;
+let loadedSource: TileSource | null = null;
 let governor: ViewGovernor | null = null;
 let governorKey: string | null = null;
 let member: ViewGovernorMember | null = null;
+let fixedBudget: ViewBudgetCoordinator | null = null;
+let fixedMember: ViewBudgetMember | null = null;
 let explicitMotion: MotionReference | null = null;
-let inferredMotion: MotionReference | null = null;
-let inferredMotionTimer: ReturnType<typeof setTimeout> | null = null;
-let lastRenderedView: CameraView | null = null;
 let loadedName = "";
 let loadedPointCount = 0;
 let frameQueued = false;
@@ -429,6 +470,39 @@ let currentDevicePixelRatio = window.devicePixelRatio;
 let loadGeneration = 0;
 let fixedPointDiameterCssPx = 2;
 let autoPointScale = 0.5;
+/**
+ * The draw density fixed quality is asked for. Adaptive quality derives its
+ * own from measured frame time and takes no preference.
+ */
+let fixedDensityFraction = 1;
+
+const telemetryEnvironment = (): TelemetryEnvironment =>
+  captureTelemetryEnvironment(
+    fullScreen.getApiSpecificRenderWindow().get3DContext() as
+      | WebGLRenderingContext
+      | WebGL2RenderingContext
+      | null,
+  );
+
+const telemetry: TelemetryRecorder = createTelemetryRecorder({
+  environment: telemetryEnvironment,
+});
+
+const webGlContext = fullScreen.getApiSpecificRenderWindow().get3DContext() as
+  | WebGLRenderingContext
+  | WebGL2RenderingContext
+  | null;
+const webGl2Context =
+  webGlContext !== null && "createQuery" in webGlContext
+    ? (webGlContext as WebGL2RenderingContext)
+    : null;
+const timerContext = telemetryEnvironment().webgl.softwareRenderer
+  ? null
+  : webGl2Context;
+let handleGpuTimerResult: (result: GpuTimerResult) => void = () => {};
+const gpuTimer = createGpuFrameTimer(timerContext, {
+  onResult: (result) => handleGpuTimerResult(result),
+});
 
 const setMessage = (text: string, error = false): void => {
   message.textContent = text;
@@ -509,6 +583,7 @@ const cameraView = (): CameraView => {
       camera.getCompositeProjectionMatrix(width / height, -1, 1),
     ),
     position: [...camera.getPosition()] as [number, number, number],
+    viewportWidthCssPx: width,
     viewportHeightCssPx: height,
   };
   return camera.getParallelProjection()
@@ -524,91 +599,94 @@ const cameraView = (): CameraView => {
       };
 };
 
+const telemetryState = (): unknown => ({
+  source: loadedName || null,
+  sourcePoints: loadedPointCount,
+  camera: {
+    selectionView: cameraView(),
+    focalPoint: [...camera.getFocalPoint()],
+    viewUp: [...camera.getViewUp()],
+  },
+  settings: {
+    budgetMode: budgetMode(),
+    fixedPointBudget: fixedPointBudget(),
+    interactionTargetMs: numberFrom(movingTargetInput),
+    stationaryTargetMs: numberFrom(stationaryTargetInput),
+    maximumPoints: numberFrom(maxPointsInput),
+    pointPresentation: pointPresentation(),
+    devicePixelRatio: currentDevicePixelRatio,
+  },
+  controller: controller?.stats() ?? null,
+  adapter: adapter?.stats() ?? null,
+  governor: governor?.stats() ?? null,
+});
+
+type CoreWorkSnapshot = {
+  readonly controllerRevision: number;
+  readonly rendererRevision: number;
+};
+
+let lastPresentedCoreWork: CoreWorkSnapshot | null = null;
+
+/** Reasons this presentation cannot describe steady-state rendering cost. */
+const frameContamination = (): string[] => {
+  const cloud = controller?.stats();
+  const rendererState = adapter?.stats();
+  if (cloud === undefined || rendererState === undefined) {
+    lastPresentedCoreWork = null;
+    return ["no-controller"];
+  }
+  const reasons: string[] = [];
+  const current = {
+    controllerRevision: cloud.workRevision,
+    rendererRevision: rendererState.workRevision,
+  };
+  if (lastPresentedCoreWork === null) {
+    reasons.push("first-core-frame");
+  } else {
+    if (
+      current.controllerRevision !== lastPresentedCoreWork.controllerRevision
+    ) {
+      reasons.push("controller-work-overlap");
+    }
+    if (current.rendererRevision !== lastPresentedCoreWork.rendererRevision) {
+      reasons.push("renderer-resource-change");
+    }
+  }
+  if (cloud.inFlight > 0 || cloud.queuedTiles > 0)
+    reasons.push("tile-work-wanted");
+  if (cloud.physicalTileOperations > 0) reasons.push("tile-work-physical");
+  if (cloud.hierarchyInFlight > 0 || cloud.queuedPages > 0)
+    reasons.push("hierarchy-work-wanted");
+  if (cloud.physicalHierarchyOperations > 0)
+    reasons.push("hierarchy-work-physical");
+  if (cloud.selection.targetUndecodedTiles > 0)
+    reasons.push("selected-tiles-undecoded");
+  if (cloud.workPending) reasons.push("required-work-pending");
+  lastPresentedCoreWork = current;
+  return reasons;
+};
+
 // ---------------------------------------------------------------------------
 // Camera-motion inference
 //
-// The same policy the trame bridge applies at its rendered-camera boundary
-// (`classifyCameraMotion` in pointCloudLod.js): compare the camera actually
-// handed to LOD against the previous one, ignore floating-point jitter, hold
-// one inferred reference for the whole burst, and release it after a quiet
-// debounce. The bridge's copy is bound to its per-view registry bookkeeping,
-// so it cannot be imported; this is that rule with one view's worth of state.
+// Hand the governor the camera this page actually rendered and let it classify
+// the motion: it owns the jitter epsilon, the clip-z-row exclusion, the
+// inferred motion reference and the trailing stability timer. A host with
+// several views passes one entry per view; this page has one.
 // ---------------------------------------------------------------------------
 
-const movedBeyondJitter = (previous: number, next: number): boolean =>
-  Math.abs(previous - next) >
-  MOTION_RELATIVE_EPSILON * Math.max(1, Math.abs(previous), Math.abs(next));
-
-/**
- * World-to-clip entries describing where the camera is looking.
- *
- * The clip-z row is deliberately left out, exactly as the bridge leaves out
- * its own: a host folds a depth remap derived from the scene's visible bounds
- * into that row, so a tile arriving or being evicted rewrites those four
- * numbers while the camera stands perfectly still. Every camera move shows up
- * in the x, y and w rows; the one motion that lives only in clip z — dollying
- * an orthographic camera along its view axis — shows up in the eye point
- * instead, which is compared alongside.
- *
- * `viewProj` is column-major (`index = column * 4 + row`), so the clip-z row
- * is entries 2, 6, 10 and 14 — not 8..11, which are column 2 and move under
- * ordinary rotation.
- *
- * This page hands the projection a fixed z range, so the row never moves here
- * and excluding it changes nothing on screen. It is here because the example
- * exists to show a host what to implement, and a host reading its own
- * composite matrix will have the remap folded in.
- */
-const MOTION_MATRIX_INDICES = [0, 1, 3, 4, 5, 7, 8, 9, 11, 12, 13, 15];
-
-/** Everything about the camera that changes what LOD selects. */
-const motionScalars = (view: CameraView): number[] => [
-  ...MOTION_MATRIX_INDICES.map((index) => Number(view.viewProj[index])),
-  ...view.position,
-  view.viewportHeightCssPx,
-  view.projection === "orthographic" ? view.parallelScale : view.fovY,
-];
-
-const cameraMoved = (
-  previous: CameraView | null,
-  next: CameraView,
-): boolean => {
-  // The first camera a view supplies is the baseline, not a movement.
-  if (!previous) return false;
-  if (previous.projection !== next.projection) return true;
-  const before = motionScalars(previous);
-  const after = motionScalars(next);
-  return before.some((value, index) => movedBeyondJitter(value, after[index]!));
-};
-
-const classifyCameraMotion = (view: CameraView): void => {
-  const moved = cameraMoved(lastRenderedView, view);
-  lastRenderedView = view;
-  if (!moved || !governor) return;
-  // One reference per burst, never one per frame: the governor restarts its
-  // moving track whenever the first reference is taken, so a per-frame
-  // reference would keep resetting the window it needs to learn from.
-  if (!inferredMotion) inferredMotion = governor.beginMotion("inferred");
-  if (inferredMotionTimer !== null) clearTimeout(inferredMotionTimer);
-  inferredMotionTimer = setTimeout(() => {
-    inferredMotionTimer = null;
-    inferredMotion?.release();
-    inferredMotion = null;
-    // The settled regime cannot refine quality it never measures, so hand it
-    // one frame to start from.
-    scheduleRender();
-  }, MOTION_DEBOUNCE_MS);
-};
+/** Any stable key identifies a view; this page's single renderer is one. */
+const renderedCameras = new Map<unknown, CameraView>();
 
 // ---------------------------------------------------------------------------
 // Budget mode and the view governor
 // ---------------------------------------------------------------------------
 
 /**
- * The governor fixes its options at construction and throws on an unusable
- * one rather than clamping, so the panel is validated here and a changed
- * target replaces the instance — the same reconciliation the bridge does,
- * without the multi-cloud bookkeeping.
+ * The governor throws on an unusable option rather than clamping, so the panel
+ * is validated here — the same reconciliation the bridge does, without the
+ * multi-cloud bookkeeping.
  */
 const readGovernorOptions = (): ViewGovernorOptions | null => {
   const interactionTargetMs = numberFrom(movingTargetInput);
@@ -637,23 +715,40 @@ const readGovernorOptions = (): ViewGovernorOptions | null => {
 };
 
 /**
- * Which number the controller draws to, reconciled as a whole: adaptive means
- * the governor owns it, anything else means the panel does. Registering
- * distributes, so the governor's allocation reaches the controller inside this
- * call rather than a frame later.
+ * Both policies use one view-wide allocator. Adaptive quality supplies targets
+ * through the governor; fixed quality supplies the panel's target directly.
  */
 const applyBudgetMode = (): void => {
   if (!controller) return;
   if (budgetMode() === "adaptive" && governor) {
-    member ??= governor.register({
-      id: loadedName || "cloud",
-      setPointBudget: (budget) => controller?.setPointBudget(budget),
-    });
+    fixedMember?.release();
+    fixedMember = null;
+    if (!member) {
+      member = governor.register({
+        id: loadedName || "cloud",
+        setPointBudget: (budget) => controller?.setPointBudget(budget),
+        setDensityFraction: (fraction) =>
+          controller?.setDensityFraction(fraction),
+      });
+      // A fresh member starts at "no work pending", which is only true if the
+      // controller happens to be idle right now.
+      reportWorkPending();
+    }
     return;
   }
   member?.release();
   member = null;
-  controller.setPointBudget(fixedPointBudget());
+  fixedBudget ??= createViewBudgetCoordinator({
+    pointBudget: fixedPointBudget(),
+    densityFraction: fixedDensityFraction,
+  });
+  fixedBudget.setPointBudget(fixedPointBudget());
+  fixedBudget.setDensityFraction(fixedDensityFraction);
+  fixedMember ??= fixedBudget.register({
+    id: loadedName || "cloud",
+    setPointBudget: (budget) => controller?.setPointBudget(budget),
+    setDensityFraction: (fraction) => controller?.setDensityFraction(fraction),
+  });
 };
 
 const syncGovernor = (): void => {
@@ -671,21 +766,25 @@ const syncGovernor = (): void => {
   }
   const key = wanted === null ? null : JSON.stringify(wanted);
   if (key === governorKey) return;
-  member?.release();
-  member = null;
-  governor?.dispose();
-  governor = wanted === null ? null : createViewGovernor(wanted);
   governorKey = key;
-  // Motion belongs to the view, not to the instance: a governor replaced
-  // mid-gesture inherits what the view was holding, or the swap reads as the
-  // camera having stopped and quality jumps mid-drag.
-  if (explicitMotion) {
-    explicitMotion.release();
-    explicitMotion = governor?.beginMotion("explicit") ?? null;
-  }
-  if (inferredMotion) {
-    inferredMotion.release();
-    inferredMotion = governor?.beginMotion("inferred") ?? null;
+  if (wanted !== null && governor) {
+    // Re-target in place. Memberships, motion references, camera stability
+    // and the clock offset all survive a re-configuration, so a governor
+    // retargeted mid-drag never reads as a torn-down one and quality does not
+    // jump. Only the adaptive tracks restart, which is the point: their
+    // learned budgets measured the targets being replaced.
+    governor.setOptions(wanted);
+  } else {
+    // Switching quality policy entirely: the governor goes away, or comes back.
+    member?.release();
+    member = null;
+    governor?.dispose();
+    governor = wanted === null ? null : createViewGovernor(wanted);
+    // A gesture in progress belongs to the view, not to the instance.
+    if (explicitMotion) {
+      explicitMotion.release();
+      explicitMotion = governor?.beginMotion("explicit") ?? null;
+    }
   }
   applyBudgetMode();
 };
@@ -794,11 +893,91 @@ const sampleFrameRate = (presentedAt: number): number | null => {
 
 /** Coalesce the synchronous costs of paints landing in one presentation. */
 let pendingVtkFrameMs: number | null = null;
-const recordFrameRate = (vtkFrameMs: number): void => {
+let pendingGpuQueryIds: number[] = [];
+
+type GpuPresentation = {
+  readonly remaining: Set<number>;
+  readonly frameEvent: TelemetryFrameEvent | null;
+  readonly measuredGovernor: ViewGovernor | null;
+  readonly regime: "interaction" | "stationary";
+  readonly eligible: boolean;
+  readonly presentedAt: number;
+  readonly fallbackFrameMs: number;
+  status: "valid" | "disjoint" | "error";
+  gpuMs: number;
+};
+
+const gpuPresentations = new Map<number, GpuPresentation>();
+const earlyGpuResults = new Map<number, GpuTimerResult>();
+const ignoredGpuQueryIds = new Set<number>();
+
+const adjustmentChanged = (
+  before: ViewGovernorStats["lastAdjustment"],
+  after: ViewGovernorStats["lastAdjustment"],
+): boolean =>
+  after !== null &&
+  (before === null ||
+    after.atMs !== before.atMs ||
+    after.reason !== before.reason ||
+    after.toBudget !== before.toBudget);
+
+const finishGpuPresentation = (presentation: GpuPresentation): void => {
+  const valid = presentation.status === "valid";
+  if (presentation.frameEvent !== null) {
+    telemetry.resolveGpuFrame(presentation.frameEvent, {
+      status: presentation.status,
+      gpuMs: valid ? presentation.gpuMs : null,
+    });
+  }
+  const measuredGovernor = presentation.measuredGovernor;
+  if (measuredGovernor !== null) {
+    const before = measuredGovernor.stats().lastAdjustment;
+    measuredGovernor.recordCapacitySample({
+      frameMs: valid ? presentation.gpuMs : presentation.fallbackFrameMs,
+      regime: presentation.regime,
+      eligible: presentation.eligible && valid,
+      now: presentation.presentedAt,
+    });
+    const after = measuredGovernor.stats().lastAdjustment;
+    if (adjustmentChanged(before, after)) {
+      telemetry.recordState("governor-adjustment", telemetryState());
+    }
+    if (measuredGovernor.needsFrame()) scheduleRender();
+  }
+};
+
+const applyGpuResult = (
+  presentation: GpuPresentation,
+  result: GpuTimerResult,
+): void => {
+  gpuPresentations.delete(result.id);
+  presentation.remaining.delete(result.id);
+  if (result.status !== "valid") presentation.status = result.status;
+  else if (result.gpuMs !== null) {
+    presentation.gpuMs += result.gpuMs;
+  }
+  if (presentation.remaining.size === 0) finishGpuPresentation(presentation);
+};
+
+handleGpuTimerResult = (result) => {
+  if (ignoredGpuQueryIds.delete(result.id)) return;
+  const presentation = gpuPresentations.get(result.id);
+  if (presentation === undefined) {
+    earlyGpuResults.set(result.id, result);
+    return;
+  }
+  applyGpuResult(presentation, result);
+};
+
+const recordFrameRate = (
+  vtkFrameMs: number,
+  gpuQueryId: number | null,
+): void => {
   pendingVtkFrameMs =
     pendingVtkFrameMs === null
       ? vtkFrameMs
       : Math.max(pendingVtkFrameMs, vtkFrameMs);
+  if (gpuQueryId !== null) pendingGpuQueryIds.push(gpuQueryId);
   if (frameRateTickQueued) return;
   frameRateTickQueued = true;
   const generation = frameRateGeneration;
@@ -809,15 +988,81 @@ const recordFrameRate = (vtkFrameMs: number): void => {
     frameRateTickQueued = false;
     const hostFrameMs = sampleFrameRate(presentedAt);
     const measuredVtkFrameMs = pendingVtkFrameMs;
+    const queryIds = pendingGpuQueryIds;
     pendingVtkFrameMs = null;
-    if (hostFrameMs === null || measuredVtkFrameMs === null) return;
-    governor?.recordHostFrame({
-      // The presentation interval captures asynchronous rendering and missed
-      // display frames. Browser tests can substitute a deterministic sample.
-      hostFrameMs: syntheticFrameMs ?? hostFrameMs,
-      vtkFrameMs: measuredVtkFrameMs,
-    });
-    if (governor?.needsFrame()) scheduleRender();
+    pendingGpuQueryIds = [];
+    if (hostFrameMs === null || measuredVtkFrameMs === null) {
+      for (const id of queryIds) {
+        earlyGpuResults.delete(id);
+        ignoredGpuQueryIds.add(id);
+      }
+      return;
+    }
+    const governorFrameMs = syntheticFrameMs ?? hostFrameMs;
+    const recording = telemetry.isActive();
+    const contamination = frameContamination();
+    const measuredGovernor = governor;
+    const governorStats = measuredGovernor?.stats() ?? null;
+    const capacityEligible =
+      contamination.length === 0 &&
+      governorStats?.activity.measurementEligible === true;
+    const useGpuCapacity =
+      gpuTimer.supported && queryIds.length > 0 && syntheticFrameMs === null;
+    const beforeAdjustment = measuredGovernor?.stats().lastAdjustment ?? null;
+    if (useGpuCapacity) {
+      measuredGovernor?.recordTransientFrame({
+        hostFrameMs: governorFrameMs,
+        vtkFrameMs: measuredVtkFrameMs,
+        now: presentedAt,
+      });
+    } else {
+      measuredGovernor?.recordHostFrame({
+        hostFrameMs: governorFrameMs,
+        vtkFrameMs: measuredVtkFrameMs,
+        capacitySampleEligible: capacityEligible,
+        now: presentedAt,
+      });
+    }
+    const frameEvent = recording
+      ? telemetry.recordFrame({
+          presentedAtMs: presentedAt,
+          rafIntervalMs: hostFrameMs,
+          vtkCpuMs: measuredVtkFrameMs,
+          governorFrameMs,
+          gpuPending: gpuTimer.supported && queryIds.length > 0,
+          reportedToGovernor: measuredGovernor !== null,
+          capacitySampleEligible: capacityEligible,
+          capacitySamplePending: useGpuCapacity,
+          contamination,
+          state: telemetryState(),
+        })
+      : null;
+    const afterAdjustment = measuredGovernor?.stats().lastAdjustment ?? null;
+    if (adjustmentChanged(beforeAdjustment, afterAdjustment)) {
+      telemetry.recordState("governor-adjustment", telemetryState());
+    }
+
+    if (gpuTimer.supported && queryIds.length > 0) {
+      const presentation: GpuPresentation = {
+        remaining: new Set(queryIds),
+        frameEvent,
+        measuredGovernor: useGpuCapacity ? measuredGovernor : null,
+        regime: governorStats?.regime ?? "stationary",
+        eligible: capacityEligible,
+        presentedAt,
+        fallbackFrameMs: Math.max(governorFrameMs, measuredVtkFrameMs),
+        status: "valid",
+        gpuMs: 0,
+      };
+      for (const id of queryIds) gpuPresentations.set(id, presentation);
+      for (const id of queryIds) {
+        const early = earlyGpuResults.get(id);
+        if (early === undefined) continue;
+        earlyGpuResults.delete(id);
+        applyGpuResult(presentation, early);
+      }
+    }
+    if (measuredGovernor?.needsFrame()) scheduleRender();
   });
 };
 
@@ -825,6 +1070,9 @@ const resetFrameRate = (): void => {
   frameRateGeneration += 1;
   frameRateTickQueued = false;
   pendingVtkFrameMs = null;
+  for (const id of pendingGpuQueryIds) ignoredGpuQueryIds.add(id);
+  pendingGpuQueryIds = [];
+  lastPresentedCoreWork = null;
   frameRateSamples.length = 0;
   lastFramePresentedAt = null;
   filteredFrameIntervalMs = null;
@@ -894,11 +1142,13 @@ const governorLines = (view: ViewGovernorStats): StatSection => {
     rows: [
       row(
         "status",
-        view.motion.settling
-          ? "settling"
-          : view.regime === "interaction"
-            ? "moving"
-            : "settled",
+        view.activity.inputActive
+          ? "moving"
+          : !view.activity.cameraStable
+            ? "stabilizing"
+            : view.activity.workPending
+              ? "refining"
+              : "settled",
       ),
       row("motion", view.motion.source ?? "none"),
       row(
@@ -908,6 +1158,11 @@ const governorLines = (view: ViewGovernorStats): StatSection => {
       ),
       row("target", millis(view.targetFrameTimeMs)),
       row("estimate", `${millis(view.estimateMs)} of ${view.samples}`),
+      row(
+        "capacity samples",
+        `${view.capacitySamples.eligible} clean, ` +
+          `${view.capacitySamples.rejected} rejected`,
+      ),
       row("track budget", points(view.trackBudget)),
       row(
         "maximum",
@@ -921,8 +1176,17 @@ const governorLines = (view: ViewGovernorStats): StatSection => {
           ? "not reported"
           : points(view.memoryCeilingPoints),
       ),
-      row("aggregate", points(view.aggregateBudget)),
-      row("cloud share", cloud ? points(cloud.effectiveBudget) : "no member"),
+      row("draw budget", points(view.aggregateBudget)),
+      row("resident budget", points(view.selectionBudget)),
+      row("cloud draw", cloud ? points(cloud.effectiveBudget) : "no member"),
+      row(
+        "cloud resident",
+        cloud ? points(cloud.effectiveSelectionBudget) : "no member",
+      ),
+      row(
+        "density",
+        cloud ? `${(cloud.densityFraction * 100).toFixed(0)}%` : "no member",
+      ),
       row("constraint", view.activeConstraint),
       row(
         "adjustment",
@@ -961,6 +1225,7 @@ const cloudLines = (): StatSection | null => {
         `${points(selection.targetPoints)} in ${selection.targetTiles} tiles`,
       ),
       row("point budget", points(cloud.pointBudget)),
+      row("density", `${(cloud.densityFraction * 100).toFixed(0)}%`),
       row("importance", selection.projectedImportance.toFixed(2)),
       row(
         "resident",
@@ -1029,6 +1294,24 @@ const renderStats = (sections: StatSection[]): void => {
   }
 };
 
+const updateTelemetryStatus = (): void => {
+  const summary = telemetry.summary();
+  const webgl = summary.environment.webgl;
+  const renderer =
+    webgl.unmaskedRenderer ?? webgl.renderer ?? "renderer unavailable";
+  const rendererKind = webgl.softwareRenderer ? "software" : "GPU";
+  const state = summary.active
+    ? `Recording ${summary.events.toLocaleString()} events`
+    : summary.events > 0
+      ? `Stopped ${summary.events.toLocaleString()} events`
+      : "Off";
+  telemetryStatus.value = `${state} · ${rendererKind}: ${renderer}`;
+  telemetryStatus.title = telemetryStatus.value;
+  telemetryToggle.textContent = summary.active ? "Stop" : "Start";
+  telemetryDownload.disabled = summary.events === 0;
+  telemetryClear.disabled = summary.events === 0;
+};
+
 const updateDiagnostics = (): void => {
   const view = governor?.stats() ?? null;
   updateFrameRateIdle(performance.now());
@@ -1041,6 +1324,7 @@ const updateDiagnostics = (): void => {
       cloudLines(),
     ].filter((section): section is StatSection => section !== null),
   );
+  if (telemetry.isActive()) updateTelemetryStatus();
 };
 
 // ---------------------------------------------------------------------------
@@ -1062,6 +1346,18 @@ const updateDiagnostics = (): void => {
  * actually changed rather than on every frame.
  */
 let clippingDirty = true;
+let activeGpuQueryId: number | null = null;
+
+const beginGpuFrame = (): void => {
+  activeGpuQueryId = gpuTimer.begin();
+};
+
+const endGpuFrame = (): number | null => {
+  const id = activeGpuQueryId;
+  activeGpuQueryId = null;
+  gpuTimer.end();
+  return id;
+};
 
 const scheduleRender = (): void => {
   if (frameQueued) return;
@@ -1074,27 +1370,56 @@ const scheduleRender = (): void => {
       renderer.resetCameraClippingRange();
     }
     frameStartedAt = performance.now();
+    beginGpuFrame();
     interactor.render();
     // Nothing painted (a render was already in progress): drop the stamp so it
     // cannot be charged to the next frame.
+    if (frameStartedAt !== null) {
+      const unusedQuery = endGpuFrame();
+      if (unusedQuery !== null) ignoredGpuQueryIds.add(unusedQuery);
+    }
     frameStartedAt = null;
   });
 };
 
+/**
+ * The per-frame report. `governorInputs()` reads held state only: the governor
+ * needs the memory ceiling to bound the aggregate before it splits it, the
+ * projected importance and the demand to size this cloud's share, and the
+ * physical work counts to know whether another frame is still worth painting.
+ * `stats()`
+ * would answer all of that too, but by walking the selected and submitted
+ * sets — a diagnostic snapshot no frame should be paying for.
+ */
 const updateMember = (): void => {
   if (!controller || !adapter) return;
-  const cloud = controller.stats();
-  adapter.setResourceCeilingBytes(cloud.memoryBudgetBytes);
-  // The governor needs the memory ceiling to bound the aggregate before it
-  // splits it, and the physical work counts to know whether another frame is
-  // still worth painting.
+  const inputs = controller.governorInputs();
+  adapter.setResourceCeilingBytes(inputs.memoryBudgetBytes);
   member?.update({
     active: true,
-    projectedImportance: cloud.selection.projectedImportance,
-    memoryCeilingPoints: cloud.memoryCeilingPoints,
-    physicalTileOperations: cloud.physicalTileOperations,
-    physicalHierarchyOperations: cloud.physicalHierarchyOperations,
+    projectedImportance: inputs.projectedImportance,
+    memoryCeilingPoints: inputs.memoryCeilingPoints,
+    demandPoints: inputs.demandPoints,
+    physicalTileOperations: inputs.physicalTileOperations,
+    physicalHierarchyOperations: inputs.physicalHierarchyOperations,
   });
+  fixedMember?.update({
+    active: true,
+    projectedImportance: inputs.projectedImportance,
+    memoryCeilingPoints: inputs.memoryCeilingPoints,
+    demandPoints: inputs.demandPoints,
+  });
+};
+
+/**
+ * `workPending` is the one governor input that costs a walk of the selected
+ * set, and it is also the one that cannot change without the controller
+ * reporting a work change — so it rides the `onWorkChange` path instead of the
+ * frame, and a member that has just been registered is told once.
+ */
+const reportWorkPending = (): void => {
+  if (!controller) return;
+  member?.update({ workPending: controller.stats().workPending });
 };
 
 // Every paint the interactor drives ends here — ours and the ones its own
@@ -1105,6 +1430,7 @@ const updateMember = (): void => {
 interactor.onRenderEvent(() => {
   const startedAt = frameStartedAt;
   const completedAt = performance.now();
+  const gpuQueryId = endGpuFrame();
   frameStartedAt = null;
   if (startedAt !== null) {
     lastFrameMs = syntheticFrameMs ?? completedAt - startedAt;
@@ -1112,9 +1438,10 @@ interactor.onRenderEvent(() => {
   const view = cameraView();
   controller?.setCamera(view);
   updateMember();
-  classifyCameraMotion(view);
+  renderedCameras.set(renderer, view);
+  governor?.noteRenderedCameras(renderedCameras, scheduleRender);
   if (startedAt !== null) {
-    if (controller) recordFrameRate(lastFrameMs);
+    if (controller) recordFrameRate(lastFrameMs, gpuQueryId);
   }
   if (governor?.needsFrame()) scheduleRender();
 });
@@ -1127,6 +1454,7 @@ interactor.onStartAnimation(() => {
 
 interactor.onAnimation(() => {
   frameStartedAt = performance.now();
+  beginGpuFrame();
 });
 
 interactor.onEndAnimation(() => {
@@ -1142,6 +1470,7 @@ interactor.onEndAnimation(() => {
   // The interactor paints once more immediately after this event; that paint
   // is a real frame and gets timed like any other.
   frameStartedAt = performance.now();
+  beginGpuFrame();
 });
 
 // ---------------------------------------------------------------------------
@@ -1156,16 +1485,22 @@ const disposeCloud = (): void => {
   loadGeneration += 1;
   member?.release();
   member = null;
+  fixedMember?.release();
+  fixedMember = null;
   controller?.dispose();
   adapter?.dispose();
+  loadedSource?.dispose?.();
   controller = null;
   adapter = null;
+  loadedSource = null;
   loadedName = "";
   loadedPointCount = 0;
   framing = null;
   resetFrameRate();
-  // Framing the next cloud is not motion the user asked for.
-  lastRenderedView = null;
+  // Framing the next cloud is not motion the user asked for: this view stops
+  // feeding cameras, so its baseline has to go with it.
+  renderedCameras.clear();
+  governor?.resetMotionBaselines();
 };
 
 const VIEW_ANGLE = 38;
@@ -1257,19 +1592,69 @@ const applyFraming = (): void => {
   clippingDirty = true;
 };
 
+const instrumentSource = (source: TileSource): TileSource => ({
+  metadata: () => source.metadata(),
+  dispose: () => source.dispose?.(),
+  async nodes(key, options) {
+    const finish = telemetry.isActive()
+      ? telemetry.beginWork("hierarchy", { key: keyToString(key) })
+      : null;
+    try {
+      const nodes = await source.nodes(key, options);
+      finish?.("ok", { entries: nodes.length });
+      return nodes;
+    } catch (error) {
+      finish?.(options?.signal?.aborted ? "cancelled" : "error", {
+        error: error instanceof Error ? error.name : "unknown",
+      });
+      throw error;
+    }
+  },
+  async loadTile(key, options) {
+    const finish = telemetry.isActive()
+      ? telemetry.beginWork("tile-load", { key: keyToString(key) })
+      : null;
+    try {
+      const tile = await source.loadTile(key, options);
+      finish?.("ok", {
+        points: tile.pointCount,
+        bytes: tile.positions.byteLength + (tile.rgb?.byteLength ?? 0),
+      });
+      return tile;
+    } catch (error) {
+      finish?.(options?.signal?.aborted ? "cancelled" : "error", {
+        error: error instanceof Error ? error.name : "unknown",
+      });
+      throw error;
+    }
+  },
+});
+
 const loadSource = async (
   name: string,
   sourcePromise: Promise<TileSource>,
 ): Promise<void> => {
   setMessage(`Reading ${name}…`);
+  const finishSourceOpen = telemetry.isActive()
+    ? telemetry.beginWork("source-open", { source: name })
+    : null;
   // Tear down first, then claim the generation: disposeCloud() bumps it to
   // cancel whatever was in flight, so a number taken before that call would be
   // stale the moment it was read.
   disposeCloud();
   const generation = ++loadGeneration;
   try {
-    const source = await sourcePromise;
-    if (generation !== loadGeneration) return;
+    const openedSource = await sourcePromise;
+    if (generation !== loadGeneration) {
+      finishSourceOpen?.("cancelled");
+      openedSource.dispose?.();
+      return;
+    }
+    finishSourceOpen?.("ok", {
+      points: openedSource.metadata().pointCount,
+    });
+    const source = instrumentSource(openedSource);
+    loadedSource = source;
     await frameRoot(source);
     if (generation !== loadGeneration) return;
     loadedName = name;
@@ -1289,11 +1674,35 @@ const loadSource = async (
       refinementCutoffPx: 0.75,
       presentation: pointPresentation(),
       onTiles: (batch) => {
-        adapter?.applyBatch(batch);
+        const finish = telemetry.isActive()
+          ? telemetry.beginWork("renderer-batch", {
+              addedTiles: batch.added.length,
+              removedTiles: batch.removed.length,
+              addedPoints: batch.added.reduce(
+                (total, { tile }) => total + tile.pointCount,
+                0,
+              ),
+            })
+          : null;
+        try {
+          adapter?.applyBatch(batch);
+          finish?.(adapter === null ? "cancelled" : "ok");
+        } catch (error) {
+          finish?.("error", {
+            error: error instanceof Error ? error.name : "unknown",
+          });
+          throw error;
+        }
         clippingDirty = true;
       },
       onPointDiameterCssPx: (diameter) =>
         adapter?.setPointDiameterCssPx(diameter),
+      onDrawPlan: (plan) => adapter?.applyDrawPlan(plan),
+      onWorkChange: () => {
+        updateMember();
+        reportWorkPending();
+        if (governor?.needsFrame()) scheduleRender();
+      },
       onError: (error) => {
         console.error(error);
         setMessage(String(error), true);
@@ -1303,20 +1712,38 @@ const loadSource = async (
     applyBudgetMode();
     controller.setCamera(cameraView());
     setMessage(`${name}: ${points(loadedPointCount)} points`);
+    if (telemetry.isActive()) {
+      telemetry.recordState("source-loaded", telemetryState());
+    }
     scheduleRender();
   } catch (error) {
+    finishSourceOpen?.("error", {
+      error: error instanceof Error ? error.name : "unknown",
+    });
     if (generation !== loadGeneration) return;
     disposeCloud();
     const text = error instanceof Error ? error.message : String(error);
     setMessage(`Could not load ${name}: ${text}`, true);
+    if (telemetry.isActive()) {
+      telemetry.recordState("source-error", {
+        source: name,
+        error: text,
+      });
+    }
   }
 };
 
-const localFileSource = (file: File): Promise<TileSource> =>
-  createCopcTileSource({
-    source: async (begin, end) =>
-      new Uint8Array(await file.slice(begin, end).arrayBuffer()),
+const copcSource = (source: string | Blob): Promise<TileSource> =>
+  createCopcWorkerTileSource({
+    source,
+    createWorker: () =>
+      new Worker(new URL("./copc.worker.ts", import.meta.url), {
+        type: "module",
+      }),
+    lazPerfWasmUrl: new URL("/laz-perf.wasm", window.location.href).href,
   });
+
+const localFileSource = (file: File): Promise<TileSource> => copcSource(file);
 
 /**
  * Keep the address bar showing the cloud on screen, so the page can be
@@ -1337,7 +1764,7 @@ const loadUrl = (): void => {
     return;
   }
   showInAddressBar(url);
-  void loadSource(url, createCopcTileSource({ source: url }));
+  void loadSource(url, copcSource(url));
 };
 
 // ---------------------------------------------------------------------------
@@ -1399,6 +1826,39 @@ resetViewButton.addEventListener("click", () => {
 loadUrlButton.addEventListener("click", loadUrl);
 urlInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") loadUrl();
+});
+
+const startTelemetry = (): void => {
+  telemetry.start();
+  telemetry.recordState("recording-started", telemetryState());
+  updateTelemetryStatus();
+};
+
+const stopTelemetry = (): void => {
+  telemetry.recordState("recording-stopped", telemetryState());
+  telemetry.stop();
+  updateTelemetryStatus();
+};
+
+const markTelemetry = (label: string): void => {
+  const normalized = label.trim().slice(0, 128);
+  if (normalized.length === 0 || !telemetry.isActive()) return;
+  telemetry.recordState(`marker:${normalized}`, telemetryState());
+};
+
+telemetryToggle.addEventListener("click", () => {
+  if (telemetry.isActive()) stopTelemetry();
+  else startTelemetry();
+});
+
+telemetryDownload.addEventListener("click", () => telemetry.download());
+
+telemetryClear.addEventListener("click", () => {
+  telemetry.clear();
+  if (telemetry.isActive()) {
+    telemetry.recordState("recording-cleared", telemetryState());
+  }
+  updateTelemetryStatus();
 });
 
 budgetModeSelect.addEventListener("change", () => {
@@ -1496,13 +1956,13 @@ urlInput.addEventListener("input", () => {
 
 // Every browser check passes an explicit `?url=`, so the default below is the
 // interactive opening scene only and nothing under test observes it.
-const initialUrl =
-  new URLSearchParams(window.location.search).get("url") ??
-  HOSTED_SCENES[0]!.url;
+const initialParameters = new URLSearchParams(window.location.search);
+const initialUrl = initialParameters.get("url") ?? HOSTED_SCENES[0]!.url;
 urlInput.value = initialUrl;
 sceneSelect.value = HOSTED_SCENES.some((scene) => scene.url === initialUrl)
   ? initialUrl
   : "";
+if (initialParameters.get("telemetry") === "1") startTelemetry();
 loadUrl();
 
 // Driving handles for browser checks. Everything here drives the page the way
@@ -1519,6 +1979,24 @@ Object.assign(window, {
       source: loadedName || null,
       sourcePoints: loadedPointCount,
     }),
+
+    telemetry: {
+      start: startTelemetry,
+      stop: stopTelemetry,
+      clear: () => {
+        telemetry.clear();
+        if (telemetry.isActive()) {
+          telemetry.recordState("recording-cleared", telemetryState());
+        }
+        updateTelemetryStatus();
+      },
+      isActive: () => telemetry.isActive(),
+      mark: markTelemetry,
+      environment: (): TelemetryEnvironment => telemetry.summary().environment,
+      summary: () => telemetry.summary(),
+      trace: (): TelemetryTrace => telemetry.trace(),
+      download: () => telemetry.download(),
+    },
 
     /**
      * Both sides' key sets, so a check can assert they agree rather than
@@ -1577,7 +2055,7 @@ Object.assign(window, {
     /** Resolves once the source has opened and its first selection has run. */
     load: (url: string): Promise<void> => {
       urlInput.value = url;
-      return loadSource(url, createCopcTileSource({ source: url }));
+      return loadSource(url, copcSource(url));
     },
 
     camera: {
@@ -1594,6 +2072,9 @@ Object.assign(window, {
         viewAngle: camera.getViewAngle(),
         parallelProjection: !!camera.getParallelProjection(),
       }),
+      /** Pick a support depth from exactly the point prefixes being drawn. */
+      pick: (xCssPx: number, yCssPx: number) =>
+        controller?.pickPoint(cameraView(), xCssPx, yCssPx) ?? null,
       /** Absolute placement, for a check that needs a known camera. */
       place: (next: {
         position?: readonly number[];
@@ -1657,6 +2138,16 @@ Object.assign(window, {
     setDevicePixelRatio: (ratio: number) => {
       currentDevicePixelRatio = ratio;
       adapter?.setDevicePixelRatio(ratio);
+      scheduleRender();
+    },
+    /**
+     * The view-wide allocator owns the controller's density: writing it into
+     * the controller directly would be overwritten by the next allocation
+     * pass. Only fixed quality takes a preference.
+     */
+    setDensityFraction: (fraction: number) => {
+      fixedDensityFraction = fraction;
+      fixedBudget?.setDensityFraction(fraction);
       scheduleRender();
     },
     /** Report every frame as this duration; null restores real measurement. */

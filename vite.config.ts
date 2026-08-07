@@ -13,6 +13,7 @@ export default defineConfig({
       entry: {
         index: "src/index.ts",
         rendererAdapter: "src/rendererAdapter.ts",
+        copcWorker: "src/copcWorker.ts",
       },
       formats: ["es"],
     },

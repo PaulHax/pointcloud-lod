@@ -21,6 +21,7 @@ import {
   type Bounds,
   type VoxelKey,
 } from "./octree";
+import { orderTileForProgressiveDrawing } from "./progressiveOrder";
 import type {
   LoadOptions,
   NodeInfo,
@@ -38,6 +39,10 @@ export type RangeGetter = (
 export type CopcTileSourceOptions = {
   /** URL fetched via HTTP Range requests, or a custom byte-range getter. */
   source: string | RangeGetter;
+  /** An initialized laz-perf module, used by worker-hosted sources. */
+  lazPerf?: NonNullable<
+    Parameters<typeof Copc.loadPointDataView>[3]
+  >["lazPerf"];
 };
 
 const ABORT_CHECK_STRIDE = 4096;
@@ -62,6 +67,38 @@ const delay = (
   });
 
 /**
+ * Length of a shorter response that is proven to end at the file's EOF.
+ *
+ * Range servers clamp an oversized final range to the resource length. That
+ * is complete data, not a truncated transfer, but only `Content-Range` can
+ * distinguish it from a connection that ended early. Unknown totals and
+ * partial subranges therefore remain failures.
+ */
+const eofClampedLength = (
+  contentRange: string | null,
+  requestedBegin: number,
+  requestedEnd: number,
+): number | null => {
+  const match = /^bytes\s+(\d+)-(\d+)\/(\d+)$/i.exec(
+    contentRange?.trim() ?? "",
+  );
+  if (match === null) return null;
+  const first = Number(match[1]);
+  const last = Number(match[2]);
+  const total = Number(match[3]);
+  if (![first, last, total].every(Number.isSafeInteger)) return null;
+  if (
+    first !== requestedBegin ||
+    last < first ||
+    last + 1 !== total ||
+    last >= requestedEnd - 1
+  ) {
+    return null;
+  }
+  return last - first + 1;
+};
+
+/**
  * HTTP byte ranges with bounded recovery from transport and server failures.
  *
  * `copc`'s HTTP getter makes one unchecked fetch. A transient S3 connection
@@ -81,10 +118,10 @@ const httpRangeGetter =
     const expectedLength = end - begin;
     if (expectedLength === 0) return new Uint8Array();
     let lastError: unknown = null;
-    let attemptsMade = 0;
+    let attempt = 0;
 
-    for (let attempt = 1; attempt <= HTTP_RANGE_ATTEMPTS; attempt += 1) {
-      attemptsMade = attempt;
+    while (attempt < HTTP_RANGE_ATTEMPTS) {
+      attempt += 1;
       let retryable = true;
       try {
         const response = await fetch(url, {
@@ -101,7 +138,15 @@ const httpRangeGetter =
           );
         }
         const bytes = new Uint8Array(await response.arrayBuffer());
-        if (bytes.byteLength !== expectedLength) {
+        const clampedLength = eofClampedLength(
+          response.headers.get("content-range"),
+          begin,
+          end,
+        );
+        if (
+          bytes.byteLength !== expectedLength &&
+          bytes.byteLength !== clampedLength
+        ) {
           throw new Error(
             `Expected ${expectedLength} bytes, received ${bytes.byteLength}`,
           );
@@ -121,7 +166,7 @@ const httpRangeGetter =
       lastError instanceof Error ? lastError.message : String(lastError);
     throw new Error(
       `Could not fetch bytes ${begin}-${end - 1} from ${url} after ` +
-        `${attemptsMade} ${attemptsMade === 1 ? "attempt" : "attempts"}: ${detail}`,
+        `${attempt} ${attempt === 1 ? "attempt" : "attempts"}: ${detail}`,
       { cause: lastError },
     );
   };
@@ -273,7 +318,7 @@ export const createCopcTileSource = async (
    * Only the root page, and only because it is the one page with several
    * readers at open: the RGB sample below needs the root node's byte range, a
    * host framing the scene reads the hierarchy, and the controller bootstraps
-   * from it. Without this each of them paid for the same range read. Deeper
+   * from it. Without this each of them pays for the same range read. Deeper
    * pages are read once each by the controller, which tracks what it holds, so
    * caching them would grow with the octree and buy nothing.
    */
@@ -288,7 +333,7 @@ export const createCopcTileSource = async (
    * read of the root tile takes them.
    *
    * The sample has to decode that node, and the controller's very first tile
-   * request is for the same one, so without this a coloured cloud decoded its
+   * request is for the same one, so without this a coloured cloud decodes its
    * root twice before drawing anything. Released on use; only a source whose
    * root is never drawn keeps it, and that node is the smallest in the file.
    */
@@ -297,7 +342,9 @@ export const createCopcTileSource = async (
   const rootNode = nodeMap.get(rootKeyString);
   if (hasRgb && rootNode !== undefined && rootNode.pointCount > 0) {
     try {
-      rootView = await Copc.loadPointDataView(getter, copc, rootNode);
+      rootView = await Copc.loadPointDataView(getter, copc, rootNode, {
+        lazPerf: options.lazPerf,
+      });
       rgbShift = rgbShiftOf(rootView);
     } catch (error) {
       // Fall back to no shift, for the reason `rgbShiftOf` gives above.
@@ -353,6 +400,7 @@ export const createCopcTileSource = async (
           abortableGetter(getter, signal),
           copc,
           node,
+          { lazPerf: options.lazPerf },
         );
       }
       signal?.throwIfAborted();
@@ -387,7 +435,10 @@ export const createCopcTileSource = async (
         }
       }
 
-      return { origin, positions, rgb, pointCount };
+      return orderTileForProgressiveDrawing(
+        { origin, positions, rgb, pointCount },
+        keyString,
+      );
     },
   };
 };

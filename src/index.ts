@@ -34,16 +34,30 @@ export {
   type Plane,
 } from "./camera";
 
+// The picking machinery itself (ray building, prefilter, sweep) is internal:
+// the public query is `LodController.pickPoint`, and only its result shape and
+// the bucket radii — mirrored from telesculptor-web's `scene/ray_depth.py` —
+// are contract.
+export {
+  DEFAULT_PICK_PIXEL_RADIUS,
+  DEFAULT_PICK_PIXEL_RADIUS_MULTIPLIERS,
+  PICK_RADII_CSS_PX,
+  type PointPickResult,
+} from "./picking";
+
 export {
   createLodController,
   type LodController,
   type LodControllerOptions,
   type LodControllerStats,
+  type LodGovernorInputs,
   type LodSelectionStats,
+  type LodDrawPlanStats,
   type PointPresentation,
   type FixedPointPresentation,
   type AutoPointPresentation,
   type TileBatch,
+  type TileDrawPlan,
 } from "./controller";
 
 export {
@@ -54,6 +68,18 @@ export {
   type MemoryPoolMember,
   type MemoryPoolOptions,
 } from "./memoryPool";
+
+export {
+  createViewBudgetCoordinator,
+  type ViewBudgetConstraint,
+  type ViewBudgetCoordinator,
+  type ViewBudgetCoordinatorOptions,
+  type ViewBudgetMember,
+  type ViewBudgetMemberOptions,
+  type ViewBudgetMemberStats,
+  type ViewBudgetMemberUpdate,
+  type ViewBudgetStats,
+} from "./viewBudget";
 
 // The adaptive budget loop is the view governor's internal. Only the types
 // that appear in the governor's own surface are re-exported.
@@ -73,9 +99,11 @@ export {
 export {
   createViewGovernor,
   type BudgetConstraint,
+  type CapacitySampleMetrics,
   type HostFrameMetrics,
   type MotionReference,
   type MotionSourceKind,
+  type TransientFrameMetrics,
   type ViewGovernor,
   type ViewGovernorMember,
   type ViewGovernorMemberOptions,
@@ -84,6 +112,32 @@ export {
   type ViewGovernorOptions,
   type ViewGovernorStats,
 } from "./viewGovernor";
+
+export {
+  createGpuFrameTimer,
+  type GpuFrameTimer,
+  type GpuFrameTimerOptions,
+  type GpuTimerResult,
+} from "./gpuTimer";
+
+export {
+  captureTelemetryEnvironment,
+  createTelemetryRecorder,
+  isSoftwareRenderer,
+  type TelemetryDetail,
+  type TelemetryEnvironment,
+  type TelemetryEvent,
+  type TelemetryFrameEvent,
+  type TelemetryLongTaskEvent,
+  type TelemetryRecorder,
+  type TelemetrySessionEvent,
+  type TelemetryStateEvent,
+  type TelemetrySummary,
+  type TelemetryTrace,
+  type TelemetryWorkEvent,
+  type TelemetryWorkFinish,
+  type TelemetryWorkKind,
+} from "./telemetry";
 
 export {
   createHttpTileSource,
@@ -98,6 +152,11 @@ export {
   type CopcTileSourceOptions,
   type RangeGetter,
 } from "./copcTileSource";
+
+export {
+  createCopcWorkerTileSource,
+  type CopcWorkerTileSourceOptions,
+} from "./copcWorkerTileSource";
 
 // The vtk.js renderer adapter is deliberately NOT re-exported here. It imports
 // vtk.js at module scope, so re-exporting it would make this entry point throw

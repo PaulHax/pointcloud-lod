@@ -13,16 +13,24 @@
 
 import {
   frustumPlanes,
+  modelFrameOf,
   nodeScreenSpaceError,
   boundsIntersectsFrustum,
+  transformPointBy,
+  viewInModelFrame,
   type CameraView,
+  type Mat16,
+  type ModelFrame,
+  type Plane,
 } from "./camera";
 import { selectNodes } from "./budget";
+import { allocatePointPrefixes } from "./drawPlan";
 import { createLruCache } from "./lru";
 import {
   finiteAtLeast,
   finiteNonNegative,
   finitePositive,
+  finiteWithin,
   wholeAtLeast,
 } from "./numeric";
 import {
@@ -30,6 +38,11 @@ import {
   type MemoryPool,
   type MemoryPoolMember,
 } from "./memoryPool";
+import {
+  pickPointInTiles,
+  type PickTile,
+  type PointPickResult,
+} from "./picking";
 import {
   ROOT_KEY,
   childKeys,
@@ -40,10 +53,18 @@ import {
   type VoxelKey,
 } from "./octree";
 import { tileBytes, type TileData, type TileSource } from "./tileSource";
+import { projectedSpacingScale } from "./pointDensity";
 
 export type TileBatch = {
   readonly added: readonly { key: VoxelKey; tile: TileData }[];
   readonly removed: readonly VoxelKey[];
+};
+
+export type TileDrawPlan = {
+  readonly entries: readonly {
+    readonly key: VoxelKey;
+    readonly pointCount: number;
+  }[];
 };
 
 export type FixedPointPresentation = {
@@ -72,11 +93,19 @@ export type LodControllerOptions = {
   source: TileSource;
   /** Receives batched tile arrivals/removals (typically a renderer adapter). */
   onTiles: (batch: TileBatch) => void;
+  /** Receives per-tile progressive prefixes without changing tile residency. */
+  onDrawPlan?: (plan: TileDrawPlan) => void;
   /**
    * Coalescing render request — called once per applied batch, never once per
    * tile. Must not render synchronously more than once per event loop turn.
    */
   scheduleRender: () => void;
+  /**
+   * Coalesced notification that asynchronous work state changed. Unlike
+   * `scheduleRender`, this does not imply that presentation changed. Hosts
+   * may use it to refresh convergence or diagnostics without repainting.
+   */
+  onWorkChange?: () => void;
   /**
    * Whether hierarchy I/O, selection, and renderer submission start enabled.
    * Default true. An initially inactive controller retains camera updates and
@@ -88,6 +117,8 @@ export type LodControllerOptions = {
    * memory-derived point cap applies on top.
    */
   pointBudget?: number;
+  /** Initial fraction of selected points to distribute across tile prefixes. */
+  densityFraction?: number;
   /**
    * GPU-memory budget for resident tile bytes. Pass a `MemoryPool` to share
    * one byte budget across controllers on the same GPU (each gets an even
@@ -98,11 +129,6 @@ export type LodControllerOptions = {
    * out-of-memory failure it has no way to sense.
    */
   memory?: MemoryPool | number;
-  /**
-   * How long the camera must be still before the stationary refinement pass
-   * runs, ms. Default 750.
-   */
-  interactionSettleMs?: number;
   /** Parallel tile fetches. Default 6. */
   fetchConcurrency?: number;
   /**
@@ -119,7 +145,11 @@ export type LodControllerOptions = {
   hierarchyConcurrency?: number;
   /** CPU cache for deselected tiles, bytes. Default 256 MiB. */
   cacheBytes?: number;
-  /** Trailing debounce for camera-driven reselection, ms. Default 150. */
+  /**
+   * Trailing debounce for camera-driven reselection, ms. Default 150.
+   * A camera-deselected tile read receives the same short grace before abort,
+   * allowing a quick view reversal to adopt work already in progress.
+   */
   selectionDelayMs?: number;
   /**
    * Nodes whose projected point spacing is below this many pixels are not
@@ -172,12 +202,28 @@ export type LodControllerStats = {
   readonly queuedPages: number;
   /** Hierarchy page operations physically running, cancelled ones included. */
   readonly physicalHierarchyOperations: number;
+  /**
+   * Monotonic revision of hierarchy, tile/decode, and renderer-batch work.
+   * Comparing consecutive presentations catches work that began and finished
+   * between them.
+   */
+  readonly workRevision: number;
+  /** Required current-view work has not drained yet. */
+  readonly workPending: boolean;
+  /** A trailing camera-driven selection pass is still scheduled. */
+  readonly selectionPending: boolean;
   /** The ceiling `physicalTileOperations` is held under. */
   readonly fetchConcurrency: number;
   /** The ceiling `physicalHierarchyOperations` is held under. */
   readonly hierarchyConcurrency: number;
   /** Effective visible-point budget currently driving selection. */
   readonly pointBudget: number;
+  /** Fraction of selected points supplied to the per-tile draw allocator. */
+  readonly densityFraction: number;
+  /** Points actually participating in drawing across the submitted set. */
+  readonly drawnPoints: number;
+  /** Current per-tile allocation and its uniform-density counterfactual. */
+  readonly drawPlan: LodDrawPlanStats;
   /** This controller's byte share of its memory pool. */
   readonly memoryBudgetBytes: number;
   /** Memory-derived point ceiling the budget can never exceed. */
@@ -202,6 +248,41 @@ export type LodControllerStats = {
   readonly refinementCutoffPx: number;
   /** Latest selection pass and the reasons traversal stopped. */
   readonly selection: LodSelectionStats;
+};
+
+/**
+ * What a host reports about this cloud on every frame.
+ *
+ * A view governor needs the memory ceiling to bound the aggregate budget
+ * before splitting it, the projected importance to weight this cloud's share,
+ * and the physical operation counts to know whether work is still landing; a
+ * renderer needs the byte share to size its reuse pool. All of it is already
+ * held, so this costs nothing to read — unlike {@link LodControllerStats},
+ * which walks the selected set and the submitted set to answer questions no
+ * frame asks. Every field here is the same number under the same name there.
+ *
+ * A governor member also takes `workPending`, which is deliberately not here:
+ * answering it needs the walk of the selected set. It is also the one input
+ * that cannot change without the controller reporting a work change, so it
+ * belongs on the `onWorkChange` path — read `stats().workPending` there — and
+ * not on the frame.
+ */
+export type LodGovernorInputs = {
+  readonly memoryBudgetBytes: number;
+  readonly memoryCeilingPoints: number;
+  /** The selection's root screen-space error; `selection.projectedImportance`. */
+  readonly projectedImportance: number;
+  /**
+   * Points this cloud could use at the current camera: what it selected plus
+   * what its budget turned away. Exact whenever the budget is not binding —
+   * nothing is turned away, so this is the whole of what the camera asks for —
+   * and otherwise it only has to exceed the share, which it does, because
+   * something was turned away. A governor allocates no more than this, so a
+   * small cloud stops holding points it has nothing to spend them on.
+   */
+  readonly demandPoints: number;
+  readonly physicalTileOperations: number;
+  readonly physicalHierarchyOperations: number;
 };
 
 export type LodSelectionStats = {
@@ -235,6 +316,7 @@ export type LodSelectionStats = {
     readonly hierarchyBlockedNodes: number;
     readonly tileBlockedNodes: number;
     readonly budgetBlockedNodes: number;
+    readonly drawBlockedNodes: number;
     readonly projectedSpacingCssPx: {
       readonly p25: number | null;
       readonly p50: number | null;
@@ -245,6 +327,17 @@ export type LodSelectionStats = {
   };
 };
 
+export type LodDrawPlanStats = {
+  /** Increments only when at least one tile prefix changes. */
+  readonly revision: number;
+  /** Exact point allowance supplied to the per-tile allocator. */
+  readonly pointBudget: number;
+  readonly plannedPoints: number;
+  readonly fullTiles: number;
+  readonly partialTiles: number;
+  readonly skippedTiles: number;
+};
+
 /**
  * Setters carry live wire input, so they validate rather than throw: a value
  * that is not finite or is out of range is ignored and changes no state.
@@ -253,12 +346,26 @@ export type LodSelectionStats = {
 export type LodController = {
   /**
    * Update the camera; selection reruns debounced (leading edge immediate).
-   * A view with any non-finite number is ignored.
+   * A view with any non-finite number is ignored. With a model matrix set,
+   * the view is in world coordinates and the controller restates it in the
+   * tiles' local frame itself; while the current model matrix is unusable
+   * (not a similarity), camera updates are held and the last good view stays
+   * in force.
    */
   setCamera(view: CameraView): void;
+  /**
+   * The transform the tiles draw under (the host actor's model/user matrix),
+   * or null for identity. The controller's frustum/SSE math needs a
+   * uniform-scale transform, so a matrix that is not a similarity marks the
+   * transform unusable: selection holds the last good camera and picks are
+   * unavailable until a usable matrix arrives. An unchanged matrix is a
+   * no-op, so hosts can forward it every pass; a change re-derives the
+   * camera restatement once, not per frame.
+   */
+  setModelMatrix(matrix: Mat16 | null): void;
   /** Enter a camera interaction. Nested calls are reference counted. */
   beginInteraction(): void;
-  /** Leave a camera interaction; the outermost end starts the settle window. */
+  /** Leave a camera interaction. Camera stability belongs to the view governor. */
   endInteraction(): void;
   /**
    * Set the visible-point budget, truncated to whole points; the memory
@@ -268,6 +375,12 @@ export type LodController = {
    * Negative and non-finite values are ignored.
    */
   setPointBudget(points: number): void;
+  /**
+   * Redistribute this fraction of selected points into progressive prefixes
+   * without changing tile selection.
+   * Values outside [0, 1] and non-finite values are ignored.
+   */
+  setDensityFraction(densityFraction: number): void;
   /**
    * Swap the tile source (e.g. a new asset revision behind a new endpoint).
    * All resident tiles, caches, hierarchy state, and in-flight requests are
@@ -290,7 +403,35 @@ export type LodController = {
    * the byte-bounded CPU cache. Re-enabling selects against the latest camera.
    */
   setActive(active: boolean): void;
+  /**
+   * The per-frame numbers for a view governor and a resource pool. Prefer it
+   * to `stats()` in a render loop: `stats()` is a diagnostic snapshot and
+   * builds the whole thing.
+   */
+  governorInputs(): LodGovernorInputs;
   stats(): LodControllerStats;
+  /**
+   * Read-only pick against exactly the tile set last handed to the consumer
+   * (`submitted` plus each tile's hierarchy bounds) — never `resident`, which
+   * can run ahead of a pending renderer flush, and never the decoded cache.
+   * The view and cursor are in the same coordinates `setCamera` takes —
+   * world coordinates when a model matrix is set — with the cursor in
+   * renderer-local css pixels. A hit's `pointOnRay` comes back in those same
+   * world coordinates: the controller solves on the model-local ray and
+   * transforms the answer back through the model matrix itself.
+   *
+   * Returns null when the query is unavailable — inactive or disposed
+   * controller, an invalid view, an unusable (non-similarity) model matrix,
+   * unusable viewport dimensions, a singular
+   * view-projection, or a non-finite cursor. A valid sweep that supports
+   * nothing is `{status: "miss"}`, never null: only an explicit miss tells a
+   * caller its fallback is authorized.
+   */
+  pickPoint(
+    view: CameraView,
+    cursorXCssPx: number,
+    cursorYCssPx: number,
+  ): PointPickResult | null;
   /**
    * Diagnostics: the tiles held on screen, and the set last handed to the
    * consumer. A pending flush is the only reason they differ, so once the
@@ -347,6 +488,8 @@ const spacingQuantiles = (
     max: sorted[sorted.length - 1]!,
   };
 };
+
+const ROOT_KEY_STRING = keyToString(ROOT_KEY);
 
 const DEFAULT_PRESENTATION: FixedPointPresentation = {
   mode: "fixed",
@@ -446,6 +589,7 @@ const isFiniteView = (view: CameraView): boolean => {
     scalar === undefined ||
     !finitePositive(scalar) ||
     (view.projection === "perspective" && view.fovY >= Math.PI) ||
+    !finitePositive(view.viewportWidthCssPx) ||
     !finitePositive(view.viewportHeightCssPx)
   ) {
     return false;
@@ -478,13 +622,8 @@ const emptyReadyTerminalFrontier =
     hierarchyBlockedNodes: 0,
     tileBlockedNodes: 0,
     budgetBlockedNodes: 0,
-    projectedSpacingCssPx: {
-      p25: null,
-      p50: null,
-      p75: null,
-      p95: null,
-      max: null,
-    },
+    drawBlockedNodes: 0,
+    projectedSpacingCssPx: spacingQuantiles([]),
   });
 
 /**
@@ -495,7 +634,10 @@ const emptyReadyTerminalFrontier =
 const emptySelectionStats = (
   generation: number,
   targetRevision: number,
-): Omit<LodSelectionStats, "targetUndecodedTiles"> => ({
+): Omit<
+  LodSelectionStats,
+  "targetUndecodedTiles" | "readyTerminalFrontier"
+> => ({
   generation,
   targetRevision,
   targetTiles: 0,
@@ -508,7 +650,6 @@ const emptySelectionStats = (
   budgetSkippedNodes: 0,
   budgetSkippedPoints: 0,
   projectedImportance: 0,
-  readyTerminalFrontier: emptyReadyTerminalFrontier(),
 });
 
 export const createLodController = (
@@ -516,7 +657,9 @@ export const createLodController = (
 ): LodController => {
   const {
     onTiles,
+    onDrawPlan = () => {},
     scheduleRender,
+    onWorkChange = () => {},
     onPointDiameterCssPx = () => {},
     onError = (error) => console.warn("pointcloud-lod:", error),
   } = options;
@@ -541,16 +684,16 @@ export const createLodController = (
     options.selectionDelayMs ?? 150,
     0,
   );
-  const interactionSettleMs = finiteAtLeast(
-    "interactionSettleMs",
-    options.interactionSettleMs ?? 750,
-    0,
-  );
-
   let source = options.source;
   let pointBudget = wholeAtLeast(
     "pointBudget",
     options.pointBudget ?? 2_000_000,
+    1,
+  );
+  let densityFraction = finiteWithin(
+    "densityFraction",
+    options.densityFraction ?? 1,
+    0,
     1,
   );
   let refinementCutoffPx = finiteAtLeast(
@@ -564,7 +707,21 @@ export const createLodController = (
       ? presentation.diameterCssPx
       : INITIAL_AUTO_DIAMETER_CSS_PX;
   let active = options.active ?? true;
+  /** The camera in the tiles' local frame — what all selection math reads. */
   let view: CameraView | null = null;
+  /** The camera as the host supplied it, kept to re-derive `view` when the
+   * model matrix changes. */
+  let worldView: CameraView | null = null;
+  /**
+   * The model transform tiles draw under, resolved once per change: the
+   * matrix as applied (for the no-op guard), the frame (inverse + uniform
+   * scale), and whether the current matrix is usable at all. Restating the
+   * camera is the only per-frame cost left — everything matrix-derived is
+   * cached here.
+   */
+  let appliedModelMatrix: number[] | null = null;
+  let modelFrame: ModelFrame | null = null;
+  let modelMatrixUsable = true;
   let disposed = false;
   onPointDiameterCssPx(diameterCssPx);
 
@@ -574,13 +731,23 @@ export const createLodController = (
     onPointDiameterCssPx(next);
   };
 
-  let explicitInteractionSeen = false;
   let interactionDepth = 0;
   const currentBudget = (): number =>
     active ? Math.min(pointBudget, memoryCeilingPoints()) : 0;
 
   // Bumped on setSource/dispose; every async continuation checks it.
   let epoch = 0;
+  let workRevision = 0;
+  let workChangeScheduled = false;
+  const markWork = (): void => {
+    workRevision += 1;
+    if (workChangeScheduled) return;
+    workChangeScheduled = true;
+    queueMicrotask(() => {
+      workChangeScheduled = false;
+      if (!disposed) onWorkChange();
+    });
+  };
 
   const hierarchy = new Map<string, HierarchyEntry>();
 
@@ -761,7 +928,7 @@ export const createLodController = (
     // has moved past. Before the first camera selection cannot run at all,
     // and the bootstrap page is then the only page there is to ask for.
     if (view !== null) runSelection();
-    else if (keyString === keyToString(ROOT_KEY)) queueRootPage();
+    else if (keyString === ROOT_KEY_STRING) queueRootPage();
   };
 
   /** Tiles currently delivered to the consumer. */
@@ -821,26 +988,64 @@ export const createLodController = (
   let selectionGeneration = 0;
   let selectionStats = emptySelectionStats(0, 0);
   let budgetSkipped: ReadonlySet<string> = new Set<string>();
+  let drawPrefixes: ReadonlyMap<string, number> = new Map();
+  let drawPlanStats: LodDrawPlanStats = {
+    revision: 0,
+    pointBudget: 0,
+    plannedPoints: 0,
+    fullTiles: 0,
+    partialTiles: 0,
+    skippedTiles: 0,
+  };
+
   /**
-   * The one physical read a key may have running. It is created when the read
-   * starts and removed only when the promise settles, cancelled or not: while
-   * the entry is here nobody may start a rival read of the same key, and a
-   * reselect adopts this operation by flipping `wanted` back on.
-   *
-   * Adoption salvages the read only where cancellation was advisory — a source
-   * that ignores the signal, or one that had already finished by the time it
-   * fired. An `AbortSignal` cannot be un-aborted, so a source that honours it
-   * (a `fetch`, or the COPC decode past its next abort check) still rejects,
-   * and the error path re-queues the key at the head. Deferring the abort to
-   * make adoption always work would be worse than it sounds: the read holds
-   * its concurrency slot until it settles either way, so a read nobody wants
-   * would go on occupying a slot the camera's current tiles need.
+   * What a submitted tile actually draws: the planned prefix, clamped to the
+   * payload the consumer holds. The plan is allocated from hierarchy point
+   * counts, which need not match the decoded tile.
    */
-  const tileReads = new Map<
-    string,
-    { readonly abort: AbortController; wanted: boolean }
-  >();
+  const drawnPointsOf = (keyString: string, tile: TileData): number =>
+    Math.min(tile.pointCount, drawPrefixes.get(keyString) ?? 0);
+
+  type TileRead = {
+    readonly abort: AbortController;
+    wanted: boolean;
+    cancelTimer: ReturnType<typeof setTimeout> | null;
+  };
+
+  /**
+   * The one physical read a key may have running. Camera deselection gives it
+   * one selection interval to be adopted again before aborting. That bounds
+   * how long stale work can occupy a slot while avoiding a cancel/refetch pair
+   * when an orbit or pan crosses back over a recent tile. Lifecycle changes
+   * retain their existing immediate-cancellation semantics.
+   */
+  const tileReads = new Map<string, TileRead>();
   let queue: string[] = [];
+
+  const clearReadCancellation = (read: TileRead): void => {
+    if (read.cancelTimer === null) return;
+    clearTimeout(read.cancelTimer);
+    read.cancelTimer = null;
+  };
+
+  const cancelRead = (read: TileRead, immediately = false): void => {
+    read.wanted = false;
+    if (immediately || selectionDelayMs === 0) {
+      clearReadCancellation(read);
+      read.abort.abort();
+      return;
+    }
+    if (read.cancelTimer !== null) return;
+    read.cancelTimer = setTimeout(() => {
+      read.cancelTimer = null;
+      if (!read.wanted) read.abort.abort();
+    }, selectionDelayMs);
+  };
+
+  const adoptRead = (read: TileRead): void => {
+    read.wanted = true;
+    clearReadCancellation(read);
+  };
 
   // Cancellation is advisory wherever it matters: `abort()` marks a result
   // unwanted, but the COPC getter takes no signal, so the range read and the
@@ -930,6 +1135,7 @@ export const createLodController = (
       if (batch.added.length === 0 && batch.removed.length === 0) return;
       submitted = new Map(resident);
       onTiles(batch);
+      markWork();
       scheduleRender();
     });
   };
@@ -962,9 +1168,11 @@ export const createLodController = (
       pagesInFlight.set(keyString, abort);
       const requestEpoch = epoch;
       physicalHierarchyOperations += 1;
+      markWork();
       source.nodes(keyFromString(keyString), { signal: abort.signal }).then(
         (infos) => {
           physicalHierarchyOperations -= 1;
+          markWork();
           if (pagesInFlight.get(keyString) === abort) {
             pagesInFlight.delete(keyString);
           }
@@ -998,6 +1206,7 @@ export const createLodController = (
         },
         (error) => {
           physicalHierarchyOperations -= 1;
+          markWork();
           if (pagesInFlight.get(keyString) === abort) {
             pagesInFlight.delete(keyString);
           }
@@ -1023,8 +1232,187 @@ export const createLodController = (
     entry.children ??
     childKeys(key).filter((child) => hierarchy.has(keyToString(child)));
 
+  const samePrefixes = (
+    left: ReadonlyMap<string, number>,
+    right: ReadonlyMap<string, number>,
+  ): boolean => {
+    if (left.size !== right.size) return false;
+    for (const [key, count] of left) {
+      if (right.get(key) !== count) return false;
+    }
+    return true;
+  };
+
+  /**
+   * Allocate the governor's exact draw allowance over the selected tree.
+   * Selection and residency stay unchanged: this only chooses progressive VBO
+   * prefixes, with a complete parent required before any child can draw.
+   */
+  const updateDrawPlan = (): void => {
+    const pointBudget = Math.floor(
+      selectionStats.targetPoints * densityFraction,
+    );
+    const allocation = allocatePointPrefixes({
+      root: ROOT_KEY_STRING,
+      pointBudget,
+      getCandidate: (keyString) => {
+        if (!target.has(keyString)) return undefined;
+        const entry = hierarchy.get(keyString);
+        if (entry === undefined) return undefined;
+        const key = keyFromString(keyString);
+        return {
+          key: keyString,
+          pointCount: entry.pointCount,
+          priority: sseFor(keyString),
+          children: childrenOf(key, entry)
+            .map(keyToString)
+            .filter((child) => target.has(child)),
+        };
+      },
+    });
+    const changed = !samePrefixes(drawPrefixes, allocation.prefixes);
+    drawPrefixes = allocation.prefixes;
+    drawPlanStats = {
+      revision: drawPlanStats.revision + (changed ? 1 : 0),
+      pointBudget,
+      plannedPoints: allocation.plannedPoints,
+      fullTiles: allocation.fullTiles,
+      partialTiles: allocation.partialTiles,
+      skippedTiles: allocation.skippedTiles,
+    };
+    if (!changed) return;
+    onDrawPlan({
+      entries: [...drawPrefixes].map(([keyString, pointCount]) => ({
+        key: keyFromString(keyString),
+        pointCount,
+      })),
+    });
+  };
+
   const isEntryReady = (keyString: string, entry: HierarchyEntry): boolean =>
     entry.pointCount === 0 || resident.has(keyString);
+
+  /** Why a selected node is the finest thing drawn on its branch. */
+  type TerminalReasons = {
+    leaf?: boolean;
+    cutoff?: boolean;
+    hierarchy?: boolean;
+    tile?: boolean;
+    budget?: boolean;
+    draw?: boolean;
+  };
+
+  /**
+   * The projected spacing a terminal's drawn prefix leaves on screen, null
+   * when it draws nothing. Thinning a tile to a prefix spreads its points, so
+   * the node's own screen-space error is scaled by the prefix's density.
+   */
+  const terminalSpacing = (
+    keyString: string,
+    entry: HierarchyEntry,
+  ): number | null => {
+    const prefix = drawPrefixes.get(keyString) ?? 0;
+    if (entry.pointCount === 0 || prefix <= 0) return null;
+    return sseFor(keyString) * projectedSpacingScale(prefix / entry.pointCount);
+  };
+
+  /**
+   * Walk the selected tree down to its terminals, reporting each with what
+   * stopped the refinement there.
+   *
+   * `requireReady` chooses which tree is walked. The ready frontier describes
+   * what is on screen now, so an unloaded node ends its branch and is reported
+   * as tile-blocked. Auto sizing follows the selection instead — the density
+   * the frame is converging on — so it walks past arrivals that have not
+   * landed yet, and no terminal there is ever tile-blocked. Everything else
+   * about the two walks, including the order the child blocks are classified
+   * in, is one rule: two walks that disagreed would size the points for a
+   * frontier the diagnostics never described.
+   */
+  const walkTerminals = (
+    planes: readonly Plane[],
+    requireReady: boolean,
+    onTerminal: (
+      keyString: string,
+      entry: HierarchyEntry,
+      reasons: TerminalReasons,
+    ) => void,
+  ): void => {
+    const walk = (key: VoxelKey): void => {
+      const keyString = keyToString(key);
+      if (!target.has(keyString)) return;
+      const entry = hierarchy.get(keyString);
+      if (entry === undefined) return;
+      if (requireReady && !isEntryReady(keyString, entry)) return;
+
+      const prefix = drawPrefixes.get(keyString) ?? 0;
+      if (entry.pointCount > 0 && prefix < entry.pointCount) {
+        onTerminal(keyString, entry, { draw: true });
+        return;
+      }
+
+      const children = childrenOf(key, entry);
+      if (children.length === 0) {
+        onTerminal(keyString, entry, { leaf: true });
+        return;
+      }
+      if (sseFor(keyString) < refinementCutoffPx) {
+        onTerminal(keyString, entry, { cutoff: true });
+        return;
+      }
+
+      let hierarchyBlocked = false;
+      let tileBlocked = false;
+      let budgetBlocked = false;
+      let drawBlocked = false;
+      const openChildren: VoxelKey[] = [];
+      for (const child of children) {
+        const childString = keyToString(child);
+        const childEntry = hierarchy.get(childString);
+        if (childEntry === undefined) {
+          hierarchyBlocked = true;
+          continue;
+        }
+        if (!boundsIntersectsFrustum(planes, childEntry.bounds)) continue;
+        // Matches selection: an invisible page reference is not requested, so
+        // it is not blocking anything either.
+        if (childEntry.pageRef && !pagesLoaded.has(childString)) {
+          hierarchyBlocked = true;
+          continue;
+        }
+        if (!target.has(childString)) {
+          // A visible, available child of a selected parent can only be absent
+          // because the breadth-first point budget rejected it.
+          budgetBlocked = budgetSkipped.has(childString) || budgetBlocked;
+          continue;
+        }
+        if (
+          childEntry.pointCount > 0 &&
+          (drawPrefixes.get(childString) ?? 0) === 0
+        ) {
+          drawBlocked = true;
+          continue;
+        }
+        if (requireReady && !isEntryReady(childString, childEntry)) {
+          tileBlocked = true;
+          continue;
+        }
+        openChildren.push(child);
+      }
+
+      if (hierarchyBlocked || tileBlocked || budgetBlocked || drawBlocked) {
+        onTerminal(keyString, entry, {
+          hierarchy: hierarchyBlocked,
+          tile: tileBlocked,
+          budget: budgetBlocked,
+          draw: drawBlocked,
+        });
+      }
+      for (const child of openChildren) walk(child);
+    };
+
+    walk(ROOT_KEY);
+  };
 
   /**
    * Size Auto points for the selected density, not the subset that has happened
@@ -1048,56 +1436,19 @@ export const createLodController = (
     if (
       presentation.mode !== "auto" ||
       view === null ||
-      !target.has(keyToString(ROOT_KEY))
+      drawPlanStats.plannedPoints <= 0 ||
+      !target.has(ROOT_KEY_STRING)
     ) {
       return;
     }
 
-    const planes = frustumPlanes(view.viewProj);
     let largestSpacing: number | null = null;
-    const include = (entry: HierarchyEntry, keyString: string): void => {
-      if (entry.pointCount === 0) return;
-      largestSpacing = Math.max(largestSpacing ?? 0, sseFor(keyString));
-    };
+    walkTerminals(frustumPlanes(view.viewProj), false, (keyString, entry) => {
+      const spacing = terminalSpacing(keyString, entry);
+      if (spacing !== null)
+        largestSpacing = Math.max(largestSpacing ?? 0, spacing);
+    });
 
-    const walk = (key: VoxelKey): void => {
-      const keyString = keyToString(key);
-      if (!target.has(keyString)) return;
-      const entry = hierarchy.get(keyString);
-      if (entry === undefined) return;
-
-      const children = childrenOf(key, entry);
-      if (children.length === 0 || sseFor(keyString) < refinementCutoffPx) {
-        include(entry, keyString);
-        return;
-      }
-
-      let blocked = false;
-      const selectedChildren: VoxelKey[] = [];
-      for (const child of children) {
-        const childString = keyToString(child);
-        const childEntry = hierarchy.get(childString);
-        if (childEntry === undefined) {
-          blocked = true;
-          continue;
-        }
-        if (!boundsIntersectsFrustum(planes, childEntry.bounds)) continue;
-        if (childEntry.pageRef && !pagesLoaded.has(childString)) {
-          blocked = true;
-          continue;
-        }
-        if (!target.has(childString)) {
-          blocked = budgetSkipped.has(childString) || blocked;
-          continue;
-        }
-        selectedChildren.push(child);
-      }
-
-      if (blocked) include(entry, keyString);
-      for (const child of selectedChildren) walk(child);
-    };
-
-    walk(ROOT_KEY);
     if (largestSpacing !== null) {
       emitDiameter(
         presentation.userScale *
@@ -1109,118 +1460,77 @@ export const createLodController = (
     }
   };
 
-  const updateReadyTerminalFrontier = (): void => {
-    const currentView = view;
-    if (currentView === null || !active || !target.has(keyToString(ROOT_KEY))) {
-      selectionStats = {
-        ...selectionStats,
-        readyTerminalFrontier: emptyReadyTerminalFrontier(),
-      };
-      return;
-    }
+  /**
+   * The ready frontier, computed on demand and held until something that can
+   * move it happens.
+   *
+   * It is a diagnostic, and `stats()` is its only reader, so computing it
+   * eagerly would cost a full recursive walk and a quantile sort on every tile
+   * arrival — for a number no frame depends on. A host that reads `stats()` on
+   * every frame pays one walk per invalidation; one that never reads it pays
+   * nothing.
+   */
+  let frontierCache: LodSelectionStats["readyTerminalFrontier"] | null = null;
 
-    const planes = frustumPlanes(currentView.viewProj);
-    const values: number[] = [];
-    const terminalKeys = new Set<string>();
-    let leafNodes = 0;
-    let cutoffNodes = 0;
-    let hierarchyBlockedNodes = 0;
-    let tileBlockedNodes = 0;
-    let budgetBlockedNodes = 0;
-
-    const addTerminal = (
-      keyString: string,
-      entry: HierarchyEntry,
-      reasons: {
-        leaf?: boolean;
-        cutoff?: boolean;
-        hierarchy?: boolean;
-        tile?: boolean;
-        budget?: boolean;
-      },
-    ): void => {
-      // A structural node has no samples with which to cover a blocked region.
-      if (entry.pointCount === 0 || !resident.has(keyString)) return;
-      if (!terminalKeys.has(keyString)) {
-        terminalKeys.add(keyString);
-        values.push(sseFor(keyString));
-      }
-      if (reasons.leaf) leafNodes += 1;
-      if (reasons.cutoff) cutoffNodes += 1;
-      if (reasons.hierarchy) hierarchyBlockedNodes += 1;
-      if (reasons.tile) tileBlockedNodes += 1;
-      if (reasons.budget) budgetBlockedNodes += 1;
-    };
-
-    const walk = (key: VoxelKey): void => {
-      const keyString = keyToString(key);
-      if (!target.has(keyString)) return;
-      const entry = hierarchy.get(keyString);
-      if (entry === undefined || !isEntryReady(keyString, entry)) return;
-
-      const children = childrenOf(key, entry);
-      if (children.length === 0) {
-        addTerminal(keyString, entry, { leaf: true });
-        return;
-      }
-      if (sseFor(keyString) < refinementCutoffPx) {
-        addTerminal(keyString, entry, { cutoff: true });
-        return;
-      }
-
-      let hierarchyBlocked = false;
-      let tileBlocked = false;
-      let budgetBlocked = false;
-      const readyChildren: VoxelKey[] = [];
-      for (const child of children) {
-        const childString = keyToString(child);
-        const childEntry = hierarchy.get(childString);
-        if (childEntry === undefined) {
-          hierarchyBlocked = true;
-          continue;
-        }
-        if (!boundsIntersectsFrustum(planes, childEntry.bounds)) continue;
-        // Matches selection: an invisible page reference is not requested, so
-        // it is not blocking anything either.
-        if (childEntry.pageRef && !pagesLoaded.has(childString)) {
-          hierarchyBlocked = true;
-          continue;
-        }
-        if (!target.has(childString)) {
-          // A visible, available child of a selected parent can only be absent
-          // because the breadth-first point budget rejected it.
-          budgetBlocked = budgetSkipped.has(childString) || budgetBlocked;
-          continue;
-        }
-        if (!isEntryReady(childString, childEntry)) {
-          tileBlocked = true;
-          continue;
-        }
-        readyChildren.push(child);
-      }
-
-      if (hierarchyBlocked || tileBlocked || budgetBlocked) {
-        addTerminal(keyString, entry, {
-          hierarchy: hierarchyBlocked,
-          tile: tileBlocked,
-          budget: budgetBlocked,
-        });
-      }
-      for (const child of readyChildren) walk(child);
-    };
-
-    walk(ROOT_KEY);
-    const frontier: LodSelectionStats["readyTerminalFrontier"] = {
-      count: terminalKeys.size,
-      leafNodes,
-      cutoffNodes,
-      hierarchyBlockedNodes,
-      tileBlockedNodes,
-      budgetBlockedNodes,
-      projectedSpacingCssPx: spacingQuantiles(values),
-    };
-    selectionStats = { ...selectionStats, readyTerminalFrontier: frontier };
+  const invalidateFrontier = (): void => {
+    frontierCache = null;
   };
+
+  const readyTerminalFrontier =
+    (): LodSelectionStats["readyTerminalFrontier"] => {
+      const currentView = view;
+      if (
+        currentView === null ||
+        !active ||
+        drawPlanStats.plannedPoints <= 0 ||
+        !target.has(ROOT_KEY_STRING)
+      ) {
+        frontierCache = null;
+        return emptyReadyTerminalFrontier();
+      }
+      if (frontierCache !== null) return frontierCache;
+
+      const values: number[] = [];
+      const terminalKeys = new Set<string>();
+      let leafNodes = 0;
+      let cutoffNodes = 0;
+      let hierarchyBlockedNodes = 0;
+      let tileBlockedNodes = 0;
+      let budgetBlockedNodes = 0;
+      let drawBlockedNodes = 0;
+
+      walkTerminals(
+        frustumPlanes(currentView.viewProj),
+        true,
+        (keyString, entry, reasons) => {
+          // A structural node has no samples with which to cover a blocked region.
+          if (entry.pointCount === 0 || !resident.has(keyString)) return;
+          if (!terminalKeys.has(keyString)) {
+            terminalKeys.add(keyString);
+            const spacing = terminalSpacing(keyString, entry);
+            if (spacing !== null) values.push(spacing);
+          }
+          if (reasons.leaf) leafNodes += 1;
+          if (reasons.cutoff) cutoffNodes += 1;
+          if (reasons.hierarchy) hierarchyBlockedNodes += 1;
+          if (reasons.tile) tileBlockedNodes += 1;
+          if (reasons.budget) budgetBlockedNodes += 1;
+          if (reasons.draw) drawBlockedNodes += 1;
+        },
+      );
+
+      frontierCache = {
+        count: terminalKeys.size,
+        leafNodes,
+        cutoffNodes,
+        hierarchyBlockedNodes,
+        tileBlockedNodes,
+        budgetBlockedNodes,
+        drawBlockedNodes,
+        projectedSpacingCssPx: spacingQuantiles(values),
+      };
+      return frontierCache;
+    };
 
   const pump = (): void => {
     while (
@@ -1241,18 +1551,21 @@ export const createLodController = (
       // Reading it again would be pure duplicate I/O, and a failure of that
       // read would settle the cloud with a hole over a payload it already has.
       if (promoteCached(keyString)) {
-        updateReadyTerminalFrontier();
+        invalidateFrontier();
         scheduleFlush();
         continue;
       }
       const abort = new AbortController();
-      tileReads.set(keyString, { abort, wanted: true });
+      const read: TileRead = { abort, wanted: true, cancelTimer: null };
+      tileReads.set(keyString, read);
       const requestEpoch = epoch;
       const key = keyFromString(keyString);
       physicalTileOperations += 1;
+      markWork();
       source.loadTile(key, { signal: abort.signal }).then(
-        (tile) => {
+        (loadedTile) => {
           physicalTileOperations -= 1;
+          markWork();
           // An epoch change is the only thing that takes a key's read entry
           // away while the read runs, and it also makes the payload worthless:
           // it came from a source nobody is displaying any more.
@@ -1260,26 +1573,29 @@ export const createLodController = (
             pump();
             return;
           }
+          clearReadCancellation(read);
           tileReads.delete(keyString);
           tileFailures.delete(keyString);
           // Cancellation is advisory: the COPC getter takes no signal, so a
           // cancelled read still delivers. If the key was reselected while it
           // ran, this payload is exactly what the selection is waiting for.
           if (target.has(keyString) && !resident.has(keyString)) {
-            takeResident(keyString, tile);
-            updateReadyTerminalFrontier();
+            takeResident(keyString, loadedTile);
+            invalidateFrontier();
             scheduleFlush();
           } else {
-            cacheDecoded(keyString, tile);
+            cacheDecoded(keyString, loadedTile);
           }
           pump();
         },
         (error) => {
           physicalTileOperations -= 1;
+          markWork();
           if (disposed || requestEpoch !== epoch) {
             pump();
             return;
           }
+          clearReadCancellation(read);
           tileReads.delete(keyString);
           if (!isAbortError(error)) {
             recordFailure(tileFailures, keyString);
@@ -1292,17 +1608,14 @@ export const createLodController = (
             // reselected while the read was cancelled: it needs a fresh one.
             queue.unshift(keyString);
           }
-          updateReadyTerminalFrontier();
+          invalidateFrontier();
           pump();
         },
       );
     }
   };
 
-  const runSelection = (seed?: {
-    readonly selected: ReadonlySet<string>;
-    readonly totalPoints: number;
-  }): void => {
+  const runSelection = (seed?: ReadonlySet<string>): void => {
     if (disposed || !active || view === null) return;
     const budget = currentBudget();
     const currentView = view;
@@ -1372,8 +1685,9 @@ export const createLodController = (
       budgetSkippedNodes: selection.budgetSkippedNodes,
       budgetSkippedPoints: selection.budgetSkippedPoints,
       projectedImportance: target.size > 0 ? sse(ROOT_KEY) : 0,
-      readyTerminalFrontier: emptyReadyTerminalFrontier(),
     };
+    invalidateFrontier();
+    updateDrawPlan();
     updateAutoDiameter();
     // The root page bootstraps the hierarchy, so it can never come back
     // through neededPages: that path needs a hierarchy entry, and only the
@@ -1381,11 +1695,10 @@ export const createLodController = (
     // controller with nothing to draw and no way to ask again. Level 0 sorts
     // to the front, and queuePages drops anything already held, in flight, or
     // resting, so this costs nothing on the normal path.
-    const rootString = keyToString(ROOT_KEY);
     queuePages(
-      pagesLoaded.has(rootString)
+      pagesLoaded.has(ROOT_KEY_STRING)
         ? neededPages.map(keyToString)
-        : [rootString, ...neededPages.map(keyToString)],
+        : [ROOT_KEY_STRING, ...neededPages.map(keyToString)],
     );
 
     // Deselected submitted tiles leave renderer/GPU residency immediately.
@@ -1396,13 +1709,12 @@ export const createLodController = (
       releaseResident(keyString);
     }
 
-    // Cancel fetches that no longer matter. The read keeps its physical slot
-    // until it settles: dropping it here would let a reselect race a second
-    // read of the same key against work that is still running.
+    // Give camera-deselected reads one selection interval to be adopted again.
+    // The read keeps its physical slot until it settles: dropping its entry
+    // would let a reselect race a second read against work still running.
     for (const [keyString, read] of tileReads) {
       if (target.has(keyString)) continue;
-      read.wanted = false;
-      read.abort.abort();
+      cancelRead(read);
     }
 
     // Reuse cached tiles immediately; queue the rest, coarse levels first.
@@ -1415,7 +1727,7 @@ export const createLodController = (
         // its cancellation the payload claims residency when it lands; if the
         // source really stopped, the abort path re-queues this key at the
         // head. Either way there is never a second read of the same bytes.
-        read.wanted = true;
+        adoptRead(read);
         continue;
       }
       const entry = hierarchy.get(keyString);
@@ -1427,39 +1739,19 @@ export const createLodController = (
     }
     queue = byFrontierPriority(toFetch);
 
-    updateReadyTerminalFrontier();
+    invalidateFrontier();
     scheduleFlush();
     pump();
   };
 
   let lastSelection = Number.NEGATIVE_INFINITY;
   let selectionTimer: ReturnType<typeof setTimeout> | null = null;
-  // Fires once the camera has been still for interactionSettleMs, so the
-  // stationary refinement pass runs even when the host renders on demand and
-  // goes quiet after the last interaction frame.
-  let settleTimer: ReturnType<typeof setTimeout> | null = null;
 
   const clearSelectionTimer = (): void => {
     if (selectionTimer !== null) {
       clearTimeout(selectionTimer);
       selectionTimer = null;
     }
-  };
-
-  const clearSettleTimer = (): void => {
-    if (settleTimer !== null) {
-      clearTimeout(settleTimer);
-      settleTimer = null;
-    }
-  };
-
-  const armSettleTimer = (): void => {
-    clearSettleTimer();
-    settleTimer = setTimeout(() => {
-      settleTimer = null;
-      if (disposed) return;
-      runSelection();
-    }, interactionSettleMs);
   };
 
   const requestSelection = (): void => {
@@ -1492,8 +1784,7 @@ export const createLodController = (
     // the swap would re-queue a key of the old source against the new one.
     clearRetryTimers();
     for (const read of tileReads.values()) {
-      read.wanted = false;
-      read.abort.abort();
+      cancelRead(read, true);
     }
     tileReads.clear();
     for (const abort of pagesInFlight.values()) abort.abort();
@@ -1516,6 +1807,7 @@ export const createLodController = (
     resident.clear();
     residentPoints = 0;
     residentBytes = 0;
+    updateDrawPlan();
   };
 
   // Hosts feed the camera on every render, unconditionally; an unchanged view
@@ -1527,6 +1819,7 @@ export const createLodController = (
     if (
       a.projection !== b.projection ||
       projectionScalar(a) !== projectionScalar(b) ||
+      a.viewportWidthCssPx !== b.viewportWidthCssPx ||
       a.viewportHeightCssPx !== b.viewportHeightCssPx ||
       a.position[0] !== b.position[0] ||
       a.position[1] !== b.position[1] ||
@@ -1542,33 +1835,52 @@ export const createLodController = (
   };
 
   /** Bootstrap path for the root page, used before any camera exists. */
-  const queueRootPage = (): void => queuePages([keyToString(ROOT_KEY)]);
+  const queueRootPage = (): void => queuePages([ROOT_KEY_STRING]);
 
   // Bootstrap: an active controller loads hierarchy eagerly; an inactive one
   // waits until activation so a hidden cloud performs no hierarchy I/O.
   if (active) queueRootPage();
 
+  const sameMatrix = (
+    a: readonly number[] | null,
+    b: Mat16 | null,
+  ): boolean => {
+    if (a === null || b === null) return a === null && b === null;
+    if (a.length !== b.length) return false;
+    for (let index = 0; index < a.length; index += 1) {
+      if (a[index] !== b[index]) return false;
+    }
+    return true;
+  };
+
+  /** Adopt the local restatement of the stored world camera, if usable. */
+  const applyWorldView = (): void => {
+    if (worldView === null || !modelMatrixUsable) return;
+    view = modelFrame ? viewInModelFrame(worldView, modelFrame) : worldView;
+    sseByKey.clear();
+    if (active) requestSelection();
+  };
+
   return {
     setCamera(nextView) {
       if (disposed || !isFiniteView(nextView)) return;
-      if (view !== null && sameView(view, nextView)) return;
-      view = nextView;
-      sseByKey.clear();
-      if (!active) return;
-      // The settle timer is the fallback for hosts that drive the camera
-      // without begin/endInteraction.
-      if (!explicitInteractionSeen && presentation.mode === "auto") {
-        armSettleTimer();
-      }
-      requestSelection();
+      if (worldView !== null && sameView(worldView, nextView)) return;
+      worldView = nextView;
+      applyWorldView();
+    },
+
+    setModelMatrix(matrix) {
+      if (disposed || sameMatrix(appliedModelMatrix, matrix ?? null)) return;
+      appliedModelMatrix = matrix ? Array.from(matrix) : null;
+      modelFrame = matrix ? modelFrameOf(matrix) : null;
+      modelMatrixUsable = matrix ? modelFrame !== null : true;
+      applyWorldView();
     },
 
     beginInteraction() {
       if (disposed) return;
-      explicitInteractionSeen = true;
       interactionDepth += 1;
       if (interactionDepth !== 1) return;
-      clearSettleTimer();
       // Bypass camera debounce before the first expensive moving frame.
       runSelection();
     },
@@ -1576,8 +1888,6 @@ export const createLodController = (
     endInteraction() {
       if (disposed || interactionDepth === 0) return;
       interactionDepth -= 1;
-      if (interactionDepth !== 0) return;
-      armSettleTimer();
     },
 
     setPointBudget(points) {
@@ -1589,17 +1899,28 @@ export const createLodController = (
         nextBudget > previousBudget &&
           target.size > 0 &&
           selectionStats.targetPoints <= nextBudget
-          ? {
-              selected: target,
-              totalPoints: selectionStats.targetPoints,
-            }
+          ? target
           : undefined,
       );
     },
 
+    setDensityFraction(nextDensityFraction) {
+      if (
+        disposed ||
+        !finiteNonNegative(nextDensityFraction) ||
+        nextDensityFraction > 1 ||
+        nextDensityFraction === densityFraction
+      ) {
+        return;
+      }
+      densityFraction = nextDensityFraction;
+      updateDrawPlan();
+      updateAutoDiameter();
+      invalidateFrontier();
+    },
+
     setSource(nextSource) {
       if (disposed) return;
-      clearSettleTimer();
       if (presentation.mode === "auto") {
         emitDiameter(INITIAL_AUTO_DIAMETER_CSS_PX);
       }
@@ -1632,7 +1953,7 @@ export const createLodController = (
         emitDiameter(presentation.diameterCssPx);
       } else {
         updateAutoDiameter();
-        updateReadyTerminalFrontier();
+        invalidateFrontier();
       }
     },
 
@@ -1647,7 +1968,6 @@ export const createLodController = (
       }
 
       clearSelectionTimer();
-      clearSettleTimer();
       poolMember?.release();
       poolMember = null;
       // No new work while hidden. Hierarchy pages already in flight are left
@@ -1658,14 +1978,14 @@ export const createLodController = (
       // Hiding cancels tile reads but keeps their physical slots: a hide/show
       // pair must adopt the read that is still running, not race it.
       for (const read of tileReads.values()) {
-        read.wanted = false;
-        read.abort.abort();
+        cancelRead(read, true);
       }
 
       if (target.size > 0) targetRevision += 1;
       target = new Set();
       selectionGeneration += 1;
       selectionStats = emptySelectionStats(selectionGeneration, targetRevision);
+      updateDrawPlan();
 
       // Nothing stays resident while hidden; the flush turns that into
       // removals for exactly the actors the consumer was last handed.
@@ -1673,14 +1993,40 @@ export const createLodController = (
       scheduleFlush();
     },
 
+    governorInputs() {
+      return {
+        memoryBudgetBytes: memoryBudgetBytes(),
+        memoryCeilingPoints: memoryCeilingPoints(),
+        projectedImportance: selectionStats.projectedImportance,
+        demandPoints:
+          selectionStats.targetPoints + selectionStats.budgetSkippedPoints,
+        physicalTileOperations,
+        physicalHierarchyOperations,
+      };
+    },
+
     stats() {
       const cachedBytes = cache.totalBytes();
       let targetUndecodedTiles = 0;
       for (const keyString of target) {
-        if (!resident.has(keyString) && !cache.has(keyString)) {
+        if (
+          hierarchy.get(keyString)?.pointCount !== 0 &&
+          !resident.has(keyString) &&
+          !cache.has(keyString)
+        ) {
           targetUndecodedTiles += 1;
         }
       }
+      let drawnPoints = 0;
+      for (const [keyString, tile] of submitted) {
+        drawnPoints += drawnPointsOf(keyString, tile);
+      }
+      const workPending =
+        physicalTileOperations > 0 ||
+        physicalHierarchyOperations > 0 ||
+        queue.length > 0 ||
+        pageQueue.length > 0 ||
+        targetUndecodedTiles > 0;
       return {
         active,
         residentTiles: resident.size,
@@ -1695,9 +2041,15 @@ export const createLodController = (
         hierarchyInFlight: pagesInFlight.size,
         queuedPages: pageQueue.length,
         physicalHierarchyOperations,
+        workRevision,
+        workPending,
+        selectionPending: selectionTimer !== null,
         fetchConcurrency,
         hierarchyConcurrency,
         pointBudget: currentBudget(),
+        densityFraction,
+        drawnPoints,
+        drawPlan: drawPlanStats,
         memoryBudgetBytes: memoryBudgetBytes(),
         memoryCeilingPoints: memoryCeilingPoints(),
         interactionDepth,
@@ -1710,6 +2062,7 @@ export const createLodController = (
         refinementCutoffPx,
         selection: {
           ...selectionStats,
+          readyTerminalFrontier: readyTerminalFrontier(),
           // Live, not a selection-time snapshot: how many selected tiles have
           // no decoded payload anywhere (neither resident nor cached). This
           // is the number that distinguishes "the burst issued no reads
@@ -1722,6 +2075,39 @@ export const createLodController = (
       };
     },
 
+    pickPoint(pickView, cursorXCssPx, cursorYCssPx) {
+      if (disposed || !active || !isFiniteView(pickView)) return null;
+      if (!modelMatrixUsable) return null;
+      const localView = modelFrame
+        ? viewInModelFrame(pickView, modelFrame)
+        : pickView;
+      const tiles: PickTile[] = [];
+      for (const [keyString, tile] of submitted) {
+        const pointCount = drawnPointsOf(keyString, tile);
+        if (pointCount === 0) continue;
+        tiles.push({
+          origin: tile.origin,
+          positions: tile.positions,
+          pointCount,
+          bounds: hierarchy.get(keyString)?.bounds,
+        });
+      }
+      const result = pickPointInTiles(
+        localView,
+        cursorXCssPx,
+        cursorYCssPx,
+        tiles,
+      );
+      // The sweep solved on the model-local ray; hand the answer back in the
+      // caller's world coordinates through the same matrix.
+      return result?.status === "hit" && modelFrame
+        ? {
+            ...result,
+            pointOnRay: transformPointBy(modelFrame.matrix, result.pointOnRay),
+          }
+        : result;
+    },
+
     activeKeys: () => ({
       resident: [...resident.keys()].sort(),
       submitted: [...submitted.keys()].sort(),
@@ -1730,7 +2116,6 @@ export const createLodController = (
     dispose() {
       if (disposed) return;
       clearSelectionTimer();
-      clearSettleTimer();
       interactionDepth = 0;
       // The consumer still owns everything the last flush handed it —
       // including tiles a flush this teardown cancels was about to remove.

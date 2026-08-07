@@ -10,32 +10,25 @@
 import { afterAll, describe, expect, it } from "vitest";
 
 import {
+  cameraDistance,
+  cameraPitchDegrees,
   closeBrowser,
+  cross,
+  dot,
   MULTIPAGE_CLOUD,
   openExample,
+  subtract,
   type CameraReading,
   type ExampleSession,
 } from "./harness";
 
-const difference = (to: number[], from: number[]): number[] =>
-  to.map((value, axis) => value - from[axis]!);
-
-const dot = (left: number[], right: number[]): number =>
-  left.reduce((sum, value, axis) => sum + value * right[axis]!, 0);
-
-const cross = (left: number[], right: number[]): number[] => [
-  left[1]! * right[2]! - left[2]! * right[1]!,
-  left[2]! * right[0]! - left[0]! * right[2]!,
-  left[0]! * right[1]! - left[1]! * right[0]!,
-];
-
-const cameraDistance = (reading: CameraReading): number =>
-  Math.hypot(...difference(reading.position, reading.focalPoint));
-
-const cameraPitchDegrees = (reading: CameraReading): number => {
-  const offset = difference(reading.position, reading.focalPoint);
-  return (Math.asin(offset[2]! / Math.hypot(...offset)) * 180) / Math.PI;
+const cameraYawDegrees = (reading: CameraReading): number => {
+  const offset = subtract(reading.position, reading.focalPoint);
+  return (Math.atan2(offset[1]!, offset[0]!) * 180) / Math.PI;
 };
+
+const signedAngleDifference = (after: number, before: number): number =>
+  ((((after - before) % 360) + 540) % 360) - 180;
 
 const relativeGap = (left: number, right: number): number =>
   Math.abs(left - right) /
@@ -190,7 +183,9 @@ describe("example controls", () => {
         box.x + box.width / 2 + 40,
         box.y + box.height / 2,
       );
-      await session.page.waitForTimeout(150);
+      await session.page.waitForFunction(
+        () => document.querySelector("#stats dd")?.textContent === "moving",
+      );
       expect(
         await session.page.locator("#stats dd").first().textContent(),
       ).toBe("moving");
@@ -225,8 +220,7 @@ describe("example controls", () => {
 
       await session.page.mouse.move(x, y);
       // vtk.js starts a new mouse-move burst after 200 ms of quiet. This is
-      // the ordinary click-after-looking case that used to discard its first
-      // movement event.
+      // the ordinary click-after-looking case.
       await session.page.waitForTimeout(250);
       const before = await session.readCamera();
       await session.page.mouse.down();
@@ -292,17 +286,75 @@ describe("example controls", () => {
     }
   });
 
+  it("keeps a centered pivot throughout a long orbit", async () => {
+    const session = await openExample({ cloud: MULTIPAGE_CLOUD.urlPath });
+    try {
+      await session.setBudgetMode("fixed");
+      const initial = await session.readCamera();
+      await wheelAtViewerCenter(session, 8, 0, 0.8, 0.25);
+      const afterZoom = await session.readCamera();
+      expect(afterZoom.focalPoint).not.toEqual(initial.focalPoint);
+
+      const box = await session.page.locator("#viewer").boundingBox();
+      if (box === null) throw new Error("the viewer has no box to orbit in");
+      const x = box.x + box.width / 2;
+      const y = box.y + box.height / 2;
+      await session.page.mouse.move(x, y);
+      await session.page.mouse.down({ button: "right" });
+      const atOrbitStart = await session.readCamera();
+      const path = [atOrbitStart];
+      const steps = 24;
+      for (let step = 1; step <= steps; step += 1) {
+        await session.page.mouse.move(x + (box.width / 2) * (step / steps), y);
+        await session.frame();
+        path.push(await session.readCamera());
+      }
+      await session.page.mouse.up({ button: "right" });
+      const afterOrbit = path.at(-1)!;
+      const orbitRadius = cameraDistance(atOrbitStart);
+      let pathYawDegrees = 0;
+
+      for (let index = 1; index < path.length; index += 1) {
+        const previous = path[index - 1]!;
+        const current = path[index]!;
+        const yawStep = signedAngleDifference(
+          cameraYawDegrees(current),
+          cameraYawDegrees(previous),
+        );
+        pathYawDegrees += yawStep;
+
+        // The camera's focal point defines the screen-centre ray. Keeping it
+        // fixed while preserving a positive radius proves that the eye moves
+        // around the centred pivot rather than through or beyond it.
+        expect(current.focalPoint).toEqual(atOrbitStart.focalPoint);
+        expect(cameraDistance(current)).toBeGreaterThan(0);
+        expect(relativeGap(cameraDistance(current), orbitRadius)).toBeLessThan(
+          1e-12,
+        );
+        expect(yawStep).toBeLessThan(0);
+        expect(Math.abs(yawStep)).toBeLessThan(10);
+      }
+
+      expect(afterOrbit.focalPoint).toEqual(atOrbitStart.focalPoint);
+      expect(Math.abs(pathYawDegrees)).toBeGreaterThan(120);
+      expect(afterOrbit.position).not.toEqual(atOrbitStart.position);
+      expect(session.failures).toEqual([]);
+    } finally {
+      await session.close();
+    }
+  });
+
   it("reports presented FPS and stops wheel zoom before the focal point", async () => {
     const session = await openExample({ cloud: MULTIPAGE_CLOUD.urlPath });
     try {
       await session.setBudgetMode("fixed");
       const initial = await session.readCamera();
       const initialDistance = cameraDistance(initial);
-      const initialDirection = difference(initial.focalPoint, initial.position);
+      const initialDirection = subtract(initial.focalPoint, initial.position);
 
       // Pace the opening steps so Chromium presents several distinct frames.
       // Both values and the graph should then describe cadence, while the
-      // existing "last frame" diagnostic continues to describe render cost.
+      // "last frame" diagnostic describes render cost.
       await wheelAtViewerCenter(session, 12, 20);
       await session.page.waitForFunction(
         () =>
@@ -333,7 +385,7 @@ describe("example controls", () => {
       expect(limitedDistance).toBeGreaterThan(0);
       expect(limitedDistance).toBeLessThan(initialDistance * 1e-5);
       expect(
-        dot(difference(atLimit.focalPoint, atLimit.position), initialDirection),
+        dot(subtract(atLimit.focalPoint, atLimit.position), initialDirection),
       ).toBeGreaterThan(0);
 
       await wheelAtViewerCenter(session, 20, 0, 0.82, 0.2);
@@ -345,13 +397,16 @@ describe("example controls", () => {
       // Dragging right pans the scene with the pointer: the camera translates
       // left along its screen-right axis, and eye-to-focus distance is
       // unchanged. Crossing the focus reverses this sign.
-      await session.page.waitForTimeout(250);
+      await session.until(
+        "the wheel interaction to end before panning",
+        (stats) => stats.controller?.interactionDepth === 0,
+      );
       const beforePan = await session.readCamera();
-      const direction = difference(beforePan.focalPoint, beforePan.position);
+      const direction = subtract(beforePan.focalPoint, beforePan.position);
       const screenRight = cross(direction, beforePan.viewUp);
       await session.drag([{ dx: 80, dy: 0 }]);
       const afterPan = await session.readCamera();
-      const pan = difference(afterPan.focalPoint, beforePan.focalPoint);
+      const pan = subtract(afterPan.focalPoint, beforePan.focalPoint);
       expect(dot(pan, screenRight)).toBeLessThan(0);
       expect(
         relativeGap(cameraDistance(afterPan), cameraDistance(beforePan)),

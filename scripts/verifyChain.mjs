@@ -10,7 +10,7 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -101,16 +101,21 @@ const registers = (text, className) =>
   new RegExp(`classHierarchy\\.push\\(\\s*["'\`]${className}["'\`]`).test(text);
 
 const checkExampleBundle = () => {
-  const assets = join(root, "examples", "vtk", "dist", "assets");
-  const entries = statSync(assets, { throwIfNoEntry: false })
-    ? readdirSync(assets).filter((name) => name.endsWith(".js"))
-    : [];
+  const output = join(root, "examples", "vtk", "dist");
+  // Vite's own manifest names the entry chunk, so this check stays correct
+  // whatever `base` and `build.assetsDir` the example config uses, and it
+  // ignores the worker and vendor chunks emitted beside it.
+  const manifestPath = join(output, ".vite", "manifest.json");
+  const manifest = statSync(manifestPath, { throwIfNoEntry: false })
+    ? JSON.parse(readFileSync(manifestPath, "utf8"))
+    : {};
+  const entries = Object.values(manifest).filter((chunk) => chunk.isEntry);
   if (entries.length !== 1) {
     fail(
-      `expected exactly one built example bundle in ${assets}, found ${entries.length} — run 'npm run example:build' first`,
+      `expected exactly one built example entry chunk in ${manifestPath}, found ${entries.length} — run 'npm run example:build' first`,
     );
   }
-  const file = join(assets, entries[0]);
+  const file = join(output, entries[0].file);
   const bytes = readFileSync(file);
   const text = bytes.toString("utf8");
 
@@ -130,6 +135,10 @@ const checkExampleBundle = () => {
       /["'`]scaleFactor["'`]\s*,\s*["'`]circle["'`]\s*,\s*["'`]worldSize["'`]/.test(
         text,
       ),
+    // Progressive density depends on this core mapper API reaching the bundle;
+    // an older/stale vtk.js build still carries every class above but would
+    // fail only when the first tile actor applies its draw cap.
+    maximumPointCount: text.includes("maximumPointCount"),
   };
   const missing = Object.entries(required)
     .filter(([, present]) => !present)

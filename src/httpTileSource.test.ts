@@ -183,6 +183,32 @@ describe("createHttpTileSource", () => {
     expect(Array.from(tile.rgb!)).toEqual([200, 5, 255]);
   });
 
+  it("delivers tile points in progressive order, not record order", async () => {
+    // PCT1 carries whatever order the service wrote; the source owes its
+    // caller an order whose every prefix samples the whole node.
+    const points = Array.from({ length: 64 }, (_, index) => index);
+    const payload = makePct1({
+      origin: [0, 0, 0],
+      positions: points.flatMap((point) => [point, point * 2, point * 3]),
+      rgb: points.flatMap((point) => [point, point, point]),
+    });
+    const source = sourceOn(
+      "/pc/a/rev1",
+      vi.fn(async () => new Response(payload, { status: 200 })),
+    );
+
+    const tile = await source.loadTile({ level: 1, x: 1, y: 0, z: 0 });
+    const delivered = points.map((_, index) => tile.positions[index * 3]!);
+    expect([...delivered].sort((a, b) => a - b)).toEqual(points);
+    expect(delivered).not.toEqual(points);
+    // Positions and color stay paired through the permutation.
+    for (const [index, point] of delivered.entries()) {
+      expect(tile.positions[index * 3 + 1]).toBe(point * 2);
+      expect(tile.positions[index * 3 + 2]).toBe(point * 3);
+      expect(tile.rgb![index * 3]).toBe(point);
+    }
+  });
+
   it("maps HTTP 410 to RevisionGoneError", async () => {
     const fetchImpl = vi.fn(async () => new Response(null, { status: 410 }));
     const source = sourceOn("/pc/a/dead", fetchImpl);

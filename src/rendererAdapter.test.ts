@@ -32,6 +32,7 @@ const makeAdapter = (options?: {
   diameterCssPx?: number;
   devicePixelRatio?: number;
   visible?: boolean;
+  densityFraction?: number;
 }) => {
   const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
   const scheduleRender = vi.fn();
@@ -77,6 +78,7 @@ describe("createRendererAdapter", () => {
     add(adapter, { key: KEY_A, tile: data });
 
     expect(adapter.stats()).toEqual({
+      workRevision: 1,
       submittedTiles: 1,
       submittedPoints: 2,
       submittedBytes: 94,
@@ -89,6 +91,7 @@ describe("createRendererAdapter", () => {
       resourceCeilingBytes: 256 * 1024 * 1024,
       drawnTiles: 1,
       drawnPoints: 2,
+      drawnFraction: 1,
       visible: true,
       diameterCssPx: 3,
       devicePixelRatio: 2,
@@ -103,6 +106,7 @@ describe("createRendererAdapter", () => {
     expect(mapperInstances[0]!.inputData).toBe(polyDataInstances[0]);
     expect(mapperInstances[0]!.static).toBe(true);
     expect(mapperInstances[0]!.scaleFactor).toBe(2);
+    expect(mapperInstances[0]!.maximumPointCount).toBe(2);
     expect(actorInstances[0]!.pointSize).toBe(3);
     // Identity base: the tile matrix is a plain translation to the origin.
     expect(actorInstances[0]!.userMatrix!.slice(12, 15)).toEqual([10, 20, 30]);
@@ -180,6 +184,66 @@ describe("createRendererAdapter", () => {
     expect(actorInstances[0]!.pointSize).toBe(2.5);
     expect(mapperInstances[0]!.scaleFactor).toBe(2);
     expect(scheduleRender).toHaveBeenCalledTimes(1);
+  });
+
+  it("applies different tile prefixes without actor or payload churn", () => {
+    const { adapter, renderer, scheduleRender } = makeAdapter();
+    add(
+      adapter,
+      { key: KEY_A, tile: tile([0, 0, 0], 8) },
+      { key: KEY_B, tile: tile([1, 0, 0], 3) },
+    );
+    const actors = [...actorInstances];
+    const polyData = [...polyDataInstances];
+
+    scheduleRender.mockClear();
+    adapter.applyDrawPlan({
+      entries: [
+        { key: KEY_A, pointCount: 8 },
+        { key: KEY_B, pointCount: 1 },
+      ],
+    });
+
+    expect(mapperInstances.map((mapper) => mapper.maximumPointCount)).toEqual([
+      8, 1,
+    ]);
+    expect(adapter.stats()).toMatchObject({
+      submittedTiles: 2,
+      drawnTiles: 2,
+      drawnPoints: 9,
+      drawnFraction: 9 / 11,
+    });
+    expect(actorInstances).toEqual(actors);
+    expect(polyDataInstances).toEqual(polyData);
+    expect(renderer.addActor).toHaveBeenCalledTimes(2);
+    expect(renderer.removeActor).not.toHaveBeenCalled();
+    expect(scheduleRender).toHaveBeenCalledTimes(1);
+
+    scheduleRender.mockClear();
+    adapter.applyDrawPlan({
+      entries: [
+        { key: KEY_A, pointCount: 8 },
+        { key: KEY_B, pointCount: 1 },
+      ],
+    });
+    expect(scheduleRender).not.toHaveBeenCalled();
+  });
+
+  it("remembers a draw plan for tiles that arrive later", () => {
+    const { adapter } = makeAdapter();
+    adapter.applyDrawPlan({
+      entries: [{ key: KEY_A, pointCount: 3 }],
+    });
+
+    add(
+      adapter,
+      { key: KEY_A, tile: tile([0, 0, 0], 8) },
+      { key: KEY_B, tile: tile([1, 0, 0], 8) },
+    );
+    expect(mapperInstances.map((mapper) => mapper.maximumPointCount)).toEqual([
+      3, 0,
+    ]);
+    expect(adapter.stats()).toMatchObject({ drawnTiles: 1, drawnPoints: 3 });
   });
 
   it("dispose releases everything and is idempotent", () => {
@@ -364,9 +428,9 @@ describe("adapter resource pool", () => {
       pooledTiles: 0,
     });
 
-    // Deactivating a cloud sends exactly this: removals and nothing else. The
-    // pool used to be trimmed only while adding, so these actors stayed on the
-    // GPU until some other cloud happened to add a tile.
+    // Deactivating a cloud sends exactly this: removals and nothing else.
+    // Trimming the pool only while adding would leave these actors on the GPU
+    // until some other cloud happened to add a tile.
     drop(adapter, KEY_A, KEY_B);
 
     expect(adapter.stats()).toMatchObject({
@@ -582,6 +646,7 @@ const cameraView = (viewProj: number[]): PerspectiveCameraView => ({
   viewProj,
   position: [0, 0, 0],
   fovY: Math.PI / 2,
+  viewportWidthCssPx: 100,
   viewportHeightCssPx: 100,
 });
 
@@ -649,6 +714,7 @@ describe("adapter driven by a live controller", () => {
         }
         adapter.applyBatch(batch);
       },
+      onDrawPlan: (plan) => adapter.applyDrawPlan(plan),
       scheduleRender: () => {},
       pointBudget: 500,
       selectionDelayMs: 0,

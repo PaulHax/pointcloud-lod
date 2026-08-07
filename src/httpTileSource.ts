@@ -11,6 +11,7 @@
  */
 
 import { keyFromString, keyToString, type VoxelKey } from "./octree";
+import { orderTileForProgressiveDrawing } from "./progressiveOrder";
 import type {
   LoadOptions,
   NodeInfo,
@@ -131,11 +132,17 @@ export const createHttpTileSource = (
     },
 
     async loadTile(key: VoxelKey, opts?: LoadOptions): Promise<TileData> {
+      const keyString = keyToString(key);
       const response = await request(
-        `${endpoint}/tile/${keyToString(key)}.bin`,
+        `${endpoint}/tile/${keyString}.bin`,
         opts?.signal,
       );
-      return parsePct1(await response.arrayBuffer());
+      // The parser is left free of the ordering policy: PCT1 records are what
+      // the server wrote, and progressive order is what the source promises.
+      return orderTileForProgressiveDrawing(
+        parsePct1(await response.arrayBuffer()),
+        keyString,
+      );
     },
   };
 };

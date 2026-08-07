@@ -2,6 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createViewGovernor, type ViewGovernor } from "./viewGovernor";
 
+const memberOptions = (
+  setPointBudget: (points: number) => void,
+  setDensityFraction: (densityFraction: number) => void = vi.fn(),
+) => ({ setPointBudget, setDensityFraction });
+
 /**
  * The clock frames are reported with. It tracks the fake timers so advancing
  * them also advances the reported timeline — that is how a test lets a
@@ -27,7 +32,9 @@ const frames = (
 
 /** Take and immediately drop a motion reference, then let the view settle. */
 const moveAndSettle = (governor: ViewGovernor, settleMs: number): void => {
-  governor.beginMotion("explicit").release();
+  const motion = governor.beginMotion("explicit");
+  governor.recordCameraChange();
+  motion.release();
   vi.advanceTimersByTime(settleMs);
 };
 
@@ -51,8 +58,8 @@ describe("createViewGovernor", () => {
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
     const a = vi.fn();
     const b = vi.fn();
-    governor.register({ setPointBudget: a }).update({ projectedImportance: 1 });
-    governor.register({ setPointBudget: b }).update({ projectedImportance: 3 });
+    governor.register(memberOptions(a)).update({ projectedImportance: 1 });
+    governor.register(memberOptions(b)).update({ projectedImportance: 3 });
     expect(a).toHaveBeenLastCalledWith(250_000);
     expect(b).toHaveBeenLastCalledWith(750_000);
   });
@@ -64,11 +71,9 @@ describe("createViewGovernor", () => {
     // Importance is screen-space error in CSS px, so a distant cloud reports
     // well under 1 while a fully culled one reports exactly 0.
     governor
-      .register({ setPointBudget: showing })
+      .register(memberOptions(showing))
       .update({ projectedImportance: 0.04 });
-    governor
-      .register({ setPointBudget: culled })
-      .update({ projectedImportance: 0 });
+    governor.register(memberOptions(culled)).update({ projectedImportance: 0 });
 
     const showingBudget: number = showing.mock.calls.at(-1)![0];
     const culledBudget: number = culled.mock.calls.at(-1)![0];
@@ -80,8 +85,8 @@ describe("createViewGovernor", () => {
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
     const a = vi.fn();
     const b = vi.fn();
-    governor.register({ setPointBudget: a });
-    governor.register({ setPointBudget: b });
+    governor.register(memberOptions(a));
+    governor.register(memberOptions(b));
     expect(a).toHaveBeenLastCalledWith(500_000);
     expect(b).toHaveBeenLastCalledWith(500_000);
   });
@@ -90,11 +95,9 @@ describe("createViewGovernor", () => {
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
     const quiet = vi.fn();
     const dominant = vi.fn();
+    governor.register(memberOptions(quiet)).update({ projectedImportance: 1 });
     governor
-      .register({ setPointBudget: quiet })
-      .update({ projectedImportance: 1 });
-    governor
-      .register({ setPointBudget: dominant })
+      .register(memberOptions(dominant))
       .update({ projectedImportance: 1_000_000 });
 
     const quietBudget: number = quiet.mock.calls.at(-1)![0];
@@ -110,10 +113,11 @@ describe("createViewGovernor", () => {
 describe("createViewGovernor motion references", () => {
   it("holds the moving regime until the last source releases", () => {
     const governor = createViewGovernor({ interactionSettleMs: 100 });
-    governor.register({ setPointBudget: vi.fn() });
+    governor.register(memberOptions(vi.fn()));
 
     const gesture = governor.beginMotion("explicit");
     const playback = governor.beginMotion("inferred");
+    governor.recordCameraChange();
     expect(governor.stats().regime).toBe("interaction");
     expect(governor.stats().motion).toMatchObject({
       explicitReferences: 1,
@@ -144,6 +148,7 @@ describe("createViewGovernor motion references", () => {
     const governor = createViewGovernor({ interactionSettleMs: 100 });
     const held = governor.beginMotion("inferred");
     const other = governor.beginMotion("inferred");
+    governor.recordCameraChange();
     held.release();
     held.release();
     expect(governor.stats().motion.inferredReferences).toBe(1);
@@ -174,9 +179,10 @@ describe("createViewGovernor stationary refinement", () => {
       maxIncreaseStep: 1,
     });
     const setBudget = vi.fn();
-    governor.register({ setPointBudget: setBudget });
+    governor.register(memberOptions(setBudget));
 
     const gesture = governor.beginMotion("explicit");
+    governor.recordCameraChange();
     frames(governor, 1, 1); // fast moving frame: the moving track doubles
     expect(setBudget).toHaveBeenLastCalledWith(2_000_000);
 
@@ -193,6 +199,70 @@ describe("createViewGovernor stationary refinement", () => {
     expect(stats.lastAdjustment).toMatchObject({ reason: "seeded" });
   });
 
+  it("jumps stationary refinement back to the density it last sustained", () => {
+    const governor = createViewGovernor({
+      initialBudget: 1_000_000,
+      interactionSettleMs: 100,
+    });
+    const setBudget = vi.fn();
+    governor.register(memberOptions(setBudget));
+
+    // Two consecutive missed frames crash the moving budget mid-gesture.
+    const gesture = governor.beginMotion("explicit");
+    governor.recordCameraChange();
+    governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
+    governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
+    expect(governor.stats().trackBudget).toBe(500_000);
+
+    gesture.release();
+    vi.advanceTimersByTime(100);
+
+    // Settling re-seeds from the stationary track's own budget — capacity
+    // this machine already proved at the stationary target — not from the
+    // crashed moving budget it would otherwise spend seconds climbing out of.
+    const stats = governor.stats();
+    expect(stats.regime).toBe("stationary");
+    expect(stats.trackBudget).toBe(1_000_000);
+    expect(stats.lastAdjustment).toMatchObject({ reason: "seeded" });
+  });
+
+  it("recovers a crashed moving budget from the settled track", () => {
+    const governor = createViewGovernor({
+      initialBudget: 1_000_000,
+      interactionSettleMs: 100,
+      minSamples: 1,
+      cooldownMs: 0,
+      maxIncreaseStep: 1,
+    });
+    const setBudget = vi.fn();
+    governor.register(memberOptions(setBudget));
+
+    // The moving track crashes: the first miss halves through the damped
+    // path (minSamples 1), the second through the emergency cut.
+    const gesture = governor.beginMotion("explicit");
+    governor.recordCameraChange();
+    governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
+    governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
+    expect(governor.stats().trackBudget).toBe(250_000);
+
+    // The settled track then proves out a far higher density. The moving
+    // track's own frames can never vote it back up — a healthy gesture on a
+    // vsync-floored display reads exactly the display cadence, inside the
+    // moving dead-band — so this is the only way it recovers.
+    gesture.release();
+    vi.advanceTimersByTime(100);
+    frames(governor, 1, 3);
+    expect(governor.stats().trackBudget).toBe(8_000_000);
+
+    // A fresh gesture inherits a floor from that recovery instead of drawing
+    // the crashed density for the rest of the session.
+    governor.beginMotion("explicit");
+    const stats = governor.stats();
+    expect(stats.regime).toBe("interaction");
+    expect(stats.trackBudget).toBe(2_000_000);
+    expect(stats.lastAdjustment).toMatchObject({ reason: "seeded" });
+  });
+
   it("adapts on a host clock that is not the wall clock", () => {
     // `HostFrameMetrics.now` may be any epoch. A host that stamps frames with
     // performance.now() — the clock it already measures frame time with —
@@ -204,7 +274,7 @@ describe("createViewGovernor stationary refinement", () => {
       initialBudget: 1_000_000,
       interactionSettleMs: 750,
     });
-    governor.register({ setPointBudget: vi.fn() }).update({
+    governor.register(memberOptions(vi.fn())).update({
       projectedImportance: 1,
     });
 
@@ -217,6 +287,7 @@ describe("createViewGovernor stationary refinement", () => {
     };
 
     const gesture = governor.beginMotion("explicit");
+    governor.recordCameraChange();
     hostFrames(200);
     expect(governor.stats().regime).toBe("interaction");
     // Wedged in a foreign-epoch cooldown, this budget never moves at all.
@@ -244,14 +315,16 @@ describe("createViewGovernor stationary refinement", () => {
       initialBudget: 1_000_000,
       interactionSettleMs: 750,
     });
-    governor.register({ setPointBudget: vi.fn() }).update({
+    governor.register(memberOptions(vi.fn())).update({
       projectedImportance: 1,
     });
 
-    // The one stamped frame, and it is slow enough to force an emergency cut
+    // The only stamped frames, slow enough in a row to force an emergency cut
     // while the camera moves: that is what arms the cooldown.
     const gesture = governor.beginMotion("explicit");
+    governor.recordCameraChange();
     governor.recordHostFrame({ hostFrameMs: 400, now: 0 });
+    governor.recordHostFrame({ hostFrameMs: 400, now: 16 });
     const cut = governor.stats().trackBudget;
     expect(cut).toBeLessThan(1_000_000);
 
@@ -280,7 +353,7 @@ describe("createViewGovernor stationary refinement", () => {
   it("raises quality gradually while stationary frames are fast", () => {
     const governor = createViewGovernor(FAST_ADAPT);
     const setBudget = vi.fn();
-    governor.register({ setPointBudget: setBudget });
+    governor.register(memberOptions(setBudget));
     moveAndSettle(governor, 100);
 
     frames(governor, 1, 8);
@@ -296,7 +369,7 @@ describe("createViewGovernor stationary refinement", () => {
 
   it("lowers quality while stationary frames are slow", () => {
     const governor = createViewGovernor(FAST_ADAPT);
-    governor.register({ setPointBudget: vi.fn() });
+    governor.register(memberOptions(vi.fn()));
     moveAndSettle(governor, 100);
 
     // 60ms is past the 39.6ms stationary dead-band but is not a gesture, so it
@@ -313,7 +386,7 @@ describe("createViewGovernor stationary refinement", () => {
   it("converges inside hysteresis and then stops asking for frames", () => {
     // A device where cost is ~ budget: 33ms at 2M points.
     const governor = createViewGovernor(FAST_ADAPT);
-    governor.register({ setPointBudget: vi.fn() });
+    governor.register(memberOptions(vi.fn()));
     moveAndSettle(governor, 100);
     const frameMsFor = (points: number): number => points / 60_606;
 
@@ -342,28 +415,49 @@ describe("createViewGovernor stationary refinement", () => {
     expect(governor.stats().aggregateBudget).toBe(settled);
   });
 
-  it("keeps asking for frames while tiles and pages are still landing", () => {
+  it("does not ask for unchanged frames solely because work is pending", () => {
     const governor = createViewGovernor(FAST_ADAPT);
-    const member = governor.register({ setPointBudget: vi.fn() });
+    const member = governor.register(memberOptions(vi.fn()));
     moveAndSettle(governor, 100);
     frames(governor, 33, 8); // straight into the dead-band
     expect(governor.needsFrame()).toBe(false);
 
     member.update({ physicalTileOperations: 2 });
-    expect(governor.needsFrame()).toBe(true);
+    expect(governor.needsFrame()).toBe(false);
     member.update({
       physicalTileOperations: 0,
       physicalHierarchyOperations: 1,
     });
-    expect(governor.needsFrame()).toBe(true);
+    expect(governor.needsFrame()).toBe(false);
     member.update({ physicalHierarchyOperations: 0 });
     expect(governor.needsFrame()).toBe(false);
+  });
+
+  it("resumes an unconverged track when required work drains", () => {
+    const governor = createViewGovernor(FAST_ADAPT);
+    const member = governor.register(memberOptions(vi.fn()));
+    moveAndSettle(governor, 100);
+
+    expect(governor.needsFrame()).toBe(true);
+    member.update({ workPending: true });
+    expect(governor.needsFrame()).toBe(false);
+
+    governor.recordHostFrame({ hostFrameMs: 1, now: tick() });
+    expect(governor.stats().capacitySamples).toMatchObject({
+      eligible: 0,
+      rejected: 1,
+    });
+    expect(governor.needsFrame()).toBe(false);
+
+    member.update({ workPending: false });
+    expect(governor.needsFrame()).toBe(true);
   });
 
   it("returns to the moving track the moment motion resumes", () => {
     const governor = createViewGovernor(FAST_ADAPT);
     const setBudget = vi.fn();
-    governor.register({ setPointBudget: setBudget });
+    const setDensity = vi.fn();
+    governor.register(memberOptions(setBudget, setDensity));
     moveAndSettle(governor, 100);
     frames(governor, 1, 16); // stationary refines up to 1.5625M
     expect(governor.stats().aggregateBudget).toBe(1_562_500);
@@ -372,18 +466,21 @@ describe("createViewGovernor stationary refinement", () => {
     const stats = governor.stats();
     expect(stats.regime).toBe("interaction");
     expect(stats.targetFrameTimeMs).toBe(16);
-    // The moving track kept its own learned budget; the refined stationary one
-    // does not follow the camera into motion.
+    // The moving track kept its own learned draw budget, but the refined
+    // stationary selection remains resident and is thinned in place.
     expect(stats.aggregateBudget).toBe(1_000_000);
-    expect(setBudget).toHaveBeenLastCalledWith(1_000_000);
+    expect(stats.selectionBudget).toBe(1_562_500);
+    expect(setBudget).toHaveBeenLastCalledWith(1_562_500);
+    expect(setDensity).toHaveBeenLastCalledWith(0.64);
     expect(governor.needsFrame()).toBe(true);
   });
 
   it("decides each regime only from frames measured in that regime", () => {
     const governor = createViewGovernor(FAST_ADAPT);
-    governor.register({ setPointBudget: vi.fn() });
+    governor.register(memberOptions(vi.fn()));
 
     const gesture = governor.beginMotion("explicit");
+    governor.recordCameraChange();
     // 30ms is slow for the 16ms moving target and squarely inside the settled
     // dead-band: if these frames leaked, the stationary track would hold.
     frames(governor, 30, 7);
@@ -405,9 +502,10 @@ describe("createViewGovernor stationary refinement", () => {
 describe("createViewGovernor settle window", () => {
   it("does not let cheap settle frames grow the moving budget", () => {
     const governor = createViewGovernor(FAST_ADAPT);
-    governor.register({ setPointBudget: vi.fn() });
+    governor.register(memberOptions(vi.fn()));
 
     const gesture = governor.beginMotion("explicit");
+    governor.recordCameraChange();
     // 16 ms is the moving target, squarely inside the dead-band: the gesture
     // itself asks for no change, so anything that moves the budget below came
     // from the settle window.
@@ -429,7 +527,7 @@ describe("createViewGovernor settle window", () => {
 
   it("keeps the moving budget stable across gesture and hover cycles", () => {
     const governor = createViewGovernor(FAST_ADAPT);
-    governor.register({ setPointBudget: vi.fn() });
+    governor.register(memberOptions(vi.fn()));
 
     // What each gesture starts from. Cheap hover frames counted as moving
     // frames would ratchet this up every cycle, and the user would feel it as
@@ -437,6 +535,7 @@ describe("createViewGovernor settle window", () => {
     const opening: number[] = [];
     for (let cycle = 0; cycle < 5; cycle += 1) {
       const gesture = governor.beginMotion("explicit");
+      governor.recordCameraChange();
       opening.push(governor.stats().trackBudget);
       frames(governor, 16, 8); // sustained exactly on the moving target
       gesture.release();
@@ -451,9 +550,11 @@ describe("createViewGovernor settle window", () => {
 
   it("resumes measuring the settled track once the window closes", () => {
     const governor = createViewGovernor(FAST_ADAPT);
-    governor.register({ setPointBudget: vi.fn() });
+    governor.register(memberOptions(vi.fn()));
 
-    governor.beginMotion("explicit").release();
+    const motion = governor.beginMotion("explicit");
+    governor.recordCameraChange();
+    motion.release();
     frames(governor, 1, 40); // discarded: still inside the settle window
     vi.advanceTimersByTime(100);
     expect(governor.stats().regime).toBe("stationary");
@@ -470,39 +571,122 @@ describe("createViewGovernor settle window", () => {
 });
 
 describe("createViewGovernor emergency response", () => {
-  it("reduces immediately on a severely missed frame while moving", () => {
-    const governor = createViewGovernor({ initialBudget: 1_000_000 });
+  it("cuts and restores draw density without changing the selected budget", () => {
+    const governor = createViewGovernor({
+      initialBudget: 1_000_000,
+      interactionSettleMs: 100,
+    });
     const setBudget = vi.fn();
-    governor.register({ setPointBudget: setBudget });
-    governor.beginMotion("explicit");
+    const setDensity = vi.fn();
+    governor.register(memberOptions(setBudget, setDensity));
+    setBudget.mockClear();
+    setDensity.mockClear();
+
+    const motion = governor.beginMotion("explicit");
+    governor.recordCameraChange();
     governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
-    expect(setBudget).toHaveBeenLastCalledWith(500_000);
+    governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
+    expect(setBudget).not.toHaveBeenCalled();
+    expect(setDensity).toHaveBeenLastCalledWith(0.5);
+    expect(governor.stats()).toMatchObject({
+      aggregateBudget: 500_000,
+      selectionBudget: 1_000_000,
+    });
+
+    motion.release();
+    vi.advanceTimersByTime(99);
+    expect(setDensity).toHaveBeenLastCalledWith(0.5);
+    vi.advanceTimersByTime(1);
+    expect(setBudget).not.toHaveBeenCalled();
+    expect(setDensity).toHaveBeenLastCalledWith(1);
   });
 
-  it("halves the budget on severe input delay while moving", () => {
+  it("reduces on the second consecutive severely missed frame", () => {
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
     const setBudget = vi.fn();
-    governor.register({ setPointBudget: setBudget });
+    const setDensity = vi.fn();
+    governor.register(memberOptions(setBudget, setDensity));
+    governor.beginMotion("explicit");
+    // Displayed cadence quantizes to whole vsyncs, so one missed 60 Hz frame
+    // reads as ~33 ms — past 2× the moving target. An isolated miss is a
+    // hitch (a tile upload, a GC pause), not a sustained cadence: it must be
+    // measured, never answered with a halving.
+    governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
+    expect(setDensity).not.toHaveBeenCalledWith(0.5);
+    expect(governor.stats().samples).toBe(1);
+    governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
+    expect(setBudget).toHaveBeenLastCalledWith(1_000_000);
+    expect(setDensity).toHaveBeenLastCalledWith(0.5);
+  });
+
+  it("does not cut when a healthy frame interrupts the missed ones", () => {
+    const governor = createViewGovernor({ initialBudget: 1_000_000 });
+    const setBudget = vi.fn();
+    const setDensity = vi.fn();
+    governor.register(memberOptions(setBudget, setDensity));
+    governor.beginMotion("explicit");
+    governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
+    governor.recordHostFrame({ hostFrameMs: 10, now: tick() });
+    governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
+    expect(setDensity).not.toHaveBeenCalledWith(0.5);
+    // The misses were measured, not discarded: the damped controller answers
+    // a scene that hitches every other frame.
+    expect(governor.stats().samples).toBe(3);
+  });
+
+  it("does not carry a missed frame across gesture bursts", () => {
+    const governor = createViewGovernor({
+      initialBudget: 1_000_000,
+      interactionSettleMs: 100,
+    });
+    const setBudget = vi.fn();
+    const setDensity = vi.fn();
+    governor.register(memberOptions(setBudget, setDensity));
+
+    const first = governor.beginMotion("explicit");
+    governor.recordCameraChange();
+    governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
+    first.release();
+    vi.advanceTimersByTime(100);
+
+    // A fresh burst from rest starts with a clean streak: its first missed
+    // frame is this gesture's isolated hitch, not the second half of a pair
+    // split across two gestures.
+    governor.beginMotion("explicit");
+    governor.recordHostFrame({ hostFrameMs: 80, now: tick() });
+    expect(setDensity).not.toHaveBeenCalledWith(0.5);
+  });
+
+  it("halves the budget on sustained severe input delay while moving", () => {
+    const governor = createViewGovernor({ initialBudget: 1_000_000 });
+    const setBudget = vi.fn();
+    const setDensity = vi.fn();
+    governor.register(memberOptions(setBudget, setDensity));
     governor.beginMotion("explicit");
     // 5ms host frame is well under target*2, so only the input-delay signal
     // can trigger the cut — this isolates the severe-input branch.
     governor.recordHostFrame({ hostFrameMs: 5, inputDelayMs: 80, now: tick() });
-    expect(setBudget).toHaveBeenLastCalledWith(500_000);
+    governor.recordHostFrame({ hostFrameMs: 5, inputDelayMs: 80, now: tick() });
+    expect(setBudget).toHaveBeenLastCalledWith(1_000_000);
+    expect(setDensity).toHaveBeenLastCalledWith(0.5);
   });
 
-  it("halves the budget on a severe long task while moving", () => {
+  it("halves the budget on a sustained severe long task while moving", () => {
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
     const setBudget = vi.fn();
-    governor.register({ setPointBudget: setBudget });
+    const setDensity = vi.fn();
+    governor.register(memberOptions(setBudget, setDensity));
     governor.beginMotion("inferred");
     governor.recordHostFrame({ hostFrameMs: 5, longTaskMs: 120, now: tick() });
-    expect(setBudget).toHaveBeenLastCalledWith(500_000);
+    governor.recordHostFrame({ hostFrameMs: 5, longTaskMs: 120, now: tick() });
+    expect(setBudget).toHaveBeenLastCalledWith(1_000_000);
+    expect(setDensity).toHaveBeenLastCalledWith(0.5);
   });
 
   it("feeds a severely slow stationary frame through the damped path", () => {
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
     const setBudget = vi.fn();
-    governor.register({ setPointBudget: setBudget });
+    governor.register(memberOptions(setBudget));
 
     governor.recordHostFrame({ hostFrameMs: 90, longTaskMs: 120, now: tick() });
     expect(governor.stats().aggregateBudget).toBe(1_000_000);
@@ -518,7 +702,7 @@ describe("createViewGovernor emergency response", () => {
       minSamples: 1,
     });
     const setBudget = vi.fn();
-    governor.register({ setPointBudget: setBudget });
+    governor.register(memberOptions(setBudget));
     governor.beginMotion("explicit");
 
     governor.recordHostFrame({ hostFrameMs: 80, now: 0 });
@@ -536,7 +720,7 @@ describe("createViewGovernor emergency response", () => {
       initialBudget: 1_000_000,
       cooldownMs: 0,
     });
-    governor.register({ setPointBudget: vi.fn() });
+    governor.register(memberOptions(vi.fn()));
 
     for (let index = 0; index < 80; index += 1) {
       governor.recordHostFrame({
@@ -553,30 +737,33 @@ describe("createViewGovernor emergency response", () => {
   it("does not cut the budget on a fast frame with mild input delay", () => {
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
     const setBudget = vi.fn();
-    governor.register({ setPointBudget: setBudget });
+    const setDensity = vi.fn();
+    governor.register(memberOptions(setBudget, setDensity));
     // The emergency cut only runs in the moving regime, so hold a motion
     // reference: without one the mild-delay assertion passes whatever the
     // threshold says, because the branch under test is never reached.
     const motion = governor.beginMotion("explicit");
     governor.recordHostFrame({ hostFrameMs: 5, inputDelayMs: 20, now: tick() });
-    expect(setBudget).not.toHaveBeenCalledWith(500_000);
-    // The same frame with a severe delay must cut — this is what proves the
-    // mild case exercised a live branch rather than a skipped one.
+    expect(setDensity).not.toHaveBeenCalledWith(0.5);
+    // The same frame with a sustained severe delay must cut — this is what
+    // proves the mild case exercised a live branch rather than a skipped one.
     governor.recordHostFrame({ hostFrameMs: 5, inputDelayMs: 80, now: tick() });
-    expect(setBudget).toHaveBeenCalledWith(500_000);
+    governor.recordHostFrame({ hostFrameMs: 5, inputDelayMs: 80, now: tick() });
+    expect(setDensity).toHaveBeenCalledWith(0.5);
     motion.release();
   });
 
   it("keeps the moving window across bursts inside the settle window", () => {
     const governor = createViewGovernor(FAST_ADAPT);
     const setBudget = vi.fn();
-    governor.register({ setPointBudget: setBudget });
+    governor.register(memberOptions(setBudget));
     // Eight begin/release pairs with one fast frame each — the shape wheel
     // ticks and scrub steps arrive in. Restarting the moving track on every
     // burst would clear its window before `minSamples` frames could ever
     // accumulate, so the moving regime would never adapt at all.
     for (let burst = 0; burst < 8; burst += 1) {
       const motion = governor.beginMotion("explicit");
+      governor.recordCameraChange();
       governor.recordHostFrame({ hostFrameMs: 5, now: tick() });
       motion.release();
       vi.advanceTimersByTime(50);
@@ -589,7 +776,7 @@ describe("createViewGovernor emergency response", () => {
   it("does not reselect for ceiling jitter smaller than the dead-band", () => {
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
     const setBudget = vi.fn();
-    const member = governor.register({ setPointBudget: setBudget });
+    const member = governor.register(memberOptions(setBudget));
     member.update({ memoryCeilingPoints: 900_000 });
     expect(setBudget).toHaveBeenLastCalledWith(900_000);
     const applied = setBudget.mock.calls.length;
@@ -614,7 +801,7 @@ describe("createViewGovernor emergency response", () => {
       cooldownMs: 0,
     });
     const setBudget = vi.fn();
-    const member = governor.register({ setPointBudget: setBudget });
+    const member = governor.register(memberOptions(setBudget));
     member.update({ memoryCeilingPoints: 500_000 });
     // Fast frames walk the budget onto the ceiling; once pinned, the track
     // reports "clamped", which is convergence for as long as the bound stands.
@@ -638,11 +825,103 @@ describe("createViewGovernor emergency response", () => {
       maxDecreaseStep: 0.25,
     });
     const setBudget = vi.fn();
-    governor.register({ setPointBudget: setBudget });
+    governor.register(memberOptions(setBudget));
     // 24ms of VTK paint is 48ms of frame at half the frame — past the 39.6ms
     // stationary dead-band even though the host frame itself was 10ms.
     governor.recordHostFrame({ hostFrameMs: 10, vtkFrameMs: 24, now: tick() });
     expect(setBudget).toHaveBeenLastCalledWith(750_000);
+  });
+});
+
+describe("createViewGovernor capacity eligibility", () => {
+  it("keeps a contaminated 500 ms frame out of lasting capacity", () => {
+    const governor = createViewGovernor({
+      initialBudget: 1_000_000,
+      minSamples: 1,
+      cooldownMs: 0,
+    });
+    governor.register(memberOptions(vi.fn()));
+
+    governor.recordCapacitySample({
+      frameMs: 500,
+      regime: "stationary",
+      eligible: false,
+      now: tick(),
+    });
+
+    expect(governor.stats()).toMatchObject({
+      trackBudget: 1_000_000,
+      samples: 0,
+      capacitySamples: { eligible: 0, rejected: 1, lastEligible: false },
+    });
+  });
+
+  it("derives fallback rejection from required core work", () => {
+    const governor = createViewGovernor({
+      initialBudget: 1_000_000,
+      minSamples: 1,
+      cooldownMs: 0,
+    });
+    const member = governor.register(memberOptions(vi.fn()));
+    member.update({ workPending: true });
+
+    governor.recordHostFrame({ hostFrameMs: 500, now: tick() });
+
+    expect(governor.stats()).toMatchObject({
+      trackBudget: 1_000_000,
+      samples: 0,
+      capacitySamples: { eligible: 0, rejected: 1, lastEligible: false },
+    });
+  });
+
+  it("still reduces capacity on a sustained clean GPU cost", () => {
+    const governor = createViewGovernor({
+      initialBudget: 1_000_000,
+      minSamples: 2,
+      cooldownMs: 0,
+    });
+    governor.register(memberOptions(vi.fn()));
+
+    for (let sample = 0; sample < 2; sample += 1) {
+      governor.recordCapacitySample({
+        frameMs: 80,
+        regime: "stationary",
+        eligible: true,
+        now: tick(),
+      });
+    }
+
+    expect(governor.stats()).toMatchObject({
+      trackBudget: 500_000,
+      capacitySamples: { eligible: 2, rejected: 0, lastEligible: true },
+    });
+  });
+
+  it("reports input, camera stability, and required work independently", () => {
+    const governor = createViewGovernor({ interactionSettleMs: 100 });
+    const member = governor.register(memberOptions(vi.fn()));
+    const motion = governor.beginMotion("explicit");
+    governor.recordCameraChange();
+    member.update({ workPending: true });
+
+    expect(governor.stats().activity).toEqual({
+      inputActive: true,
+      cameraStable: false,
+      workPending: true,
+      measurementEligible: false,
+    });
+
+    vi.advanceTimersByTime(100);
+    member.update({ workPending: false });
+    expect(governor.stats().activity).toEqual({
+      inputActive: true,
+      cameraStable: true,
+      workPending: false,
+      measurementEligible: true,
+    });
+
+    motion.release();
+    expect(governor.stats().regime).toBe("stationary");
   });
 });
 
@@ -653,7 +932,7 @@ describe("createViewGovernor ceilings", () => {
       maxBudget: 800_000,
     });
     const setBudget = vi.fn();
-    const member = governor.register({ setPointBudget: setBudget });
+    const member = governor.register(memberOptions(setBudget));
     member.update({ memoryCeilingPoints: 5_000_000 });
 
     const stats = governor.stats();
@@ -669,7 +948,7 @@ describe("createViewGovernor ceilings", () => {
       maxBudget: 5_000_000,
     });
     const setBudget = vi.fn();
-    const member = governor.register({ setPointBudget: setBudget });
+    const member = governor.register(memberOptions(setBudget));
     member.update({ memoryCeilingPoints: 900_000 });
 
     const stats = governor.stats();
@@ -681,7 +960,7 @@ describe("createViewGovernor ceilings", () => {
   it("leaves memory as the only ceiling when no maximum is configured", () => {
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
     const setBudget = vi.fn();
-    const member = governor.register({ setPointBudget: setBudget });
+    const member = governor.register(memberOptions(setBudget));
     expect(governor.stats().configuredMaxPoints).toBeNull();
     expect(governor.stats().memoryCeilingPoints).toBeNull();
     expect(governor.stats().aggregateBudget).toBe(1_000_000);
@@ -695,11 +974,11 @@ describe("createViewGovernor ceilings", () => {
   it("stops growing the track once the memory ceiling binds", () => {
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
     const setBudget = vi.fn();
-    const member = governor.register({ setPointBudget: setBudget });
+    const member = governor.register(memberOptions(setBudget));
     member.update({ memoryCeilingPoints: 1_200_000 });
 
     // Frames far under target: on a machine with headroom the loop would grow
-    // by maxIncreaseStep for ever, because only the aggregate was clamped.
+    // by maxIncreaseStep for ever if only the aggregate were clamped.
     for (let round = 0; round < 30; round += 1) {
       frames(governor, 1, 10);
       vi.advanceTimersByTime(500);
@@ -714,7 +993,7 @@ describe("createViewGovernor ceilings", () => {
 
   it("stops asking for frames when only memory holds the budget down", () => {
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
-    const member = governor.register({ setPointBudget: vi.fn() });
+    const member = governor.register(memberOptions(vi.fn()));
     member.update({
       memoryCeilingPoints: 1_200_000,
       physicalTileOperations: 0,
@@ -735,7 +1014,7 @@ describe("createViewGovernor ceilings", () => {
   it("walks a budget grown past a newly reported memory ceiling back down", () => {
     const governor = createViewGovernor({ initialBudget: 4_000_000 });
     const setBudget = vi.fn();
-    const member = governor.register({ setPointBudget: setBudget });
+    const member = governor.register(memberOptions(setBudget));
     member.update({ memoryCeilingPoints: 500_000 });
 
     // The member never sees more than memory allows, even before the loop
@@ -749,13 +1028,88 @@ describe("createViewGovernor ceilings", () => {
     expect(governor.stats().trackBudget).toBe(500_000);
   });
 
+  it("stops the loop at what the view can draw, not at what memory allows", () => {
+    // A cloud drawing everything its camera asks for renders no slower for a
+    // larger budget, so every frame reads as headroom. Bounded only by
+    // memory, the loop climbs the whole way to a ceiling it can never spend
+    // — and `needsFrame()` keeps the host repainting an unchanging image for
+    // the length of the climb.
+    const governor = createViewGovernor(FAST_ADAPT);
+    const member = governor.register(memberOptions(vi.fn()));
+    member.update({
+      memoryCeilingPoints: 100_000_000,
+      demandPoints: 2_000_000,
+    });
+
+    for (let round = 0; round < 40; round += 1) {
+      frames(governor, 1, 10);
+      vi.advanceTimersByTime(50);
+    }
+
+    const stats = governor.stats();
+    expect(stats.trackBudget).toBe(2_000_000);
+    expect(stats.activeConstraint).toBe("demand");
+    expect(stats.members[0]?.activeConstraint).toBe("demand");
+    expect(governor.needsFrame()).toBe(false);
+  });
+
+  it("refines again once the camera asks for more", () => {
+    const governor = createViewGovernor(FAST_ADAPT);
+    const member = governor.register(memberOptions(vi.fn()));
+    member.update({
+      memoryCeilingPoints: 100_000_000,
+      demandPoints: 2_000_000,
+    });
+    for (let round = 0; round < 40; round += 1) {
+      frames(governor, 1, 10);
+      vi.advanceTimersByTime(50);
+    }
+    expect(governor.needsFrame()).toBe(false);
+
+    // Moving closer asks more of the cloud, so the bound the budget was
+    // pinned to lifts and the loop owes the view the frames refinement needs.
+    member.update({ demandPoints: 20_000_000 });
+    expect(governor.needsFrame()).toBe(true);
+
+    for (let round = 0; round < 40; round += 1) {
+      frames(governor, 1, 10);
+      vi.advanceTimersByTime(50);
+    }
+    expect(governor.stats().trackBudget).toBeGreaterThan(2_000_000);
+  });
+
+  it("bounds the loop by each cloud's own limit, not by either total", () => {
+    // One cloud bound by memory and another bound by demand can together draw
+    // far less than the tighter of the two sums suggests: summing demand
+    // gives 21,000,000 and summing memory gives 21,000,000, while the view
+    // can only ever put 2,000,000 points on screen. A loop handed either
+    // total climbs through the whole difference.
+    const governor = createViewGovernor(FAST_ADAPT);
+    governor.register({ ...memberOptions(vi.fn()), id: "satisfied" }).update({
+      projectedImportance: 1,
+      memoryCeilingPoints: 20_000_000,
+      demandPoints: 1_000_000,
+    });
+    governor.register({ ...memberOptions(vi.fn()), id: "starved" }).update({
+      projectedImportance: 1,
+      memoryCeilingPoints: 1_000_000,
+      demandPoints: 20_000_000,
+    });
+
+    for (let round = 0; round < 40; round += 1) {
+      frames(governor, 1, 10);
+      vi.advanceTimersByTime(50);
+    }
+    expect(governor.stats().trackBudget).toBe(2_000_000);
+  });
+
   it("lets memory hold the budget under the adaptive floor", () => {
     const governor = createViewGovernor({
       initialBudget: 1_000_000,
       minBudget: 200_000,
     });
     const setBudget = vi.fn();
-    const member = governor.register({ setPointBudget: setBudget });
+    const member = governor.register(memberOptions(setBudget));
     member.update({ memoryCeilingPoints: 50_000 });
 
     // The floor bounds what the loop may choose, not what memory permits:
@@ -772,10 +1126,10 @@ describe("createViewGovernor ceilings", () => {
     // Each controller owns a byte share of one pool, so their point ceilings
     // add up to the view's.
     governor
-      .register({ setPointBudget: far, id: "far" })
+      .register({ ...memberOptions(far), id: "far" })
       .update({ projectedImportance: 1, memoryCeilingPoints: 300_000 });
     governor
-      .register({ setPointBudget: near, id: "near" })
+      .register({ ...memberOptions(near), id: "near" })
       .update({ projectedImportance: 3, memoryCeilingPoints: 300_000 });
 
     const stats = governor.stats();
@@ -804,7 +1158,9 @@ describe("createViewGovernor ceilings", () => {
     // repainting at full rate against a budget past exact integers.
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
     const setPointBudget = vi.fn();
-    governor.register({ setPointBudget }).update({ projectedImportance: 1 });
+    governor
+      .register(memberOptions(setPointBudget))
+      .update({ projectedImportance: 1 });
     moveAndSettle(governor, 750);
 
     let rounds = 0;
@@ -837,7 +1193,7 @@ describe("createViewGovernor diagnostics", () => {
         initialBudget: 1_000_000,
         maxBudget: scenario.maxBudget,
       });
-      const member = governor.register({ setPointBudget: vi.fn() });
+      const member = governor.register(memberOptions(vi.fn()));
       member.update({ memoryCeilingPoints: scenario.memory });
       const stats = governor.stats();
       expect(stats.aggregateBudget).toBe(
@@ -852,7 +1208,7 @@ describe("createViewGovernor diagnostics", () => {
 
     const idle = createViewGovernor({ initialBudget: 1_000_000 });
     const setBudget = vi.fn();
-    const member = idle.register({ setPointBudget: setBudget });
+    const member = idle.register(memberOptions(setBudget));
     member.update({ active: false, memoryCeilingPoints: 400_000 });
     const stats = idle.stats();
     expect(stats.activeConstraint).toBe("inactive");
@@ -861,7 +1217,7 @@ describe("createViewGovernor diagnostics", () => {
     expect(setBudget).toHaveBeenLastCalledWith(0);
   });
 
-  it("explains a drawn point count without exposing internal state", () => {
+  it("explains a drawn point count while rejecting active-work samples", () => {
     const governor = createViewGovernor({
       initialBudget: 1_000_000,
       maxBudget: 4_000_000,
@@ -870,6 +1226,7 @@ describe("createViewGovernor diagnostics", () => {
     });
     const member = governor.register({
       setPointBudget: vi.fn(),
+      setDensityFraction: vi.fn(),
       id: "cloud-1",
     });
     member.update({
@@ -886,33 +1243,33 @@ describe("createViewGovernor diagnostics", () => {
       targetFrameTimeMs: 33,
       estimateMs: null,
       samples: 0,
-      trackBudget: 1_250_000,
+      trackBudget: 1_000_000,
       configuredMaxPoints: 4_000_000,
       memoryCeilingPoints: 9_000_000,
-      aggregateBudget: 1_250_000,
+      aggregateBudget: 1_000_000,
+      selectionBudget: 1_000_000,
       activeConstraint: "adaptive",
       activeMembers: 1,
       physicalTileOperations: 3,
       physicalHierarchyOperations: 1,
-      needsFrame: true,
+      needsFrame: false,
+      activity: { workPending: true, measurementEligible: false },
+      capacitySamples: { eligible: 0, rejected: 8, lastEligible: false },
     });
     expect(stats.motion.source).toBeNull();
-    expect(stats.lastAdjustment).toMatchObject({
-      direction: "increase",
-      reason: "below-target",
-      fromBudget: 1_000_000,
-      toBudget: 1_250_000,
-      estimateMs: 1,
-    });
-    expect(stats.lastAdjustment!.atMs).toBe(clock);
+    expect(stats.lastAdjustment).toBeNull();
     expect(stats.members).toEqual([
       {
         id: "cloud-1",
         active: true,
         projectedImportance: 2.5,
-        allocatedShare: 1_250_000,
+        allocatedShare: 1_000_000,
         memoryCeilingPoints: 9_000_000,
-        effectiveBudget: 1_250_000,
+        demandPoints: null,
+        effectiveBudget: 1_000_000,
+        selectionShare: 1_000_000,
+        effectiveSelectionBudget: 1_000_000,
+        densityFraction: 1,
         activeConstraint: "adaptive",
         physicalTileOperations: 3,
         physicalHierarchyOperations: 1,
@@ -955,7 +1312,7 @@ describe("createViewGovernor numeric configuration", () => {
   it("ignores unusable member reports instead of poisoning the split", () => {
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
     const setBudget = vi.fn();
-    const member = governor.register({ setPointBudget: setBudget });
+    const member = governor.register(memberOptions(setBudget));
     member.update({ projectedImportance: 4, memoryCeilingPoints: 800_000 });
     expect(governor.stats().aggregateBudget).toBe(800_000);
 
@@ -984,7 +1341,7 @@ describe("createViewGovernor numeric configuration", () => {
       minSamples: 1,
       cooldownMs: 0,
     });
-    governor.register({ setPointBudget: vi.fn() });
+    governor.register(memberOptions(vi.fn()));
     for (const bad of [...NON_FINITE, -1]) {
       governor.recordHostFrame({ hostFrameMs: bad, now: tick() });
     }
@@ -995,12 +1352,155 @@ describe("createViewGovernor numeric configuration", () => {
   it("stops distributing and requesting frames once disposed", () => {
     const governor = createViewGovernor({ initialBudget: 1_000_000 });
     const setBudget = vi.fn();
-    governor.register({ setPointBudget: setBudget });
+    governor.register(memberOptions(setBudget));
     setBudget.mockClear();
     governor.dispose();
     governor.beginMotion("explicit").release();
     governor.recordHostFrame({ hostFrameMs: 1, now: tick() });
     expect(setBudget).not.toHaveBeenCalled();
     expect(governor.needsFrame()).toBe(false);
+  });
+});
+
+describe("createViewGovernor reconfiguration", () => {
+  it("applies new options in place: members and their allocations survive", () => {
+    const governor = createViewGovernor({
+      initialBudget: 1_000_000,
+      maxBudget: 1_000_000,
+    });
+    const a = vi.fn();
+    const b = vi.fn();
+    governor.register(memberOptions(a)).update({ projectedImportance: 1 });
+    governor.register(memberOptions(b)).update({ projectedImportance: 3 });
+
+    governor.setOptions({ initialBudget: 400_000, maxBudget: 400_000 });
+
+    const stats = governor.stats();
+    expect(stats.configuredMaxPoints).toBe(400_000);
+    expect(stats.activeMembers).toBe(2);
+    expect(a).toHaveBeenLastCalledWith(100_000);
+    expect(b).toHaveBeenLastCalledWith(300_000);
+  });
+
+  it("keeps motion references and the moving regime across an options change", () => {
+    const governor = createViewGovernor({ interactionTargetMs: 16 });
+    const motion = governor.beginMotion("explicit");
+    governor.setOptions({ interactionTargetMs: 8 });
+
+    const stats = governor.stats();
+    expect(stats.regime).toBe("interaction");
+    expect(stats.motion.explicitReferences).toBe(1);
+    expect(stats.targetFrameTimeMs).toBe(8);
+
+    motion.release();
+    expect(governor.stats().regime).toBe("stationary");
+  });
+
+  it("restarts the adaptive tracks: budgets learned under old options reset", () => {
+    const governor = createViewGovernor(FAST_ADAPT);
+    governor.register(memberOptions(vi.fn()));
+    frames(governor, 5, 8);
+    expect(governor.stats().trackBudget).toBeGreaterThan(1_000_000);
+    expect(governor.stats().capacitySamples.eligible).toBe(8);
+
+    governor.setOptions({ ...FAST_ADAPT, stationaryTargetMs: 50 });
+
+    const stats = governor.stats();
+    expect(stats.trackBudget).toBe(1_000_000);
+    expect(stats.targetFrameTimeMs).toBe(50);
+    expect(stats.capacitySamples.eligible).toBe(0);
+    expect(stats.samples).toBe(0);
+  });
+
+  it("treats an equivalent options bag as a no-op, stated or defaulted", () => {
+    const governor = createViewGovernor(FAST_ADAPT);
+    governor.register(memberOptions(vi.fn()));
+    frames(governor, 5, 8);
+    const learned = governor.stats().trackBudget;
+    expect(learned).toBeGreaterThan(1_000_000);
+
+    // Same configuration twice over: field-for-field, and with a default
+    // (windowSize) stated explicitly. Neither may reset the learned track.
+    governor.setOptions({ ...FAST_ADAPT });
+    governor.setOptions({ ...FAST_ADAPT, windowSize: 30 });
+
+    expect(governor.stats().trackBudget).toBe(learned);
+    expect(governor.stats().capacitySamples.eligible).toBe(8);
+  });
+
+  it("throws on an unusable option and leaves the governor untouched", () => {
+    const governor = createViewGovernor(FAST_ADAPT);
+    governor.register(memberOptions(vi.fn()));
+    frames(governor, 5, 8);
+    const before = governor.stats();
+
+    expect(() => governor.setOptions({ interactionTargetMs: -1 })).toThrow(
+      /^interactionTargetMs/,
+    );
+
+    const after = governor.stats();
+    expect(after.trackBudget).toBe(before.trackBudget);
+    expect(after.targetFrameTimeMs).toBe(before.targetFrameTimeMs);
+    expect(after.capacitySamples).toEqual(before.capacitySamples);
+  });
+});
+
+describe("createViewGovernor rendered-camera classification", () => {
+  const cameraAt = (x: number, clipZ = 0) => ({
+    projection: "perspective" as const,
+    fovY: 1,
+    // Index 12 (translation) is a looking-direction entry; 2/6/10/14 are the
+    // clip-z row hosts rewrite while the camera stands still.
+    viewProj: [1, 0, clipZ, 0, 0, 1, 0, 0, 0, 0, 1 + clipZ, 0, x, 0, clipZ, 1],
+    position: [x, 0, 0] as [number, number, number],
+    viewportWidthCssPx: 800,
+    viewportHeightCssPx: 600,
+  });
+  const views = (x: number, clipZ = 0) => new Map([["r", cameraAt(x, clipZ)]]);
+
+  it("holds one inferred reference per burst and releases it on the debounce", () => {
+    const governor = createViewGovernor({
+      motionDebounceMs: 100,
+      interactionSettleMs: 200,
+    });
+    const scheduleRender = vi.fn();
+    governor.noteRenderedCameras(views(0), scheduleRender);
+    expect(governor.stats().motion.inferredReferences).toBe(0);
+
+    for (const x of [1, 2, 3]) {
+      governor.noteRenderedCameras(views(x), scheduleRender);
+    }
+    expect(governor.stats().motion.inferredReferences).toBe(1);
+    expect(governor.stats().regime).toBe("interaction");
+
+    vi.advanceTimersByTime(100);
+    expect(governor.stats().motion.inferredReferences).toBe(0);
+    expect(scheduleRender).toHaveBeenCalledTimes(1);
+    // The settle window is still holding the moving regime: two-phase.
+    expect(governor.stats().regime).toBe("interaction");
+    expect(governor.stats().motion.settling).toBe(true);
+
+    vi.advanceTimersByTime(200);
+    expect(governor.stats().regime).toBe("stationary");
+    expect(governor.stats().motion.settling).toBe(false);
+  });
+
+  it("ignores clip-z-row rewrites: tiles arriving are not camera motion", () => {
+    const governor = createViewGovernor({ motionDebounceMs: 100 });
+    governor.noteRenderedCameras(views(5));
+    governor.noteRenderedCameras(views(5, 0.25));
+    expect(governor.stats().motion.inferredReferences).toBe(0);
+    expect(governor.stats().regime).toBe("stationary");
+  });
+
+  it("treats the first camera after a baseline reset as a baseline again", () => {
+    const governor = createViewGovernor({ motionDebounceMs: 100 });
+    governor.noteRenderedCameras(views(0));
+    governor.resetMotionBaselines();
+    governor.noteRenderedCameras(views(50));
+    expect(governor.stats().motion.inferredReferences).toBe(0);
+
+    governor.noteRenderedCameras(views(51));
+    expect(governor.stats().motion.inferredReferences).toBe(1);
   });
 });

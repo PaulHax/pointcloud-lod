@@ -38,6 +38,10 @@
     "./vtk": {
       "types": "./dist/rendererAdapter.d.ts",
       "import": "./dist/rendererAdapter.js"
+    },
+    "./copc-worker": {
+      "types": "./dist/copcWorker.d.ts",
+      "import": "./dist/copcWorker.js"
     }
   },
   "scripts": {
@@ -50,11 +54,14 @@
     "example": "vite --config examples/vtk/vite.config.ts",
     "example:build": "vite build --config examples/vtk/vite.config.ts",
     "test:browser": "npm run example:build && vitest run --config vitest.browser.config.ts",
+    "test:perf": "npm run example:build && vitest run --config vitest.perf.config.ts",
+    "telemetry:capture": "POINTCLOUD_LOD_BROWSER_GPU=1 npm run test:perf -- test/browser/telemetry-capture.perf.spec.ts",
     "verify:chain": "node scripts/verifyChain.mjs",
     "prepare": "npm run build"
   },
   "dependencies": {
-    "copc": "^0.0.8"
+    "copc": "^0.0.8",
+    "laz-perf": "^0.0.7"
   },
   "devDependencies": {
     "@semantic-release/github": "^11.0.0",

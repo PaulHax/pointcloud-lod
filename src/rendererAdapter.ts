@@ -28,7 +28,7 @@ import vtkPolyData from "@kitware/vtk.js/Common/DataModel/PolyData";
 import vtkActor from "@kitware/vtk.js/Rendering/Core/Actor";
 import vtkPointGaussianMapper from "@kitware/vtk.js/Rendering/Core/PointGaussianMapper";
 
-import type { TileBatch } from "./controller";
+import type { TileBatch, TileDrawPlan } from "./controller";
 import { finiteAbove, finiteNonNegative } from "./numeric";
 import { keyToString, type Vec3 } from "./octree";
 import { tileBytes, type TileData } from "./tileSource";
@@ -71,6 +71,8 @@ export type RendererAdapter = {
    * screen replaces that tile's payload.
    */
   applyBatch(batch: TileBatch): void;
+  /** Apply per-tile progressive prefixes without replacing actors or VBOs. */
+  applyDrawPlan(plan: TileDrawPlan): void;
   /**
    * Anchor transform (column-major 16 floats, e.g. the scene actor's
    * UserMatrix); each tile renders with `base · translate(tile.origin)`.
@@ -116,6 +118,11 @@ export type RendererAdapter = {
  * owns, which is what a memory ceiling has to work from.
  */
 export type RendererAdapterStats = {
+  /**
+   * Monotonic revision of submitted resource changes. The first render after
+   * this changes may allocate or upload buffers and is not a capacity sample.
+   */
+  readonly workRevision: number;
   /** Tiles matching the controller's submitted set; drawn while visible. */
   readonly submittedTiles: number;
   readonly submittedPoints: number;
@@ -146,6 +153,7 @@ export type RendererAdapterStats = {
   /** What participates in drawing: the submitted set, or nothing while hidden. */
   readonly drawnTiles: number;
   readonly drawnPoints: number;
+  readonly drawnFraction: number;
   readonly visible: boolean;
   readonly diameterCssPx: number;
   readonly devicePixelRatio: number;
@@ -157,6 +165,7 @@ type TileActors = {
   polyData: any;
   tile: TileData;
   resourceBytes: number;
+  drawnPointCount: number;
 };
 
 export const createRendererAdapter = (
@@ -174,6 +183,12 @@ export const createRendererAdapter = (
     0,
   );
   let visible = options.visible ?? true;
+  /**
+   * The prefix each submitted tile draws, as the controller last planned it.
+   * Null until the first plan arrives: a tile submitted before any plan draws
+   * whole, while a tile absent from a plan that did arrive draws nothing.
+   */
+  let pointPrefixes: ReadonlyMap<string, number> | null = null;
   let baseMatrix: ArrayLike<number> = IDENTITY;
   // A key lives in at most one of the two: removal moves its entry from
   // `tiles` to `pendingRelease`, and a re-addition either takes that entry
@@ -185,8 +200,8 @@ export const createRendererAdapter = (
   let disposed = false;
 
   // Running totals rather than a walk per question. Trimming asks how many
-  // bytes are held once per evicted entry, so re-summing both maps there made
-  // shedding a large pool quadratic in its size — and the pool is largest
+  // bytes are held once per evicted entry, so re-summing both maps there would
+  // make shedding a large pool quadratic in its size — and the pool is largest
   // exactly when a cloud has just been deactivated and the ceiling dropped to
   // nothing, which is when the walk is longest and the answer needed soonest.
   // Every mutation of either map goes through the four helpers below.
@@ -194,6 +209,7 @@ export const createRendererAdapter = (
   let submittedBytes = 0;
   let pooledPoints = 0;
   let pooledBytes = 0;
+  let workRevision = 0;
 
   const holdSubmitted = (keyString: string, entry: TileActors): void => {
     tiles.set(keyString, entry);
@@ -237,16 +253,39 @@ export const createRendererAdapter = (
   };
 
   /** Push the adapter's current visual state onto one tile's actor/mapper. */
-  const applyTileState = (entry: TileActors): void => {
+  const prefixFor = (keyString: string, entry: TileActors): number =>
+    pointPrefixes === null
+      ? entry.tile.pointCount
+      : Math.min(
+          entry.tile.pointCount,
+          Math.max(0, Math.floor(pointPrefixes.get(keyString) ?? 0)),
+        );
+
+  /** Re-read every tile's planned prefix; true when any drawn count moved. */
+  const refreshPrefixes = (): boolean => {
+    let changed = false;
+    for (const [keyString, entry] of tiles) {
+      const count = prefixFor(keyString, entry);
+      if (count === entry.drawnPointCount) continue;
+      entry.drawnPointCount = count;
+      entry.mapper.setMaximumPointCount(count);
+      changed = true;
+    }
+    return changed;
+  };
+
+  const applyTileState = (keyString: string, entry: TileActors): void => {
     // The actor property remains in CSS pixels. The custom dense-point mapper
     // multiplies it by scaleFactor before assigning physical gl_PointSize.
     entry.mapper.setScaleFactor(devicePixelRatio);
+    entry.drawnPointCount = prefixFor(keyString, entry);
+    entry.mapper.setMaximumPointCount(entry.drawnPointCount);
     entry.actor.getProperty().setPointSize(diameterCssPx);
     entry.actor.setVisibility(visible);
     entry.actor.setUserMatrix(tileMatrix(entry.tile.origin));
   };
 
-  const createTile = (tile: TileData): TileActors => {
+  const createTile = (keyString: string, tile: TileData): TileActors => {
     const polyData = vtkPolyData.newInstance();
     polyData.getPoints().setData(tile.positions, 3);
     if (tile.rgb !== undefined) {
@@ -269,8 +308,9 @@ export const createRendererAdapter = (
       polyData,
       tile,
       resourceBytes: tileBytes(tile),
+      drawnPointCount: 0,
     };
-    applyTileState(entry);
+    applyTileState(keyString, entry);
     return entry;
   };
 
@@ -305,6 +345,18 @@ export const createRendererAdapter = (
   };
 
   return {
+    applyDrawPlan(plan) {
+      if (disposed) return;
+      const next = new Map(
+        plan.entries.map(({ key, pointCount }) => [
+          keyToString(key),
+          finiteNonNegative(pointCount) ? Math.floor(pointCount) : 0,
+        ]),
+      );
+      pointPrefixes = next;
+      if (refreshPrefixes()) scheduleRender();
+    },
+
     applyBatch(batch) {
       if (disposed) return;
       let changed = false;
@@ -337,7 +389,7 @@ export const createRendererAdapter = (
           dropPooled(keyString, stale);
           if (holdsPayload(stale, tile)) {
             stale.tile = tile;
-            applyTileState(stale);
+            applyTileState(keyString, stale);
             holdSubmitted(keyString, stale);
             changed = true;
             continue;
@@ -345,18 +397,21 @@ export const createRendererAdapter = (
           releaseTile(stale);
         }
         trimPool(tileBytes(tile));
-        const entry = createTile(tile);
+        const entry = createTile(keyString, tile);
         holdSubmitted(keyString, entry);
         renderer.addActor(entry.actor);
         changed = true;
       }
       // Removals alone must still bring the pool back under its ceiling. A
       // deactivated cloud sends nothing but removals, and trimming only on the
-      // addition path left its actors on the GPU until something else happened
-      // to add a tile — which, for a cloud the host just switched off, is
-      // never.
+      // addition path would leave its actors on the GPU until something else
+      // happened to add a tile — which, for a cloud the host just switched
+      // off, is never.
       trimPool();
-      if (changed) scheduleRender();
+      if (changed) {
+        workRevision += 1;
+        scheduleRender();
+      }
     },
 
     setBaseMatrix(matrix) {
@@ -408,7 +463,16 @@ export const createRendererAdapter = (
     },
 
     stats() {
+      let drawnPoints = 0;
+      let drawnTiles = 0;
+      if (visible) {
+        for (const entry of tiles.values()) {
+          drawnPoints += entry.drawnPointCount;
+          if (entry.drawnPointCount > 0) drawnTiles += 1;
+        }
+      }
       return {
+        workRevision,
         submittedTiles: tiles.size,
         submittedPoints,
         submittedBytes,
@@ -419,8 +483,10 @@ export const createRendererAdapter = (
         gpuResidentPoints: submittedPoints + pooledPoints,
         gpuResidentBytes: submittedBytes + pooledBytes,
         resourceCeilingBytes,
-        drawnTiles: visible ? tiles.size : 0,
-        drawnPoints: visible ? submittedPoints : 0,
+        drawnTiles,
+        drawnPoints,
+        drawnFraction:
+          visible && submittedPoints > 0 ? drawnPoints / submittedPoints : 0,
         visible,
         diameterCssPx,
         devicePixelRatio,

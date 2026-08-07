@@ -145,6 +145,10 @@ export const assertSettled = (stats: ExampleStats, keys: ExampleKeys): void => {
     0,
   );
   expect(
+    cloud.selectionPending,
+    `a debounced selection remained scheduled at rest\n${shown(stats)}`,
+  ).toBe(false);
+  expect(
     cloud.physicalTileOperations,
     `a tile read outlived convergence\n${shown(stats)}`,
   ).toBe(0);

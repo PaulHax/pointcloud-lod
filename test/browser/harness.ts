@@ -30,9 +30,19 @@ import {
 // `RendererAdapterStats` comes from its own module: index.ts deliberately does
 // not re-export it.
 import type { LodControllerStats } from "../../src/controller";
+import type { PointPickResult } from "../../src/picking";
 import type { RendererAdapterStats } from "../../src/rendererAdapter";
 import type { ViewGovernorStats } from "../../src/viewGovernor";
-import { startStaticServer, type StaticServer } from "./server";
+import type {
+  TelemetryEnvironment,
+  TelemetrySummary,
+  TelemetryTrace,
+} from "../../src/telemetry";
+import {
+  startStaticServer,
+  type NetworkProfile,
+  type StaticServer,
+} from "./server";
 
 /** Failure messages in this suite carry the whole sample, pretty-printed. */
 export const shown = (value: unknown): string => JSON.stringify(value, null, 2);
@@ -192,12 +202,16 @@ export type ExampleSession = {
    * motion. Every other camera handle moves the camera programmatically, so
    * the governor infers motion instead — a different code path.
    */
-  drag(steps: { dx: number; dy: number }[], pauseMs?: number): Promise<void>;
+  drag(
+    steps: { dx: number; dy: number }[],
+    options?: DragOptions,
+  ): Promise<void>;
   /** Resize the browser viewport, which resizes the canvas under it. */
   resize(size: Viewport): Promise<void>;
   /** Load another cloud into the running page; resolves when it has opened. */
   load(url: string): Promise<void>;
   readCamera(): Promise<CameraReading>;
+  pickPoint(xCssPx: number, yCssPx: number): Promise<PointPickResult | null>;
   place(next: {
     position?: readonly number[];
     focalPoint?: readonly number[];
@@ -210,7 +224,15 @@ export type ExampleSession = {
   setVisible(visible: boolean): Promise<void>;
   setActive(active: boolean): Promise<void>;
   setDevicePixelRatio(ratio: number): Promise<void>;
+  setDensityFraction(fraction: number): Promise<void>;
   setSyntheticFrameMs(ms: number | null): Promise<void>;
+  startTelemetry(): Promise<void>;
+  stopTelemetry(): Promise<void>;
+  clearTelemetry(): Promise<void>;
+  markTelemetry(label: string): Promise<void>;
+  telemetryEnvironment(): Promise<TelemetryEnvironment>;
+  telemetrySummary(): Promise<TelemetrySummary>;
+  telemetryTrace(): Promise<TelemetryTrace>;
   render(): Promise<void>;
   dispose(): Promise<void>;
   /** Poll until `predicate(stats)` holds, or fail with the last stats seen. */
@@ -335,11 +357,7 @@ export const closeBrowser = async (): Promise<void> => {
   sharedBrowser = null;
 };
 
-/**
- * The render viewport every session starts at: the browser's own default
- * window, which is what these checks were written against back when the canvas
- * filled it.
- */
+/** The render viewport every session starts at. */
 export const DEFAULT_VIEWPORT: Viewport = { width: 1280, height: 720 };
 
 const POLL_INTERVAL_MS = 50;
@@ -354,7 +372,14 @@ export const SETTLE_QUIET_MS = 400;
  * positional path `cloudsUnderTest()` gives a supplied cloud.
  */
 export const openExample = async (
-  options: { cloud?: string } = {},
+  options: {
+    cloud?: string;
+    telemetry?: boolean;
+    files?: Readonly<Record<string, string>>;
+    network?: NetworkProfile;
+    /** Install request routing or page instrumentation before navigation. */
+    preparePage?: (page: Page) => void | Promise<void>;
+  } = {},
 ): Promise<ExampleSession> => {
   const cloud = options.cloud ?? FIXTURE_URL_PATH;
   const server: StaticServer = await startStaticServer(
@@ -365,9 +390,15 @@ export const openExample = async (
     },
     // Every cloud is reachable from every session, so a scenario can switch
     // sources without standing up a second server.
-    Object.assign({}, ...cloudsUnderTest().map((entry) => entry.files)),
+    Object.assign(
+      {},
+      ...cloudsUnderTest().map((entry) => entry.files),
+      options.files,
+    ),
+    options.network,
   );
   const page = await (await browser()).newPage();
+  await options.preparePage?.(page);
   const failures: string[] = [];
   page.on("pageerror", (error) => failures.push(`pageerror: ${error.message}`));
   page.on("console", (message: ConsoleMessage) => {
@@ -393,6 +424,7 @@ export const openExample = async (
   });
 
   const query = new URLSearchParams({ url: cloud });
+  if (options.telemetry) query.set("telemetry", "1");
   await page.goto(`${server.origin}/?${query}`, { waitUntil: "load" });
   await page.waitForFunction(
     () => (window as never as ExampleWindow).pointCloudExample !== undefined,
@@ -415,8 +447,9 @@ export const openExample = async (
       if (predicate(last)) return last;
       await page.waitForTimeout(POLL_INTERVAL_MS);
     }
+    const message = await page.locator("#message").textContent();
     throw new Error(
-      `timed out waiting for ${describe}\nlast stats: ${shown(last)}`,
+      `timed out waiting for ${describe}\nmessage: ${message}\nlast stats: ${shown(last)}`,
     );
   };
 
@@ -438,13 +471,14 @@ export const openExample = async (
       page.evaluate(() =>
         (window as never as ExampleWindow).pointCloudExample.scene(),
       ) as Promise<SceneReading>,
-    drag: async (steps, pauseMs = 16) => {
+    drag: async (steps, options = {}) => {
+      const { pauseMs = 16, button = "left", start } = options;
       const box = await page.locator("#viewer").boundingBox();
       if (box === null) throw new Error("the viewer has no box to drag in");
-      let x = box.x + box.width / 2;
-      let y = box.y + box.height / 2;
+      let x = start?.x ?? box.x + box.width / 2;
+      let y = start?.y ?? box.y + box.height / 2;
       await page.mouse.move(x, y);
-      await page.mouse.down();
+      await page.mouse.down({ button });
       for (const { dx, dy } of steps) {
         x += dx;
         y += dy;
@@ -458,7 +492,7 @@ export const openExample = async (
         await page.waitForTimeout(pauseMs);
         await session.frame();
       }
-      await page.mouse.up();
+      await page.mouse.up({ button });
     },
     resize: async (size) => {
       // `size` is the render viewport, not the browser window: the page's
@@ -515,6 +549,15 @@ export const openExample = async (
     readCamera: () =>
       page.evaluate(() =>
         (window as never as ExampleWindow).pointCloudExample.camera.read(),
+      ),
+    pickPoint: (xCssPx, yCssPx) =>
+      page.evaluate(
+        ({ x, y }) =>
+          (window as never as ExampleWindow).pointCloudExample.camera.pick(
+            x,
+            y,
+          ),
+        { x: xCssPx, y: yCssPx },
       ),
     place: (next) =>
       page.evaluate(
@@ -578,6 +621,14 @@ export const openExample = async (
           ).pointCloudExample.setDevicePixelRatio(value),
         ratio,
       ),
+    setDensityFraction: (fraction) =>
+      page.evaluate(
+        (value) =>
+          (
+            window as never as ExampleWindow
+          ).pointCloudExample.setDensityFraction(value),
+        fraction,
+      ),
     setSyntheticFrameMs: (ms) =>
       page.evaluate(
         (value) =>
@@ -585,6 +636,42 @@ export const openExample = async (
             window as never as ExampleWindow
           ).pointCloudExample.setSyntheticFrameMs(value),
         ms,
+      ),
+    startTelemetry: () =>
+      page.evaluate(() =>
+        (window as never as ExampleWindow).pointCloudExample.telemetry.start(),
+      ),
+    stopTelemetry: () =>
+      page.evaluate(() =>
+        (window as never as ExampleWindow).pointCloudExample.telemetry.stop(),
+      ),
+    clearTelemetry: () =>
+      page.evaluate(() =>
+        (window as never as ExampleWindow).pointCloudExample.telemetry.clear(),
+      ),
+    markTelemetry: (label) =>
+      page.evaluate(
+        (value) =>
+          (window as never as ExampleWindow).pointCloudExample.telemetry.mark(
+            value,
+          ),
+        label,
+      ),
+    telemetryEnvironment: () =>
+      page.evaluate(() =>
+        (
+          window as never as ExampleWindow
+        ).pointCloudExample.telemetry.environment(),
+      ),
+    telemetrySummary: () =>
+      page.evaluate(() =>
+        (
+          window as never as ExampleWindow
+        ).pointCloudExample.telemetry.summary(),
+      ),
+    telemetryTrace: () =>
+      page.evaluate(() =>
+        (window as never as ExampleWindow).pointCloudExample.telemetry.trace(),
       ),
     render: () =>
       page.evaluate(() =>
@@ -608,31 +695,21 @@ export const openExample = async (
       // before the change and call it converged.
       await session.frame();
       const deadline = Date.now() + timeoutMs;
-      let quietSince: number | null = null;
-      let lastGeneration = -1;
       let last: ExampleStats | null = null;
       while (Date.now() < deadline) {
         last = await stats();
         const cloud = last.controller;
         const drained =
           cloud !== null &&
+          !cloud.selectionPending &&
           cloud.physicalTileOperations === 0 &&
           cloud.physicalHierarchyOperations === 0 &&
           cloud.queuedTiles === 0 &&
           cloud.queuedPages === 0 &&
           (last.governor === null || !last.governor.needsFrame);
-        const generation = cloud?.selection.generation ?? -1;
-        if (!drained || generation !== lastGeneration) {
-          lastGeneration = generation;
-          quietSince = drained ? Date.now() : null;
-        } else if (quietSince === null) {
-          quietSince = Date.now();
-        }
-        // Selection is debounced, so "no work outstanding" is only convergence
-        // once it has also stopped producing new selections.
-        if (quietSince !== null && Date.now() - quietSince >= SETTLE_QUIET_MS) {
-          return last;
-        }
+        // The controller reports its trailing selection timer directly, so
+        // convergence does not need to be inferred from a wall-clock pause.
+        if (drained) return last;
         await page.waitForTimeout(POLL_INTERVAL_MS);
       }
       throw new Error(
@@ -670,6 +747,61 @@ export type CameraReading = {
   parallelProjection: boolean;
 };
 
+/**
+ * Camera arithmetic the specs share. A camera reading is three vectors and an
+ * angle, so every spec that checks where the camera went ends up needing the
+ * same handful of operations; two copies of a pitch formula are two chances to
+ * measure a different angle from the same reading.
+ */
+export const subtract = (
+  left: readonly number[],
+  right: readonly number[],
+): [number, number, number] => [
+  left[0]! - right[0]!,
+  left[1]! - right[1]!,
+  left[2]! - right[2]!,
+];
+
+export const dot = (
+  left: readonly number[],
+  right: readonly number[],
+): number => left.reduce((sum, value, axis) => sum + value * right[axis]!, 0);
+
+export const cross = (
+  left: readonly number[],
+  right: readonly number[],
+): [number, number, number] => [
+  left[1]! * right[2]! - left[2]! * right[1]!,
+  left[2]! * right[0]! - left[0]! * right[2]!,
+  left[0]! * right[1]! - left[1]! * right[0]!,
+];
+
+/** Eye-to-focus distance: the radius an orbit has to preserve. */
+export const cameraDistance = (camera: {
+  readonly position: readonly number[];
+  readonly focalPoint: readonly number[];
+}): number => Math.hypot(...subtract(camera.position, camera.focalPoint));
+
+/** Elevation of the eye above its focus, in degrees. */
+export const cameraPitchDegrees = (camera: {
+  readonly position: readonly number[];
+  readonly focalPoint: readonly number[];
+}): number => {
+  const offset = subtract(camera.position, camera.focalPoint);
+  return (Math.asin(offset[2]! / Math.hypot(...offset)) * 180) / Math.PI;
+};
+
+export type DragOptions = {
+  /**
+   * A floor between steps. The gesture paces to painted frames regardless;
+   * this only keeps consecutive moves distinguishable.
+   */
+  readonly pauseMs?: number;
+  readonly button?: "left" | "right";
+  /** Where the gesture starts, in page pixels. Defaults to the viewer centre. */
+  readonly start?: { readonly x: number; readonly y: number };
+};
+
 export type ExampleWindow = {
   pointCloudExample: {
     stats(): ExampleStats;
@@ -679,6 +811,7 @@ export type ExampleWindow = {
     load(url: string): Promise<void>;
     camera: {
       read(): CameraReading;
+      pick(xCssPx: number, yCssPx: number): PointPickResult | null;
       place(next: Record<string, unknown>): void;
       azimuth(degrees: number): void;
       dolly(factor: number): void;
@@ -688,7 +821,19 @@ export type ExampleWindow = {
     setVisible(visible: boolean): void;
     setActive(active: boolean): void;
     setDevicePixelRatio(ratio: number): void;
+    setDensityFraction(fraction: number): void;
     setSyntheticFrameMs(ms: number | null): void;
+    telemetry: {
+      start(): void;
+      stop(): void;
+      clear(): void;
+      mark(label: string): void;
+      isActive(): boolean;
+      environment(): TelemetryEnvironment;
+      summary(): TelemetrySummary;
+      trace(): TelemetryTrace;
+      download(): void;
+    };
     needsFrame(): boolean;
     render(): void;
     dispose(): void;
