@@ -92,6 +92,7 @@ describe("pickPointInTiles", () => {
     expect(result.pointOnRay[0]).toBeCloseTo(0);
     expect(result.pointOnRay[1]).toBeCloseTo(0);
     expect(result.pointOnRay[2]).toBeCloseTo(0.5);
+    expect(result.rayDepth).toBeCloseTo(1.5);
     expect(result.distancePx).toBeCloseTo(5, 4);
   });
 
@@ -263,11 +264,14 @@ describe("sweepPickPoints", () => {
     viewportHeightCssPx: 100,
   });
 
-  it("rejects points at negative ray depth even when they project fine", () => {
+  it("rejects points at non-positive ray depth even when they project fine", () => {
     // The crafted ray starts past the point: clip-space tests all pass, but
     // the support depth is negative and the point must not answer.
     const behindRay = sweepPickPoints(query(5), [tile([[0, 0, 0.5]])]);
     expect(behindRay).toEqual({ status: "miss" });
+    expect(sweepPickPoints(query(0.5), [tile([[0, 0, 0.5]])])).toEqual({
+      status: "miss",
+    });
     const inFrontOfRay = sweepPickPoints(query(-5), [tile([[0, 0, 0.5]])]);
     expect(hit(inFrontOfRay).pointOnRay[2]).toBeCloseTo(0.5);
   });

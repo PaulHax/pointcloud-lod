@@ -27,7 +27,7 @@ import { fileURLToPath } from "node:url";
 import { Copc, Getter, type Hierarchy } from "copc";
 import { describe, expect, it } from "vitest";
 
-import { DEFAULTS } from "../../src/adaptiveBudget";
+import { DEFAULT_MIN_POINT_BUDGET } from "../../src/pointCloudMember";
 
 const fixture = (name: string): string =>
   fileURLToPath(new URL(name, import.meta.url));
@@ -71,7 +71,7 @@ describe("the committed COPC fixtures", () => {
     async () => {
       const getter = Getter.file(adaptiveFixture);
       const copc = await Copc.create(getter);
-      expect(copc.header.pointCount).toBeGreaterThan(DEFAULTS.minBudget);
+      expect(copc.header.pointCount).toBeGreaterThan(DEFAULT_MIN_POINT_BUDGET);
     },
   );
 
@@ -87,6 +87,15 @@ describe("the committed COPC fixtures", () => {
       "every node of the multipage fixture is on the root page, so no " +
         "selection has to fetch a page to reach one",
     ).toBeGreaterThan(0);
+  });
+
+  it("gives the fixed-density browser gate demand above its full target", async () => {
+    const getter = Getter.file(fixture("multipage.copc.laz"));
+    const copc = await Copc.create(getter);
+    // density.spec.ts selects at this target before thinning the existing GPU
+    // prefixes to 0.25. A fixture at or below it would make "full" merely the
+    // source-demand cap instead of the explicit fixed allocation under test.
+    expect(copc.header.pointCount).toBeGreaterThan(2_000);
   });
 
   it("leaves fixture.copc.laz on the single page it is the contrast for", async () => {

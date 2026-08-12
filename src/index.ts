@@ -21,6 +21,7 @@ export type {
 } from "./tileSource";
 
 export {
+  cursorRay,
   frustumPlanes,
   boundsIntersectsFrustum,
   distanceToBounds,
@@ -32,6 +33,7 @@ export {
   type OrthographicCameraView,
   type Mat16,
   type Plane,
+  type CursorRay,
 } from "./camera";
 
 // The picking machinery itself (ray building, prefilter, sweep) is internal:
@@ -70,45 +72,72 @@ export {
 } from "./memoryPool";
 
 export {
-  createViewBudgetCoordinator,
-  type ViewBudgetConstraint,
-  type ViewBudgetCoordinator,
-  type ViewBudgetCoordinatorOptions,
-  type ViewBudgetMember,
-  type ViewBudgetMemberOptions,
-  type ViewBudgetMemberStats,
-  type ViewBudgetMemberUpdate,
-  type ViewBudgetStats,
+  createSubmissionScheduler,
+  DEFAULT_SUBMISSION_BYTES_PER_FRAME,
+  DEFAULT_SUBMISSION_TIME_MS_PER_FRAME,
+  type Submission,
+  type SubmissionJob,
+  type SubmissionScheduler,
+  type SubmissionSchedulerOptions,
+  type SubmissionSchedulerStats,
+} from "./submissionScheduler";
+
+export {
+  MIN_VIEW_QUALITY_FRACTION,
+  MAX_VIEW_QUALITY_FRACTION,
+  allocateViewQuality,
+  type ViewQualityAllocation,
+  type ViewQualityContender,
 } from "./viewBudget";
 
-// The adaptive budget loop is the view governor's internal. Only the types
+export {
+  createStreamedMemberFactoryRegistry,
+  type MemberFactoryRegistration,
+  type StreamedMemberFactory,
+  type StreamedMemberFactoryRegistry,
+} from "./memberFactoryRegistry";
+
+export type {
+  Allocation,
+  AllocationRegime,
+  GovernorInputs,
+  MemberPickResult,
+  OcclusionResult,
+  StreamedMember,
+  StreamedMemberContext,
+} from "./streamedMember";
+
+export {
+  createStreamedSceneCoordinator,
+  type AdaptiveQualityTargets,
+  type StreamedCoordinatorMemberStats,
+  type StreamedMemberRegistration,
+  type StreamedMemberRegistrationOptions,
+  type StreamedSceneCoordinator,
+  type StreamedSceneCoordinatorOptions,
+  type StreamedSceneCoordinatorStats,
+} from "./streamedSceneCoordinator";
+
+// The adaptive quality loop is the view governor's internal. Only the types
 // that appear in the governor's own surface are re-exported.
 export {
-  // The adaptive policy's numbers are part of the public contract: a host
-  // that validates a configured maximum against the floor must read the floor
-  // from here, not restate it — a restated copy drifts the first time the
-  // policy moves.
-  DEFAULTS,
-  type AdaptiveBudgetOptions,
-  type BudgetAdjustment,
-  type BudgetAdjustmentDirection,
-  type BudgetAdjustmentReason,
-  type BudgetRegime,
+  ADAPTIVE_QUALITY_DEFAULTS,
+  type AdaptiveQualityOptions,
+  type QualityAdjustment,
+  type QualityAdjustmentDirection,
+  type QualityAdjustmentReason,
+  type QualityRegime,
 } from "./adaptiveBudget";
 
 export {
   createViewGovernor,
-  type BudgetConstraint,
   type CapacitySampleMetrics,
+  type GovernorWorkState,
   type HostFrameMetrics,
   type MotionReference,
   type MotionSourceKind,
   type TransientFrameMetrics,
   type ViewGovernor,
-  type ViewGovernorMember,
-  type ViewGovernorMemberOptions,
-  type ViewGovernorMemberStats,
-  type ViewGovernorMemberUpdate,
   type ViewGovernorOptions,
   type ViewGovernorStats,
 } from "./viewGovernor";
@@ -157,6 +186,104 @@ export {
   createCopcWorkerTileSource,
   type CopcWorkerTileSourceOptions,
 } from "./copcWorkerTileSource";
+
+export {
+  loadTileset,
+  resolveTilesetContentUri,
+  multiplyTilesetMatrices,
+  TilesetFetchError,
+  TilesetProfileError,
+  TilesetUnsupportedError,
+  TilesetValidationError,
+  type LoadTilesetOptions,
+  type TilesetBox,
+  type TilesetFetch,
+  type TilesetFetchResponse,
+  type TilesetSource,
+  type TilesetTile,
+} from "./tiles3d/tilesetSource";
+
+export {
+  traverseTileset,
+  type TileReadiness,
+  type TilesetTraversalOptions,
+  type TilesetTraversalResult,
+} from "./tiles3d/traversal";
+
+export {
+  DEFAULT_MAXIMUM_SCREEN_SPACE_ERROR_PX,
+  DEFAULT_TILES3D_CACHE_BYTES,
+  DEFAULT_TILES3D_MIN_CONCURRENCY,
+  DEFAULT_TILES3D_MAX_CONCURRENCY,
+  DEFAULT_TILES3D_ROLE,
+  DEFAULT_VERTICAL_EXAGGERATION,
+  DEFAULT_VERTICAL_PIVOT_Z,
+  type Tiles3dMemberConfig,
+  type Tiles3dMemberStats,
+  type Tiles3dRole,
+} from "./tiles3d/memberTypes";
+
+export {
+  createContentQueue,
+  ContentQueueDecodeError,
+  ContentQueueError,
+  ContentQueueFetchError,
+  ContentQueueRetryError,
+  type ContentDecodeContext,
+  type ContentQueue,
+  type ContentQueueClock,
+  type ContentQueueConfiguration,
+  type ContentQueueEntrySnapshot,
+  type ContentQueueEntryStatus,
+  type ContentQueueFetch,
+  type ContentQueueFetchResponse,
+  type ContentQueueOptions,
+  type ContentQueueSnapshot,
+  type TileContentRequest,
+} from "./tiles3d/contentQueue";
+
+export {
+  buildDecodeCacheKey,
+  buildTransferList,
+  capabilityTarget,
+  DecodeWorkerError,
+  DecodeWorkerPool,
+  DecodeWorkerPoolDisposedError,
+  type BasisTargetTimingStats,
+  type CompressedTextureLevel,
+  type CompressedTextureFormat,
+  type DecodeCacheIdentity,
+  type DecodeJob,
+  type DecodeTextureTarget,
+  type DecodeTileRequest,
+  type DecodedCompressedTexture,
+  type DecodedMaterial,
+  type DecodedPrimitive,
+  type DecodedRgbaTexture,
+  type DecodedTexture,
+  type DecodedTileContent,
+  type DecodeWasmUrls,
+  type DecodeWorkerLike,
+  type DecodeWorkerPoolHandle,
+  type DecodeWorkerPoolOptions,
+  type SerializableMaterial,
+  type SerializableSampler,
+  type TextureCapabilities,
+} from "./tiles3d/decode";
+
+export {
+  composeSceneTransform,
+  composeVerticalExaggeratedSceneTransform,
+  createVerticalExaggerationTransform,
+  createEcefToEnuTransform,
+  flattenPrimitiveToRtc,
+  multiplyMat4,
+  transformPoint,
+  wgs84ToEcef,
+  type Mat4,
+  type RtcPrimitiveInput,
+  type RtcPrimitiveResult,
+} from "./tiles3d/rtc";
 
 // The vtk.js renderer adapter is deliberately NOT re-exported here. It imports
 // vtk.js at module scope, so re-exporting it would make this entry point throw

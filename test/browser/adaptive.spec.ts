@@ -19,7 +19,9 @@ import { afterAll, describe, expect, it } from "vitest";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { DEFAULTS as LOD_DEFAULTS } from "../../src/adaptiveBudget";
+import { ADAPTIVE_QUALITY_DEFAULTS } from "../../src/adaptiveBudget";
+import { DEFAULT_MIN_POINT_BUDGET } from "../../src/pointCloudMember";
+import { MIN_VIEW_QUALITY_FRACTION } from "../../src/viewBudget";
 import {
   ADAPTIVE_CLOUD,
   closeBrowser,
@@ -29,9 +31,6 @@ import {
   type ExampleStats,
 } from "./harness";
 import { settleAndAssert, watching } from "./invariants";
-
-/** The floor the example configures (`ADAPTIVE_MIN_BUDGET`, examples/vtk/main.ts). */
-const FLOOR_POINTS = 200_000;
 
 /**
  * Stated host frame times. The governor takes the worst of `hostFrameMs` and
@@ -44,7 +43,7 @@ const FLOOR_POINTS = 200_000;
 const SLOW_FRAME_MS = 200;
 const FAST_FRAME_MS = 1;
 /** The settled target itself, the loop's own thresholds rather than a copy. */
-const SETTLED_TARGET_MS = LOD_DEFAULTS.stationaryTargetMs;
+const SETTLED_TARGET_MS = ADAPTIVE_QUALITY_DEFAULTS.stationaryTargetMs;
 /**
  * The frame time a run starts from, stated so that the starting budget is not
  * decided by how loaded this machine happened to be.
@@ -78,18 +77,17 @@ const HOLD_FRAMES = 12;
 const SAMPLE_INTERVAL_MS = 25;
 
 /** One distinct state of the budget loop, as the page's own frame clock saw it. */
-type BudgetState = {
-  readonly trackBudget: number;
-  readonly memoryCeilingPoints: number | null;
+type QualityState = {
+  readonly viewQualityFraction: number;
   readonly needsFrame: boolean;
   readonly reason: string;
   readonly direction: string;
-  readonly fromBudget: number;
-  readonly toBudget: number;
+  readonly fromFraction: number;
+  readonly toFraction: number;
 };
 
-type BudgetTrace = {
-  readonly states: BudgetState[];
+type QualityTrace = {
+  readonly states: QualityState[];
   /** Frames the loop measured, counted from the stamp it puts on each decision. */
   readonly measuredFrames: number;
 };
@@ -99,22 +97,21 @@ type RecorderWindow = {
   pointCloudExample: {
     stats(): {
       governor: {
-        trackBudget: number;
-        memoryCeilingPoints: number | null;
+        viewQualityFraction: number;
         needsFrame: boolean;
         lastAdjustment: {
           atMs: number;
           reason: string;
           direction: string;
-          fromBudget: number;
-          toBudget: number;
+          fromFraction: number;
+          toFraction: number;
         } | null;
       } | null;
     };
     needsFrame(): boolean;
   };
   __budgetTrace?: {
-    states: BudgetState[];
+    states: QualityState[];
     measuredFrames: number;
     previousKey: string;
     previousAtMs: number | null;
@@ -137,7 +134,7 @@ const recordBudgetStates = (session: ExampleSession): Promise<void> =>
     const view = window as unknown as RecorderWindow;
     if (view.__budgetTrace !== undefined) return;
     const trace = {
-      states: [] as BudgetState[],
+      states: [] as QualityState[],
       measuredFrames: 0,
       previousKey: "",
       previousAtMs: null as number | null,
@@ -153,14 +150,14 @@ const recordBudgetStates = (session: ExampleSession): Promise<void> =>
           trace.previousAtMs = adjustment.atMs;
           trace.measuredFrames += 1;
         }
-        const state: BudgetState = {
-          trackBudget: governor.trackBudget,
-          memoryCeilingPoints: governor.memoryCeilingPoints,
+        const state: QualityState = {
+          viewQualityFraction: governor.viewQualityFraction,
           needsFrame: governor.needsFrame,
           reason: adjustment?.reason ?? "none",
           direction: adjustment?.direction ?? "none",
-          fromBudget: adjustment?.fromBudget ?? governor.trackBudget,
-          toBudget: adjustment?.toBudget ?? governor.trackBudget,
+          fromFraction:
+            adjustment?.fromFraction ?? governor.viewQualityFraction,
+          toFraction: adjustment?.toFraction ?? governor.viewQualityFraction,
         };
         const key = JSON.stringify(state);
         if (key !== trace.previousKey) {
@@ -178,7 +175,7 @@ const recordBudgetStates = (session: ExampleSession): Promise<void> =>
  * trace. The frame stamp survives a drain — a phase that must show no frames
  * were painted cannot have its counter reset into counting one.
  */
-const drainBudgetStates = (session: ExampleSession): Promise<BudgetTrace> =>
+const drainBudgetStates = (session: ExampleSession): Promise<QualityTrace> =>
   session.page.evaluate(() => {
     const trace = (window as unknown as RecorderWindow).__budgetTrace;
     if (trace === undefined) return { states: [], measuredFrames: 0 };
@@ -190,7 +187,7 @@ const drainBudgetStates = (session: ExampleSession): Promise<BudgetTrace> =>
     trace.measuredFrames = 0;
     trace.previousKey = "";
     return taken;
-  }) as Promise<BudgetTrace>;
+  }) as Promise<QualityTrace>;
 
 const pageNeedsFrame = (session: ExampleSession): Promise<boolean> =>
   session.page.evaluate(() =>
@@ -242,12 +239,12 @@ const drive = async (
 };
 
 /** The governor has reached a bound and has stopped requesting measurements. */
-const budgetClamped =
-  (acceptBudget: (points: number) => boolean) =>
+const qualityClamped =
+  (acceptFraction: (fraction: number) => boolean) =>
   (trail: readonly Sample[]): boolean => {
     const view = governorOf(trail[trail.length - 1]!.stats);
     return (
-      acceptBudget(view.trackBudget) &&
+      acceptFraction(view.viewQualityFraction) &&
       view.needsFrame === false &&
       view.lastAdjustment?.reason === "clamped"
     );
@@ -260,7 +257,7 @@ const heldFor =
     trail[trail.length - 1]!.at - trail[0]!.at >= durationMs &&
     trail.length >= frames;
 
-const shown = (trace: BudgetTrace): string => JSON.stringify(trace, null, 2);
+const shown = (trace: QualityTrace): string => JSON.stringify(trace, null, 2);
 
 /**
  * What is true of the budget at every frame of every scenario, whichever way
@@ -269,31 +266,29 @@ const shown = (trace: BudgetTrace): string => JSON.stringify(trace, null, 2);
  * ceiling, and invisible to any check that only asked whether the number was a
  * number.
  */
-const assertBudgetBounded = (trace: BudgetTrace): void => {
+const assertQualityBounded = (trace: QualityTrace): void => {
   expect(
     trace.states.length,
     `nothing was recorded\n${shown(trace)}`,
   ).toBeGreaterThan(0);
   for (const state of trace.states) {
     expect(
-      Number.isFinite(state.trackBudget),
-      `the budget stopped being a finite number\n${shown(trace)}`,
+      Number.isFinite(state.viewQualityFraction),
+      `the quality fraction stopped being finite\n${shown(trace)}`,
     ).toBe(true);
     expect(
-      state.trackBudget,
-      `the budget cut below its floor\n${shown(trace)}`,
-    ).toBeGreaterThanOrEqual(FLOOR_POINTS);
-    if (state.memoryCeilingPoints !== null) {
-      expect(
-        state.trackBudget,
-        `the budget grew past the memory ceiling\n${shown(trace)}`,
-      ).toBeLessThanOrEqual(state.memoryCeilingPoints);
-    }
+      state.viewQualityFraction,
+      `quality cut below its normalized floor\n${shown(trace)}`,
+    ).toBeGreaterThanOrEqual(MIN_VIEW_QUALITY_FRACTION);
+    expect(
+      state.viewQualityFraction,
+      `quality grew past its normalized maximum\n${shown(trace)}`,
+    ).toBeLessThanOrEqual(1);
   }
 };
 
 /** Every decision that actually moved the budget. */
-const changesIn = (trace: BudgetTrace): BudgetState[] =>
+const changesIn = (trace: QualityTrace): QualityState[] =>
   trace.states.filter((state) => state.direction !== "none");
 
 /**
@@ -322,11 +317,11 @@ describeAdaptive("the adaptive budget loop at stated frame times", () => {
       const session = await openAdaptive(cloud.urlPath);
       try {
         const settled = await settleAndAssert(session, SETTLE_MS);
-        const before = governorOf(settled).trackBudget;
+        const before = governorOf(settled).viewQualityFraction;
         expect(
           before,
-          "the settled budget was already on the floor, so no fall could show",
-        ).toBeGreaterThan(FLOOR_POINTS);
+          "settled quality was already on the floor, so no fall could show",
+        ).toBeGreaterThan(MIN_VIEW_QUALITY_FRACTION);
 
         // The settle's own decisions belong to the previous frame time.
         await drainBudgetStates(session);
@@ -337,18 +332,20 @@ describeAdaptive("the adaptive budget loop at stated frame times", () => {
           () =>
             drive(
               session,
-              "the budget stops falling",
-              budgetClamped((points) => points === FLOOR_POINTS),
+              "quality stops falling",
+              qualityClamped(
+                (fraction) => fraction === MIN_VIEW_QUALITY_FRACTION,
+              ),
             ),
         );
         const fall = await drainBudgetStates(session);
         const after = governorOf(falling[falling.length - 1]!.stats);
 
         expect(
-          after.trackBudget,
-          `frames far over target left the budget where it was\n${shown(fall)}`,
+          after.viewQualityFraction,
+          `frames far over target left quality where it was\n${shown(fall)}`,
         ).toBeLessThan(before);
-        assertBudgetBounded(fall);
+        assertQualityBounded(fall);
 
         // Frame time is what the fall must be attributed to. A cut from the
         // gesture path (`emergency-cut`) or a reseed would move the same number
@@ -368,20 +365,20 @@ describeAdaptive("the adaptive budget loop at stated frame times", () => {
             `the fall was not attributed to frame time\n${shown(fall)}`,
           ).toBe("above-target");
           expect(
-            cut.toBudget,
+            cut.toFraction,
             `a decrease that did not decrease\n${shown(fall)}`,
-          ).toBeLessThan(cut.fromBudget);
+          ).toBeLessThan(cut.fromFraction);
         }
 
-        // The decision has to reach the cloud, not just the governor's stats.
-        expect(
-          governorOf(await session.stats()).aggregateBudget,
-          "the governor's budget never reached the controller",
-        ).toBe((await session.stats()).controller!.pointBudget);
+        // The normalized decision has to reach point-specific allocation, not
+        // remain a governor diagnostic.
+        expect((await session.stats()).controller!.pointBudget).toBeLessThan(
+          settled.controller!.pointBudget,
+        );
 
         // Monotonic is not the same as stable: keep the slow frames coming and
         // the loop must sit still rather than integrate downward or oscillate.
-        const landed = after.trackBudget;
+        const landed = after.viewQualityFraction;
         await drainBudgetStates(session);
         await watching(session, SAMPLE_INTERVAL_MS, () =>
           drive(
@@ -396,14 +393,14 @@ describeAdaptive("the adaptive budget loop at stated frame times", () => {
           hold.measuredFrames,
           `the hold measured no frames, so it proved nothing\n${shown(hold)}`,
         ).toBeGreaterThan(10);
-        assertBudgetBounded(hold);
+        assertQualityBounded(hold);
         expect(
           changesIn(hold),
           `the loop kept adjusting after it had come down\n${shown(hold)}`,
         ).toEqual([]);
         expect(
-          [...new Set(hold.states.map((state) => state.trackBudget))],
-          `the budget moved while nothing about the frames did\n${shown(hold)}`,
+          [...new Set(hold.states.map((state) => state.viewQualityFraction))],
+          `quality moved while nothing about the frames did\n${shown(hold)}`,
         ).toEqual([landed]);
 
         await settleAndAssert(session, SETTLE_MS);
@@ -429,11 +426,11 @@ describeAdaptive("the adaptive budget loop at stated frame times", () => {
           view.targetFrameTimeMs,
           "the settled target is not the one these frames are stated against",
         ).toBe(SETTLED_TARGET_MS);
-        const before = view.trackBudget;
+        const before = view.viewQualityFraction;
         expect(
           before,
-          "the budget was already on its floor, so a fall could not show",
-        ).toBeGreaterThan(FLOOR_POINTS);
+          "quality was already on its floor, so a fall could not show",
+        ).toBeGreaterThan(MIN_VIEW_QUALITY_FRACTION);
 
         await drainBudgetStates(session);
         await session.setSyntheticFrameMs(SETTLED_TARGET_MS);
@@ -455,8 +452,8 @@ describeAdaptive("the adaptive budget loop at stated frame times", () => {
           `frames at the target moved the budget\n${shown(trace)}`,
         ).toEqual([]);
         expect(
-          governorOf(await session.stats()).trackBudget,
-          `frames at the target cost the cloud points\n${shown(trace)}`,
+          governorOf(await session.stats()).viewQualityFraction,
+          `frames at the target reduced quality\n${shown(trace)}`,
         ).toBe(before);
         expect(
           trace.states.map((state) => state.reason),
@@ -480,16 +477,18 @@ describeAdaptive("the adaptive budget loop at stated frame times", () => {
         await watching(session, SAMPLE_INTERVAL_MS, () =>
           drive(
             session,
-            "the budget reaches its floor",
-            budgetClamped((points) => points === FLOOR_POINTS),
+            "quality reaches its floor",
+            qualityClamped(
+              (fraction) => fraction === MIN_VIEW_QUALITY_FRACTION,
+            ),
           ),
         );
-        const low = governorOf(await session.stats()).trackBudget;
-        expect(low, "slow frames did not pin the budget to its floor").toBe(
-          FLOOR_POINTS,
+        const low = governorOf(await session.stats()).viewQualityFraction;
+        expect(low, "slow frames did not pin quality to its floor").toBe(
+          MIN_VIEW_QUALITY_FRACTION,
         );
 
-        assertBudgetBounded(await drainBudgetStates(session));
+        assertQualityBounded(await drainBudgetStates(session));
         await session.setSyntheticFrameMs(FAST_FRAME_MS);
         const { result: rising } = await watching(
           session,
@@ -497,26 +496,20 @@ describeAdaptive("the adaptive budget loop at stated frame times", () => {
           () =>
             drive(
               session,
-              "the budget stops growing",
-              budgetClamped((points) => points > FLOOR_POINTS),
+              "quality stops growing",
+              qualityClamped(
+                (fraction) => fraction > MIN_VIEW_QUALITY_FRACTION,
+              ),
             ),
         );
         const growth = await drainBudgetStates(session);
         const grown = governorOf(rising[rising.length - 1]!.stats);
 
         expect(
-          grown.trackBudget,
-          `settled frames with headroom bought no points\n${shown(growth)}`,
+          grown.viewQualityFraction,
+          `settled frames with headroom bought no quality\n${shown(growth)}`,
         ).toBeGreaterThan(low);
-        assertBudgetBounded(growth);
-        expect(
-          grown.memoryCeilingPoints,
-          "the governor reported no memory ceiling to bound growth",
-        ).not.toBeNull();
-        expect(
-          grown.trackBudget,
-          `growth ended above the ceiling the governor reports\n${shown(growth)}`,
-        ).toBeLessThanOrEqual(grown.memoryCeilingPoints!);
+        assertQualityBounded(growth);
 
         const gains = changesIn(growth);
         expect(
@@ -533,22 +526,23 @@ describeAdaptive("the adaptive budget loop at stated frame times", () => {
             `growth was not attributed to frame time\n${shown(growth)}`,
           ).toBe("below-target");
           expect(
-            gain.toBudget,
+            gain.toFraction,
             `an increase that did not increase\n${shown(growth)}`,
-          ).toBeGreaterThan(gain.fromBudget);
+          ).toBeGreaterThan(gain.fromFraction);
         }
         expect(
-          governorOf(await session.stats()).aggregateBudget,
-          "the governor's budget never reached the controller",
-        ).toBe((await session.stats()).controller!.pointBudget);
+          (await session.stats()).controller!.pointBudget,
+          "the normalized quality gain never reached point allocation",
+        ).toBeGreaterThan(DEFAULT_MIN_POINT_BUDGET);
 
         // The defect that shipped: a view that keeps asking for frames once
         // nothing can change repaints identical pixels for ever.
-        const idle = await session.until(
-          "the governor to stop asking for frames",
-          (stats) => stats.governor?.needsFrame === false,
-          30_000,
-        );
+        // Reaching the normalized ceiling can start point-member selection:
+        // the format-neutral governor is correctly clamped before that member
+        // has finished its final fetch/submission frames. Prove whole-scene
+        // convergence before interpreting no governor demand as no painting.
+        const idle = await settleAndAssert(session, SETTLE_MS);
+        expect(idle.governor?.needsFrame).toBe(false);
         expect(
           await pageNeedsFrame(session),
           `the view still wants frames\n${shown(growth)}`,
@@ -567,11 +561,11 @@ describeAdaptive("the adaptive budget loop at stated frame times", () => {
           quiet.states.filter((state) => state.needsFrame),
           `the view started asking for frames again while idle\n${shown(quiet)}`,
         ).toEqual([]);
-        assertBudgetBounded(quiet);
+        assertQualityBounded(quiet);
         expect(
-          governorOf(idle).trackBudget,
-          "the budget moved on after growth was supposed to have stopped",
-        ).toBe(grown.trackBudget);
+          governorOf(idle).viewQualityFraction,
+          "quality moved on after growth was supposed to have stopped",
+        ).toBe(grown.viewQualityFraction);
 
         await settleAndAssert(session, SETTLE_MS);
         expect(session.failures).toEqual([]);

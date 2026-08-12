@@ -12,7 +12,7 @@ export default defineConfig({
       // without the peer.
       entry: {
         index: "src/index.ts",
-        rendererAdapter: "src/rendererAdapter.ts",
+        vtk: "src/vtk.ts",
         copcWorker: "src/copcWorker.ts",
       },
       formats: ["es"],
@@ -38,6 +38,8 @@ export default defineConfig({
       ),
       "@kitware/vtk.js/Common/DataModel/PolyData": stub("vtkPolyData"),
       "@kitware/vtk.js/Common/Core/DataArray": stub("vtkDataArray"),
+      "@kitware/vtk.js/Rendering/Core/Mapper": stub("vtkMapper"),
+      "@kitware/vtk.js/Rendering/Core/Texture": stub("vtkTexture"),
     },
   },
 });

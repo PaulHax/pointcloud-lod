@@ -329,9 +329,9 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
           x: box.x + box.width / 2,
           y: box.y + box.height / 2,
         };
-        // The knob asks the view-wide allocator for a density; the allocator
-        // answers with the one it can hold under this cloud's memory ceiling.
-        // The capture reports what it drew at, not what it asked for.
+        // Fixed quality is deliberately point-specific: it bypasses the
+        // normalized adaptive governor and thins the selected point prefixes
+        // directly. The capture reports what the renderer actually drew.
         let appliedInteractionDensity: number | null = null;
         const markMotionBoundary = async (
           label: string,

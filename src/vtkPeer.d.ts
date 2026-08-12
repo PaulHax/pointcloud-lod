@@ -1,9 +1,4 @@
-/**
- * Minimal ambient declarations for the '@kitware/vtk.js' peer dependency.
- * The peer ships no such deep-import types to non-installed consumers; the
- * adapter uses only these surfaces, and tests stub the same specifiers.
- */
-
+/** Minimal ambient declarations for the vtk.js peer's deep imports. */
 declare module "@kitware/vtk.js/Rendering/Core/Actor" {
   const vtkActor: { newInstance(initialValues?: object): any };
   export default vtkActor;
@@ -22,4 +17,14 @@ declare module "@kitware/vtk.js/Common/DataModel/PolyData" {
 declare module "@kitware/vtk.js/Common/Core/DataArray" {
   const vtkDataArray: { newInstance(initialValues?: object): any };
   export default vtkDataArray;
+}
+
+declare module "@kitware/vtk.js/Rendering/Core/Mapper" {
+  const vtkMapper: { newInstance(initialValues?: object): any };
+  export default vtkMapper;
+}
+
+declare module "@kitware/vtk.js/Rendering/Core/Texture" {
+  const vtkTexture: { newInstance(initialValues?: object): any };
+  export default vtkTexture;
 }

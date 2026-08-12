@@ -1,14 +1,13 @@
 /**
  * Shared GPU-memory budget for resident tiles.
  *
- * The adaptive budget loop only measures render duration, and frame time
+ * The adaptive quality loop only measures render duration, and frame time
  * stays healthy right up until GPU memory runs out — then the failure is an
- * allocation error or a lost context, not a slow frame. The pool is the
- * memory half of the governor: a byte budget for resident tile data that the
- * controller converts into a point ceiling the frame-time loop can never
- * exceed.
+ * allocation error or a lost context, not a slow frame. Memory is therefore
+ * a separate byte axis: each streamed member interprets its allowance in its
+ * own format-specific way.
  *
- * One pool per GPU (in practice: per page). Every controller registers as a
+ * One pool per GPU (in practice: per page). Every active member registers as a
  * member and receives an even share of the total, so N clouds never multiply
  * the memory footprint by N. Membership changes notify the remaining members
  * so they can re-derive their ceilings and reselect.
@@ -66,6 +65,12 @@ export type MemoryPool = {
    */
   register(onChange?: () => void): MemoryPoolMember;
   memberCount(): number;
+  /** Aggregate public diagnostics for cross-format/page-wide enforcement. */
+  stats?(): {
+    readonly totalBytes: number;
+    readonly memberCount: number;
+    readonly shareBytes: number;
+  };
 };
 
 export const createMemoryPool = (
@@ -105,5 +110,12 @@ export const createMemoryPool = (
     },
 
     memberCount: () => members.size,
+    stats: () => ({
+      totalBytes,
+      memberCount: members.size,
+      shareBytes: members.size
+        ? Math.floor(totalBytes / members.size)
+        : totalBytes,
+    }),
   };
 };

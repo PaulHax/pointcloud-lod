@@ -1,0 +1,784 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import type { CameraView } from "../camera";
+import { createMemoryPool } from "../memoryPool";
+import { createSubmissionScheduler } from "../submissionScheduler";
+import type { StreamedMemberContext } from "../streamedMember";
+import type { DecodeTileRequest, DecodedTileContent } from "./decode";
+import { createTiles3dMember } from "./member";
+import type { Tiles3dMemberConfig, Tiles3dMemberStats } from "./memberTypes";
+import { actorInstances, resetStubs } from "../../test/stubs/vtkStub";
+
+const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+const view: CameraView = {
+  projection: "perspective",
+  viewProj: identity,
+  position: [0, 0, -1],
+  fovY: Math.PI / 2,
+  viewportWidthCssPx: 100,
+  viewportHeightCssPx: 100,
+};
+
+const tile = (
+  uri: string,
+  geometricError: number,
+  children: unknown[] = [],
+) => ({
+  geometricError,
+  refine: "REPLACE",
+  boundingVolume: { box: [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1] },
+  content: { uri },
+  children,
+});
+
+const contentlessTile = (geometricError: number, children: unknown[]) => ({
+  geometricError,
+  refine: "REPLACE",
+  boundingVolume: { box: [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1] },
+  children,
+});
+
+const document = (withChildren = false) => ({
+  asset: { version: "1.1" },
+  geometricError: 8,
+  root: tile(
+    "root.glb",
+    withChildren ? 8 : 0,
+    withChildren ? [tile("left.glb", 0), tile("right.glb", 0)] : [],
+  ),
+});
+
+const decoded = (z = 0): DecodedTileContent => ({
+  origin: [0, 0, z],
+  primitives: [
+    {
+      positions: new Float32Array([-0.5, -0.5, 0, 0.5, -0.5, 0, 0, 0.5, 0]),
+      indices: new Uint16Array([0, 1, 2]),
+      material: {
+        baseColorFactor: [1, 1, 1, 1],
+        raw: {
+          version: 1,
+          kind: "gltf-material",
+          alphaMode: "OPAQUE",
+          alphaCutoff: 0.5,
+          doubleSided: false,
+          metallicFactor: 1,
+          roughnessFactor: 1,
+          emissiveFactor: [0, 0, 0],
+        },
+      },
+    },
+  ],
+  byteEstimate: { geometry: 42, textures: 0 },
+});
+
+const settle = async (): Promise<void> => {
+  for (let index = 0; index < 6; index += 1) await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+};
+
+const harness = (withChildren = false, schedulerBytes = 1024) => {
+  const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
+  const scheduleRender = vi.fn();
+  const decodedRequests: DecodeTileRequest[] = [];
+  const contentRequests: string[] = [];
+  const memory = createMemoryPool({ totalBytes: 4096 });
+  const submissions = createSubmissionScheduler({
+    scheduleRender,
+    maxBytesPerFrame: schedulerBytes,
+    maxTimeMsPerFrame: 100,
+    now: () => 0,
+  });
+  const context: StreamedMemberContext = {
+    renderer,
+    scheduleRender,
+    memory,
+    submissions,
+    textureCapabilities: {
+      capabilityKey: "compressed-texture-v1:astc-4x4",
+      compressedFormats: ["astc-4x4"],
+    },
+    workers: {
+      size: 3,
+      decode: (request) => {
+        decodedRequests.push(request);
+        return { promise: Promise.resolve(decoded()), cancel: vi.fn() };
+      },
+    },
+    devicePixelRatio: 1,
+    onWorkChange: vi.fn(),
+  };
+  const config: Tiles3dMemberConfig = {
+    endpoint: "/tiles",
+    revision: "r1",
+    ecefToScene: identity,
+    maximumScreenSpaceErrorPx: 4,
+    minConcurrency: 1,
+    maxConcurrency: 3,
+    fetchTileset: async () => ({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => document(withChildren),
+    }),
+    fetchContent: async (url) => {
+      contentRequests.push(url);
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        arrayBuffer: async () => new ArrayBuffer(8),
+      };
+    },
+  };
+  return {
+    context,
+    config,
+    renderer,
+    memory,
+    submissions,
+    decodedRequests,
+    contentRequests,
+  };
+};
+
+describe("createTiles3dMember", () => {
+  beforeEach(resetStubs);
+
+  it("implements the streamed member lifecycle without a second memory owner", async () => {
+    const h = harness();
+    const member = createTiles3dMember(h.context, h.config);
+    expect(h.memory.memberCount()).toBe(0);
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    await settle();
+    expect(member.governorInputs()).toMatchObject({
+      projectedImportance: 1,
+      qualityDemand: 1,
+      workPending: true,
+    });
+    expect(h.decodedRequests[0]).toMatchObject({
+      revision: "r1",
+      textureCapabilities: h.context.textureCapabilities,
+      contentUrl: "http://localhost/tiles/root.glb",
+      dependencyRootUrl: "http://localhost/tiles/",
+    });
+    h.submissions.prepareFrame();
+    expect(h.renderer.addActor).toHaveBeenCalledOnce();
+    expect(member.pick(view, 50, 50)).toMatchObject({
+      status: "hit",
+      rayDepth: 1,
+    });
+    expect(member.occlusionDepth(view, 50, 50)).toEqual({
+      status: "hit",
+      rayDepth: 1,
+    });
+
+    member.setModelMatrix([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.25, 0, 0, 1]);
+    expect(actorInstances[0]?.userMatrix?.[12]).toBe(0.25);
+    member.setDevicePixelRatio(2);
+    member.beginInteraction();
+    member.endInteraction();
+    member.setConfig({ ...h.config, maximumScreenSpaceErrorPx: 8 });
+    expect(member.stats()).toMatchObject({
+      kind: "tiles3d",
+      devicePixelRatio: 2,
+      interactionDepth: 0,
+      configGeneration: 1,
+      verticalExaggeration: 1,
+      verticalPivotZ: 0,
+      role: "model",
+      textureAssetId: null,
+      maximumScreenSpaceErrorPx: 8,
+      renderer: { drawnTiles: 1, drawnTriangles: 1 },
+    });
+
+    member.setActive(false);
+    expect(actorInstances[0]?.visibility).toBe(false);
+    expect(member.governorInputs().workPending).toBe(false);
+    member.setActive(true);
+    member.prepareFrame();
+    member.dispose();
+    expect(actorInstances[0]?.deleted).toBe(true);
+    expect((member.stats() as Tiles3dMemberStats).sourceState).toBe("disposed");
+  });
+
+  it("keeps exact submitted picking after the decoded CPU cache evicts", async () => {
+    const h = harness();
+    const member = createTiles3dMember(h.context, h.config);
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    await settle();
+    h.submissions.prepareFrame();
+    expect(member.stats()).toMatchObject({
+      queue: { decodedBytes: decoded().byteEstimate.geometry },
+      // Submitted chunks own deindexed positions plus vtk Uint32 cell records;
+      // this charged representation is separate from the worker cache.
+      renderer: { residentGeometryBytes: 52, residentBytes: 52 },
+    });
+
+    member.setConfig({ ...h.config, cacheBytes: 0 });
+    expect(member.stats()).toMatchObject({
+      queue: { decodedBytes: 0 },
+      renderer: {
+        submittedTiles: 1,
+        drawnTiles: 1,
+        residentGeometryBytes: 52,
+        residentBytes: 52,
+      },
+    });
+    expect(member.pick(view, 50, 50)).toMatchObject({
+      status: "hit",
+      rayDepth: 1,
+    });
+
+    member.dispose();
+  });
+
+  it("preserves nested decode causes in public diagnostics", async () => {
+    const h = harness(false);
+    h.context.workers.decode = () => ({
+      promise: Promise.reject(new Error("codec unavailable")),
+      cancel: vi.fn(),
+    });
+    const member = createTiles3dMember(h.context, {
+      ...h.config,
+      maxAttempts: 1,
+    });
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    await settle();
+
+    expect((member.stats() as Tiles3dMemberStats).lastError).toMatch(
+      /content decode failed: codec unavailable/,
+    );
+  });
+
+  it("holds a submitted parent until every child crosses paced admission", async () => {
+    const h = harness(true, 128);
+    const member = createTiles3dMember(h.context, h.config);
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    await settle();
+    expect(h.submissions.stats().queuedJobs).toBe(3);
+    h.submissions.prepareFrame();
+    expect((member.stats() as Tiles3dMemberStats).renderer).toMatchObject({
+      drawnTiles: 1,
+      submittedTiles: 2,
+    });
+    h.submissions.prepareFrame();
+    expect((member.stats() as Tiles3dMemberStats).renderer).toMatchObject({
+      drawnTiles: 2,
+      submittedTiles: 2,
+    });
+    expect(h.renderer.removeActor).toHaveBeenCalledOnce();
+    member.dispose();
+  });
+
+  it("loads and picks descendants of a contentless root without blank work", async () => {
+    const h = harness();
+    const rootContentless = {
+      asset: { version: "1.1" },
+      geometricError: 8,
+      root: contentlessTile(0, [tile("left.glb", 0), tile("right.glb", 0)]),
+    };
+    const member = createTiles3dMember(h.context, {
+      ...h.config,
+      fetchTileset: async () => ({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => rootContentless,
+      }),
+    });
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    await settle();
+
+    expect(h.contentRequests).toEqual(["/tiles/left.glb", "/tiles/right.glb"]);
+    expect(h.decodedRequests.map((request) => request.contentUrl)).toEqual([
+      "http://localhost/tiles/left.glb",
+      "http://localhost/tiles/right.glb",
+    ]);
+    while (h.submissions.hasPending()) h.submissions.prepareFrame();
+    expect(member.stats()).toMatchObject({
+      selectedTiles: 2,
+      requestedTiles: 2,
+      renderer: { submittedTiles: 2, drawnTiles: 2 },
+    });
+    expect(member.pick(view, 50, 50)?.status).toBe("hit");
+    member.dispose();
+  });
+
+  it("keeps a real parent fallback across a contentless intermediate", async () => {
+    const h = harness(false, 128);
+    const intermediateContentless = {
+      asset: { version: "1.1" },
+      geometricError: 8,
+      root: tile("root.glb", 8, [
+        contentlessTile(0, [tile("left.glb", 0), tile("right.glb", 0)]),
+      ]),
+    };
+    const member = createTiles3dMember(h.context, {
+      ...h.config,
+      fetchTileset: async () => ({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => intermediateContentless,
+      }),
+    });
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    await settle();
+
+    expect(h.contentRequests).toEqual([
+      "/tiles/root.glb",
+      "/tiles/left.glb",
+      "/tiles/right.glb",
+    ]);
+    h.submissions.prepareFrame();
+    expect(member.stats()).toMatchObject({
+      selectedTiles: 2,
+      requestedTiles: 3,
+      renderer: { submittedTiles: 2, drawnTiles: 1 },
+    });
+    h.submissions.prepareFrame();
+    expect(member.stats()).toMatchObject({
+      renderer: { submittedTiles: 2, drawnTiles: 2 },
+    });
+    expect(member.pick(view, 50, 50)?.status).toBe("hit");
+    member.dispose();
+  });
+
+  it("cancels selection work and partial submissions without stale callbacks", async () => {
+    const h = harness(false, 16);
+    const member = createTiles3dMember(h.context, h.config);
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    await settle();
+    // Shrink before the queued geometry admission crosses the boundary.
+    expect(h.renderer.addActor).not.toHaveBeenCalled();
+    member.setActive(false);
+    while (h.submissions.hasPending()) h.submissions.prepareFrame();
+    expect(h.renderer.addActor).not.toHaveBeenCalled();
+    expect(actorInstances.every((actor) => actor.deleted)).toBe(true);
+    member.dispose();
+  });
+
+  it("maps quality to SSE and bounded concurrency and contains source errors", async () => {
+    const h = harness();
+    const onError = vi.fn();
+    const member = createTiles3dMember(h.context, {
+      ...h.config,
+      fetchTileset: async () => {
+        throw new Error("offline");
+      },
+      onError,
+    });
+    member.applyAllocation({
+      qualityFraction: 0.25,
+      memoryBudgetBytes: 2048,
+      regime: "moving",
+    });
+    member.setCamera(view);
+    await settle();
+    expect(onError).toHaveBeenCalledOnce();
+    expect(member.governorInputs().physicalHierarchyOperations).toBe(0);
+    expect(member.stats()).toMatchObject({
+      sourceState: "failed",
+      sseMultiplier: 4,
+      effectiveScreenSpaceErrorPx: 16,
+      errorCount: 1,
+    });
+    member.dispose();
+  });
+
+  it("retries ready decoded content when its GPU allocation grows", async () => {
+    const h = harness();
+    const member = createTiles3dMember(h.context, h.config);
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 1,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    await settle();
+    expect(h.submissions.stats().queuedJobs).toBe(0);
+    expect((member.stats() as Tiles3dMemberStats).errorCount).toBe(0);
+    expect((member.stats() as Tiles3dMemberStats).lastError).toBeNull();
+    expect(
+      (member.stats() as Tiles3dMemberStats).queue?.decodedBytes,
+    ).toBeGreaterThan(1);
+    expect(member.governorInputs().workPending).toBe(true);
+    expect(member.stats()).toMatchObject({
+      memoryConstrained: true,
+      renderer: { residentBytes: 0 },
+    });
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    expect(h.submissions.stats().queuedJobs).toBeGreaterThan(0);
+    h.submissions.prepareFrame();
+    expect(h.renderer.addActor).toHaveBeenCalledOnce();
+    member.dispose();
+  });
+
+  it("swaps submitted descendants for a fitting parent before enforcing a smaller byte share", async () => {
+    const h = harness(true, 128);
+    const member = createTiles3dMember(h.context, h.config);
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    await settle();
+    while (h.submissions.hasPending()) h.submissions.prepareFrame();
+    expect(member.stats()).toMatchObject({
+      memoryConstrained: false,
+      renderer: { drawnTiles: 2, submittedTiles: 2 },
+    });
+
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 60,
+      regime: "stationary",
+    });
+    await settle();
+    expect(member.stats()).toMatchObject({
+      memoryConstrained: true,
+      renderer: { drawnTiles: 2, submittedTiles: 2, pendingTiles: 1 },
+    });
+    expect(member.governorInputs().workPending).toBe(true);
+
+    h.submissions.prepareFrame();
+    const converged = member.stats() as Tiles3dMemberStats;
+    expect(converged.renderer).toMatchObject({
+      drawnTiles: 1,
+      submittedTiles: 1,
+      pendingTiles: 0,
+    });
+    expect(converged.renderer.residentBytes).toBeLessThanOrEqual(60);
+    expect(h.renderer.removeActor).toHaveBeenCalledTimes(3);
+    member.dispose();
+  });
+
+  it("surfaces permanent adapter rejection once without retrying forever", async () => {
+    const h = harness();
+    (h.context.workers as any).decode = (request: DecodeTileRequest) => {
+      h.decodedRequests.push(request);
+      const invalid = decoded();
+      invalid.primitives[0]!.material.baseColorTexture = {
+        kind: "rgba",
+        rgba: new Uint8Array(2048),
+        width: 32,
+        height: 16,
+        colorSpace: "srgb",
+        sampler: {
+          magFilter: 9729,
+          minFilter: 9987,
+          wrapS: 10497,
+          wrapT: 10497,
+        },
+      };
+      return { promise: Promise.resolve(invalid), cancel: vi.fn() };
+    };
+    const member = createTiles3dMember(h.context, h.config);
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    await settle();
+    expect((member.stats() as Tiles3dMemberStats).errorCount).toBe(1);
+    expect((member.stats() as Tiles3dMemberStats).lastError).toMatch(
+      /texture is 2048 bytes.*submission cap/,
+    );
+    expect(member.governorInputs()).toMatchObject({
+      workPending: false,
+      physicalTileOperations: 0,
+    });
+    member.applyAllocation({
+      qualityFraction: 0.5,
+      memoryBudgetBytes: 4096,
+      regime: "moving",
+    });
+    await settle();
+    expect(h.decodedRequests).toHaveLength(1);
+    expect((member.stats() as Tiles3dMemberStats).errorCount).toBe(1);
+    member.dispose();
+  });
+
+  it("drops old submitted/pick currency before revision, endpoint, or placement reload", async () => {
+    const h = harness();
+    const member = createTiles3dMember(h.context, h.config);
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    await settle();
+    h.submissions.prepareFrame();
+    expect(member.pick(view, 50, 50)?.status).toBe("hit");
+    member.setConfig({
+      ...h.config,
+      endpoint: "/tiles-next",
+      revision: "r2",
+      ecefToScene: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 0, 0, 1],
+    });
+    expect(h.renderer.removeActor).toHaveBeenCalledOnce();
+    expect(member.pick(view, 50, 50)).toEqual({ status: "miss" });
+    expect(member.stats()).toMatchObject({
+      sourceState: "loading",
+      revision: "r2",
+      queue: null,
+      renderer: { submittedTiles: 0, drawnTiles: 0 },
+    });
+    member.dispose();
+  });
+
+  it("places vertical exaggeration after the tile origin without changing the live anchor", async () => {
+    const h = harness();
+    const ecefToScene = [
+      0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0.25, 0.5, 0.25, 1,
+    ];
+    const member = createTiles3dMember(h.context, {
+      ...h.config,
+      ecefToScene,
+      verticalExaggeration: 2,
+      verticalPivotZ: 0.5,
+      role: "terrain",
+      textureAssetId: "ortho-7",
+    });
+    const anchor = [0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] as const;
+    member.setModelMatrix(anchor);
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    await settle();
+
+    // Decoded vertices stay in unexaggerated scene ENU: exaggeration is a
+    // render-time placement, so changing it never re-fetches or re-decodes.
+    expect(h.decodedRequests[0]?.ecefToScene).toEqual(ecefToScene);
+    h.submissions.prepareFrame();
+    expect(actorInstances[0]?.userMatrix).toEqual([
+      0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 2, 0, 0, 0, -0.5, 1,
+    ]);
+    expect(anchor).toEqual([0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+    expect(member.stats()).toMatchObject({
+      configGeneration: 1,
+      verticalExaggeration: 2,
+      verticalPivotZ: 0.5,
+      role: "terrain",
+      textureAssetId: "ortho-7",
+    });
+
+    const decodedRequestCount = h.decodedRequests.length;
+    member.setConfig({
+      ...h.config,
+      ecefToScene,
+      verticalExaggeration: 4,
+      verticalPivotZ: -0.25,
+      role: "terrain",
+      textureAssetId: "ortho-8",
+    });
+    expect(h.renderer.removeActor).not.toHaveBeenCalled();
+    expect(member.stats()).toMatchObject({
+      configGeneration: 1,
+      verticalExaggeration: 4,
+      verticalPivotZ: -0.25,
+      role: "terrain",
+      textureAssetId: "ortho-8",
+      renderer: { submittedTiles: 1 },
+    });
+    expect(actorInstances[0]?.userMatrix).toEqual([
+      0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0.75, 1,
+    ]);
+    await settle();
+    expect(h.decodedRequests).toHaveLength(decodedRequestCount);
+    member.dispose();
+  });
+
+  it("retries a requested decoded tile after allocation shrink cancels partial admission", async () => {
+    const h = harness(false, 64);
+    const member = createTiles3dMember(h.context, h.config);
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    await settle();
+    // Keep the tile partially queued; the shrink itself performs cancellation.
+    expect((member.stats() as Tiles3dMemberStats).renderer).toMatchObject({
+      pendingTiles: 1,
+      submittedTiles: 0,
+    });
+    member.setConfig({ ...h.config, cacheBytes: 0 });
+    expect((member.stats() as Tiles3dMemberStats).queue?.decodedBytes).toBe(0);
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 1,
+      regime: "stationary",
+    });
+    await settle();
+    expect((member.stats() as Tiles3dMemberStats).renderer.pendingTiles).toBe(
+      0,
+    );
+    expect(h.decodedRequests.length).toBeGreaterThan(1);
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    await settle();
+    while (h.submissions.hasPending()) h.submissions.prepareFrame();
+    expect(h.renderer.addActor).toHaveBeenCalledOnce();
+    expect((member.stats() as Tiles3dMemberStats).errorCount).toBe(0);
+    member.dispose();
+  });
+
+  it("rejects non-affine and singular ECEF transforms at the factory boundary", () => {
+    const h = harness();
+    expect(() =>
+      createTiles3dMember(h.context, {
+        ...h.config,
+        ecefToScene: [1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+      }),
+    ).toThrow(/affine/);
+    expect(() =>
+      createTiles3dMember(h.context, {
+        ...h.config,
+        ecefToScene: [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+      }),
+    ).toThrow(/invertible/);
+  });
+
+  it.each([
+    ["verticalExaggeration", 0],
+    ["verticalExaggeration", -1],
+    ["verticalExaggeration", Number.NaN],
+    ["verticalExaggeration", Number.POSITIVE_INFINITY],
+    ["verticalPivotZ", Number.NaN],
+    ["verticalPivotZ", Number.NEGATIVE_INFINITY],
+  ] as const)("rejects invalid %s values", (field, value) => {
+    const h = harness();
+    expect(() =>
+      createTiles3dMember(h.context, { ...h.config, [field]: value }),
+    ).toThrow(new RegExp(field));
+  });
+
+  it("rejects non-number vertical configuration at the runtime boundary", () => {
+    const h = harness();
+    expect(() =>
+      createTiles3dMember(h.context, {
+        ...h.config,
+        verticalExaggeration: true as unknown as number,
+      }),
+    ).toThrow(/verticalExaggeration/);
+    expect(() =>
+      createTiles3dMember(h.context, {
+        ...h.config,
+        verticalPivotZ: "0" as unknown as number,
+      }),
+    ).toThrow(/verticalPivotZ/);
+    expect(() =>
+      createTiles3dMember(h.context, {
+        ...h.config,
+        verticalExaggeration: null as unknown as number,
+      }),
+    ).toThrow(/verticalExaggeration/);
+  });
+
+  it("validates durable terrain role and imagery association semantics", () => {
+    const h = harness();
+    const terrain = createTiles3dMember(h.context, {
+      ...h.config,
+      role: "terrain",
+      textureAssetId: "  ortho-asset  ",
+    });
+    expect(terrain.stats()).toMatchObject({
+      role: "terrain",
+      textureAssetId: "ortho-asset",
+    });
+    terrain.dispose();
+
+    expect(() =>
+      createTiles3dMember(h.context, {
+        ...h.config,
+        role: "other" as unknown as "model",
+      }),
+    ).toThrow(/role/);
+    expect(() =>
+      createTiles3dMember(h.context, {
+        ...h.config,
+        role: "model",
+        textureAssetId: "ortho",
+      }),
+    ).toThrow(/only.*terrain/);
+    expect(() =>
+      createTiles3dMember(h.context, {
+        ...h.config,
+        role: "terrain",
+        textureAssetId: "   ",
+      }),
+    ).toThrow(/non-empty/);
+  });
+
+  it("composes anchor after ecefToScene for traversal while decode keeps anchor live", async () => {
+    const h = harness();
+    const member = createTiles3dMember(h.context, {
+      ...h.config,
+      ecefToScene: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 10, 0, 0, 1],
+    });
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    await settle();
+    expect(h.decodedRequests).toHaveLength(0);
+    member.setModelMatrix([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -10, 0, 0, 1]);
+    await settle();
+    expect(h.decodedRequests).toHaveLength(1);
+    expect(h.decodedRequests[0]?.ecefToScene[12]).toBe(10);
+    member.dispose();
+  });
+});
