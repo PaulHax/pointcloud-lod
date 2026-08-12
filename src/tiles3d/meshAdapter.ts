@@ -575,6 +575,21 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
     }
   };
 
+  /** Drop every pending, submitted and pooled tile back to an empty adapter. */
+  const clearAll = (): void => {
+    for (const entry of pending.values()) cancelPending(entry);
+    for (const tile of submitted.values()) release(tile);
+    for (const tile of pooled.values()) release(tile);
+    pending.clear();
+    submitted.clear();
+    pooled.clear();
+    drawn.clear();
+    failed.clear();
+    replacementClaims.clear();
+    workRevision += 1;
+    options.scheduleRender();
+  };
+
   return {
     submitTile(id, content, onSubmitted, replacementIds = []) {
       if (disposed || failed.has(id)) return "failed";
@@ -850,18 +865,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
     },
 
     clearTiles() {
-      if (disposed) return;
-      for (const entry of pending.values()) cancelPending(entry);
-      for (const tile of submitted.values()) release(tile);
-      for (const tile of pooled.values()) release(tile);
-      pending.clear();
-      submitted.clear();
-      pooled.clear();
-      drawn.clear();
-      failed.clear();
-      replacementClaims.clear();
-      workRevision += 1;
-      options.scheduleRender();
+      if (!disposed) clearAll();
     },
 
     tileState(id) {
@@ -981,17 +985,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
     dispose() {
       if (disposed) return;
       disposed = true;
-      for (const entry of pending.values()) cancelPending(entry);
-      for (const tile of submitted.values()) release(tile);
-      for (const tile of pooled.values()) release(tile);
-      pending.clear();
-      submitted.clear();
-      pooled.clear();
-      drawn.clear();
-      failed.clear();
-      replacementClaims.clear();
-      workRevision += 1;
-      options.scheduleRender();
+      clearAll();
     },
   };
 };

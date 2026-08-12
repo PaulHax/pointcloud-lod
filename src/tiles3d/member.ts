@@ -1,6 +1,7 @@
 /** StreamedMember implementation for the constrained explicit 3D Tiles profile. */
 
 import type { CameraView, Mat16 } from "../camera";
+import { integerAtLeast } from "../numeric";
 import type {
   Allocation,
   GovernorInputs,
@@ -10,6 +11,7 @@ import type {
 import {
   createContentQueue,
   type ContentQueue,
+  type ContentQueueEntrySnapshot,
   type ContentQueueSnapshot,
 } from "./contentQueue";
 import type { DecodedTileContent } from "./decode";
@@ -68,17 +70,6 @@ const finiteMatrix = (
     throw new TypeError(`${label} must be invertible`);
   }
   return [...matrix];
-};
-
-const integerAtLeast = (
-  name: string,
-  value: number,
-  minimum: number,
-): number => {
-  if (!Number.isInteger(value) || value < minimum) {
-    throw new RangeError(`${name} must be an integer >= ${minimum}`);
-  }
-  return value;
 };
 
 const validateConfig = (config: Tiles3dMemberConfig): Tiles3dMemberConfig => {
@@ -199,6 +190,9 @@ export const createTiles3dMember = (
   let loadController: AbortController | null = null;
   let queue: ContentQueue<DecodedTileContent> | null = null;
   let queueSnapshot: ContentQueueSnapshot | null = null;
+  // Traversal asks readiness for every tile it visits, so the snapshot is
+  // indexed on arrival instead of scanned per tile.
+  let queueEntryById = new Map<string, ContentQueueEntrySnapshot>();
   let traversal: TilesetTraversalResult | null = null;
   let errorCount = 0;
   let lastError: string | null = null;
@@ -275,14 +269,26 @@ export const createTiles3dMember = (
     );
   };
 
+  const setQueueSnapshot = (snapshot: ContentQueueSnapshot | null): void => {
+    queueSnapshot = snapshot;
+    queueEntryById = new Map(
+      snapshot ? snapshot.entries.map((entry) => [entry.id, entry]) : [],
+    );
+  };
+
+  /** Submitted descendants a newly admitted tile replaces under REPLACE. */
+  const replacedDescendants = (id: string): string[] =>
+    adapter
+      .submittedTiles()
+      .map((tile) => tile.id)
+      .filter((submittedId) => submittedId.startsWith(`${id}/`));
+
   const readiness = (id: string) => {
     const state = adapter.tileState(id);
     if (state === "submitted") return "submitted" as const;
     if (state === "failed" || admissionFailed.has(id)) return "failed" as const;
     if (decoded.has(id)) return "decoded" as const;
-    const entry = queueSnapshot?.entries.find(
-      (candidate) => candidate.id === id,
-    );
+    const entry = queueEntryById.get(id);
     if (entry?.status === "failed") return "failed" as const;
     if (entry) return "loading" as const;
     return "unloaded" as const;
@@ -353,10 +359,7 @@ export const createTiles3dMember = (
           continue;
         const content = queue.get(id);
         if (content && !irreducibleBudget) {
-          const replacements = adapter
-            .submittedTiles()
-            .map((tile) => tile.id)
-            .filter((submittedId) => submittedId.startsWith(`${id}/`));
+          const replacements = replacedDescendants(id);
           const outcome = adapter.submitTile(
             id,
             content,
@@ -439,10 +442,7 @@ export const createTiles3dMember = (
       onContent: (request, content) => {
         if (disposed || !active || !requested.has(request.id)) return;
         decoded.add(request.id);
-        const replacements = adapter
-          .submittedTiles()
-          .map((tile) => tile.id)
-          .filter((submittedId) => submittedId.startsWith(`${request.id}/`));
+        const replacements = replacedDescendants(request.id);
         const outcome = adapter.submitTile(
           request.id,
           content,
@@ -471,7 +471,7 @@ export const createTiles3dMember = (
       },
       onError: (_request, error) => report(error),
       onStateChange: (snapshot) => {
-        queueSnapshot = snapshot;
+        setQueueSnapshot(snapshot);
         context.onWorkChange?.();
       },
     });
@@ -486,7 +486,7 @@ export const createTiles3dMember = (
     sourceState = "loading";
     source = null;
     traversal = null;
-    queueSnapshot = null;
+    setQueueSnapshot(null);
     context.onWorkChange?.();
     void loadTileset({
       endpoint: config.endpoint,
@@ -596,7 +596,7 @@ export const createTiles3dMember = (
         configGeneration += 1;
         queue?.dispose();
         queue = null;
-        queueSnapshot = null;
+        setQueueSnapshot(null);
         adapter.clearTiles();
         pickSet.replaceDrawn([]);
         source = null;
@@ -639,10 +639,10 @@ export const createTiles3dMember = (
           (sourceState === "loading" ||
             !!queueSnapshot?.workPending ||
             renderer.pendingJobs > 0 ||
-            (traversal?.requestedTileIds.some(
-              (id) =>
-                readiness(id) !== "submitted" && readiness(id) !== "failed",
-            ) ??
+            (traversal?.requestedTileIds.some((id) => {
+              const state = readiness(id);
+              return state !== "submitted" && state !== "failed";
+            }) ??
               false)),
         physicalTileOperations: active ? (queueSnapshot?.active ?? 0) : 0,
         physicalHierarchyOperations:
@@ -680,14 +680,16 @@ export const createTiles3dMember = (
       // If it was blocked by the previous GPU allowance, deselect/reselect it
       // so the larger allocation can fetch/decode again instead of leaving a
       // permanently-ready entry with no retained payload.
-      const uncachedBlocked = [...admissionBlocked].filter(
-        (id) => requested.has(id) && queue?.get(id) === undefined,
+      const uncachedBlocked = new Set(
+        [...admissionBlocked].filter(
+          (id) => requested.has(id) && queue?.get(id) === undefined,
+        ),
       );
-      if (queue && uncachedBlocked.length > 0) {
+      if (queue && uncachedBlocked.size > 0) {
         queue.setSelection(
           contentRequests(
             source!,
-            [...requested].filter((id) => !uncachedBlocked.includes(id)),
+            [...requested].filter((id) => !uncachedBlocked.has(id)),
           ),
         );
         for (const id of uncachedBlocked) {
@@ -706,6 +708,9 @@ export const createTiles3dMember = (
 
     stats(): Tiles3dMemberStats {
       const submissions = context.submissions.stats();
+      const effectiveSse =
+        traversal?.effectiveScreenSpaceErrorPx ??
+        maximumSse() / Math.max(allocation.qualityFraction, 0.05);
       return {
         kind: "tiles3d",
         active,
@@ -723,13 +728,8 @@ export const createTiles3dMember = (
         textureAssetId: config.textureAssetId ?? null,
         allocation,
         maximumScreenSpaceErrorPx: maximumSse(),
-        effectiveScreenSpaceErrorPx:
-          traversal?.effectiveScreenSpaceErrorPx ??
-          maximumSse() / Math.max(allocation.qualityFraction, 0.05),
-        sseMultiplier:
-          (traversal?.effectiveScreenSpaceErrorPx ??
-            maximumSse() / Math.max(allocation.qualityFraction, 0.05)) /
-          maximumSse(),
+        effectiveScreenSpaceErrorPx: effectiveSse,
+        sseMultiplier: effectiveSse / maximumSse(),
         memoryConstrained,
         selectedTiles: traversal?.desiredTileIds.length ?? 0,
         requestedTiles: traversal?.requestedTileIds.length ?? 0,

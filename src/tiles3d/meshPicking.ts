@@ -6,7 +6,11 @@ import {
   type CameraView,
   type Mat16,
 } from "../camera";
-import type { MemberPickResult, OcclusionResult } from "../streamedMember";
+import {
+  occlusionFromPick,
+  type MemberPickResult,
+  type OcclusionResult,
+} from "../streamedMember";
 import type { Bounds } from "../octree";
 import type { DecodedPrimitive } from "./decode";
 
@@ -253,14 +257,11 @@ export const createMeshPickSet = (): MeshPickSet => {
         : pickSubmittedTriangles(view, cssX, cssY, drawn, modelMatrix);
     },
     occlusionDepth(view, cssX, cssY) {
-      const result = disposed
-        ? null
-        : pickSubmittedTriangles(view, cssX, cssY, drawn, modelMatrix);
-      return result === null
-        ? null
-        : result.status === "hit"
-          ? { status: "hit", rayDepth: result.rayDepth }
-          : { status: "clear" };
+      return occlusionFromPick(
+        disposed
+          ? null
+          : pickSubmittedTriangles(view, cssX, cssY, drawn, modelMatrix),
+      );
     },
     dispose() {
       disposed = true;

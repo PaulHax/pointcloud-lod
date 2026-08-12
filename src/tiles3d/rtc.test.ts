@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  composeAnchoredSceneTransform,
+  composeSceneTransform,
   composeVerticalExaggeratedSceneTransform,
   createEcefToEnuTransform,
   createVerticalExaggerationTransform,
@@ -67,10 +67,9 @@ describe("3D Tiles RTC conversion", () => {
       0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 100, 200, 300, 1,
     ];
     const accumulated = translation(2, 3, 5);
-    const composed = composeAnchoredSceneTransform(
+    const composed = multiplyMat4(
       anchor,
-      ecefToScene,
-      accumulated,
+      composeSceneTransform(ecefToScene, accumulated),
     );
 
     expect(transformPoint(composed, [1, 0, 0])).toEqual([104, 214, 318]);

@@ -3,6 +3,8 @@
  * by the streamed-scene mesh member.
  */
 
+import { multiplyMat4Values } from "./rtc";
+
 export type TilesetFetchResponse = {
   readonly ok: boolean;
   readonly status: number;
@@ -185,22 +187,11 @@ const affineMatrix = (value: unknown, path: string): readonly number[] => {
 };
 
 /** Column-major f64 matrix multiplication. */
+/** Unvalidated product: tile transforms are checked when the tileset is read. */
 export const multiplyTilesetMatrices = (
   left: readonly number[],
   right: readonly number[],
-): readonly number[] => {
-  const result = Array.from({ length: 16 }, () => 0);
-  for (let column = 0; column < 4; column += 1) {
-    for (let row = 0; row < 4; row += 1) {
-      let value = 0;
-      for (let k = 0; k < 4; k += 1) {
-        value += left[k * 4 + row]! * right[column * 4 + k]!;
-      }
-      result[column * 4 + row] = value;
-    }
-  }
-  return Object.freeze(result);
-};
+): readonly number[] => Object.freeze(multiplyMat4Values(left, right));
 
 const normalizeEndpoint = (endpoint: string): string => {
   if (typeof endpoint !== "string" || endpoint.length === 0) {

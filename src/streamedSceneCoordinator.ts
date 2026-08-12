@@ -208,9 +208,11 @@ export const createStreamedSceneCoordinator = (
     if (disposed) return;
     const regime =
       governor.stats().regime === "interaction" ? "moving" : "stationary";
-    const contenders = [...members]
-      .filter((state) => state.active && state.qualityManaged)
-      .map((state) => ({ key: state, inputs: state.inputs }));
+    const contenders = [];
+    for (const state of members) {
+      if (isAdaptive(state))
+        contenders.push({ key: state, inputs: state.inputs });
+    }
     viewQualityFraction = governor.qualityFraction();
     const quality = allocateViewQuality(contenders, viewQualityFraction);
     for (const state of members) {
@@ -232,8 +234,15 @@ export const createStreamedSceneCoordinator = (
     }
   };
 
-  const adaptiveStates = (): MemberState[] =>
-    [...members].filter((state) => state.active && state.qualityManaged);
+  const isAdaptive = (state: MemberState): boolean =>
+    state.active && state.qualityManaged;
+
+  const adaptiveStates = (): MemberState[] => [...members].filter(isAdaptive);
+
+  const hasAdaptiveMember = (): boolean => {
+    for (const state of members) if (isAdaptive(state)) return true;
+    return false;
+  };
 
   const refresh = (): void => {
     if (disposed || refreshing) return;
@@ -264,21 +273,19 @@ export const createStreamedSceneCoordinator = (
       }
       // Fixed members do not consume normalized quality, but their frame cost
       // and incomplete work still contaminate the same view-wide sample.
-      const totals = [...members]
-        .filter((state) => state.active)
-        .reduce(
-          (total, state) => ({
-            tile: total.tile + state.inputs.physicalTileOperations,
-            hierarchy:
-              total.hierarchy + state.inputs.physicalHierarchyOperations,
-            pending: total.pending || state.inputs.workPending,
-          }),
-          { tile: 0, hierarchy: 0, pending: submissions.hasPending() },
-        );
+      let tileOperations = 0;
+      let hierarchyOperations = 0;
+      let pending = submissions.hasPending();
+      for (const state of members) {
+        if (!state.active) continue;
+        tileOperations += state.inputs.physicalTileOperations;
+        hierarchyOperations += state.inputs.physicalHierarchyOperations;
+        pending = pending || state.inputs.workPending;
+      }
       governor.setWorkState({
-        physicalTileOperations: totals.tile,
-        physicalHierarchyOperations: totals.hierarchy,
-        workPending: totals.pending,
+        physicalTileOperations: tileOperations,
+        physicalHierarchyOperations: hierarchyOperations,
+        workPending: pending,
       });
     } finally {
       refreshing = false;
@@ -425,14 +432,14 @@ export const createStreamedSceneCoordinator = (
       // Fixed-only views have no adaptive fraction to train. Fixed members do
       // still contaminate samples whenever at least one adaptive member is
       // present, because their frame cost belongs to that same host frame.
-      if (adaptiveStates().length > 0) governor.recordHostFrame(metrics);
+      if (hasAdaptiveMember()) governor.recordHostFrame(metrics);
       applyAllocations();
     },
 
     needsFrame: () =>
       !disposed &&
       (submissions.hasPending() ||
-        (adaptiveStates().length > 0 && governor.needsFrame())),
+        (hasAdaptiveMember() && governor.needsFrame())),
 
     stats() {
       refresh();
