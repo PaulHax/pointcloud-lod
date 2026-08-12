@@ -4,9 +4,9 @@
  * Streams any COPC dataset through a source worker — a local file through
  * `Blob.slice()` range reads, a remote URL through HTTP Range — using the same
  * three pieces the trame bridge wires together: one LOD controller per cloud,
- * one renderer adapter, and one view governor owning the point budget for the
- * whole view. Every knob (budget mode, frame-time targets, maximum points,
- * projection) is a runtime control, so a different cloud needs no code change.
+ * one renderer adapter, and one view governor owning normalized view quality.
+ * Every knob (budget mode, frame-time targets, maximum points, projection) is
+ * a runtime control, so a different cloud needs no code change.
  *
  * The governor never schedules a frame: this page paints, times the paint,
  * reports it, and asks `needsFrame()` whether another one is owed. That is the
@@ -24,14 +24,12 @@ import vtkCompositeCameraManipulator from "@kitware/vtk.js/Interaction/Manipulat
 import macro from "@kitware/vtk.js/macros";
 
 import {
-  DEFAULTS,
   ROOT_KEY,
   captureTelemetryEnvironment,
   createCopcWorkerTileSource,
   createGpuFrameTimer,
   createLodController,
   createTelemetryRecorder,
-  createViewBudgetCoordinator,
   createViewGovernor,
   keyToString,
   type CameraView,
@@ -45,12 +43,10 @@ import {
   type TelemetryTrace,
   type TileSource,
   type ViewGovernor,
-  type ViewGovernorMember,
   type ViewGovernorOptions,
   type ViewGovernorStats,
-  type ViewBudgetCoordinator,
-  type ViewBudgetMember,
 } from "../../src";
+import { DEFAULT_MIN_POINT_BUDGET } from "../../src/pointCloudMember";
 import {
   createRendererAdapter,
   type RendererAdapter,
@@ -447,12 +443,10 @@ let adapter: RendererAdapter | null = null;
 let loadedSource: TileSource | null = null;
 let governor: ViewGovernor | null = null;
 let governorKey: string | null = null;
-let member: ViewGovernorMember | null = null;
-let fixedBudget: ViewBudgetCoordinator | null = null;
-let fixedMember: ViewBudgetMember | null = null;
 let explicitMotion: MotionReference | null = null;
 let loadedName = "";
 let loadedPointCount = 0;
+let controllerWorkPending = false;
 let frameQueued = false;
 let frameStartedAt: number | null = null;
 let lastFrameMs = 0;
@@ -475,6 +469,8 @@ let autoPointScale = 0.5;
  * own from measured frame time and takes no preference.
  */
 let fixedDensityFraction = 1;
+/** Last settled quality retained as the moving selection/residency ceiling. */
+let stationaryQualityFraction = 1;
 
 const telemetryEnvironment = (): TelemetryEnvironment =>
   captureTelemetryEnvironment(
@@ -697,7 +693,7 @@ const readGovernorOptions = (): ViewGovernorOptions | null => {
     interactionTargetMs <= 0 ||
     stationaryTargetMs === null ||
     stationaryTargetMs <= 0 ||
-    (maxBudget !== null && maxBudget < DEFAULTS.minBudget)
+    (maxBudget !== null && maxBudget < DEFAULT_MIN_POINT_BUDGET)
   ) {
     return null;
   }
@@ -710,45 +706,72 @@ const readGovernorOptions = (): ViewGovernorOptions | null => {
     // leaving the default would normalise every honest 33 ms frame up to 47 ms
     // and walk the budget down to its floor while nothing was ever late.
     vtkFrameFraction: 1,
-    ...(maxBudget === null ? {} : { maxBudget: Math.floor(maxBudget) }),
   };
 };
 
 /**
- * Both policies use one view-wide allocator. Adaptive quality supplies targets
- * through the governor; fixed quality supplies the panel's target directly.
+ * Map normalized view quality onto the point member's useful ceiling.
+ *
+ * A stationary allocation changes selection and draws it all. While moving,
+ * the last stationary selection remains resident and only its point prefixes
+ * thin, so returning to full quality does not fetch or rebuild existing tiles.
  */
+const applyAdaptiveQuality = (): void => {
+  if (!controller || !governor) return;
+  const inputs = controller.governorInputs();
+  const configuredMaximum = numberFrom(maxPointsInput);
+  const fullCeiling = Math.max(
+    0,
+    Math.min(
+      loadedPointCount,
+      inputs.memoryCeilingPoints,
+      configuredMaximum === null
+        ? Number.POSITIVE_INFINITY
+        : Math.floor(configuredMaximum),
+    ),
+  );
+  const qualityFraction = Math.min(
+    governor.qualityFraction(),
+    fullCeiling > 0 && inputs.demandPoints > 0
+      ? Math.min(1, inputs.demandPoints / fullCeiling)
+      : 1,
+  );
+  const budgetAt = (fraction: number): number => {
+    const requested = Math.floor(fullCeiling * fraction);
+    const demandCapped =
+      inputs.demandPoints > 0
+        ? Math.min(requested, inputs.demandPoints)
+        : requested;
+    return Math.min(
+      fullCeiling,
+      Math.max(DEFAULT_MIN_POINT_BUDGET, demandCapped),
+    );
+  };
+  if (governor.stats().regime === "stationary") {
+    stationaryQualityFraction = qualityFraction;
+    controller.setPointBudget(budgetAt(qualityFraction));
+    controller.setDensityFraction(1);
+    return;
+  }
+  const drawPoints = budgetAt(qualityFraction);
+  const selectionPoints = budgetAt(
+    Math.max(stationaryQualityFraction, qualityFraction),
+  );
+  controller.setPointBudget(selectionPoints);
+  controller.setDensityFraction(
+    selectionPoints > 0 ? drawPoints / selectionPoints : 0,
+  );
+};
+
+/** Adaptive quality is normalized; fixed point controls remain point-specific. */
 const applyBudgetMode = (): void => {
   if (!controller) return;
   if (budgetMode() === "adaptive" && governor) {
-    fixedMember?.release();
-    fixedMember = null;
-    if (!member) {
-      member = governor.register({
-        id: loadedName || "cloud",
-        setPointBudget: (budget) => controller?.setPointBudget(budget),
-        setDensityFraction: (fraction) =>
-          controller?.setDensityFraction(fraction),
-      });
-      // A fresh member starts at "no work pending", which is only true if the
-      // controller happens to be idle right now.
-      reportWorkPending();
-    }
+    applyAdaptiveQuality();
     return;
   }
-  member?.release();
-  member = null;
-  fixedBudget ??= createViewBudgetCoordinator({
-    pointBudget: fixedPointBudget(),
-    densityFraction: fixedDensityFraction,
-  });
-  fixedBudget.setPointBudget(fixedPointBudget());
-  fixedBudget.setDensityFraction(fixedDensityFraction);
-  fixedMember ??= fixedBudget.register({
-    id: loadedName || "cloud",
-    setPointBudget: (budget) => controller?.setPointBudget(budget),
-    setDensityFraction: (fraction) => controller?.setDensityFraction(fraction),
-  });
+  controller.setPointBudget(fixedPointBudget());
+  controller.setDensityFraction(fixedDensityFraction);
 };
 
 const syncGovernor = (): void => {
@@ -759,7 +782,7 @@ const syncGovernor = (): void => {
     // the governor the panel last described.
     setMessage(
       "Frame-time targets must be above 0 ms and any maximum at least " +
-        `${DEFAULTS.minBudget.toLocaleString()} points.`,
+        `${DEFAULT_MIN_POINT_BUDGET.toLocaleString()} points.`,
       true,
     );
     return;
@@ -776,8 +799,6 @@ const syncGovernor = (): void => {
     governor.setOptions(wanted);
   } else {
     // Switching quality policy entirely: the governor goes away, or comes back.
-    member?.release();
-    member = null;
     governor?.dispose();
     governor = wanted === null ? null : createViewGovernor(wanted);
     // A gesture in progress belongs to the view, not to the instance.
@@ -919,7 +940,7 @@ const adjustmentChanged = (
   (before === null ||
     after.atMs !== before.atMs ||
     after.reason !== before.reason ||
-    after.toBudget !== before.toBudget);
+    after.toFraction !== before.toFraction);
 
 const finishGpuPresentation = (presentation: GpuPresentation): void => {
   const valid = presentation.status === "valid";
@@ -1135,7 +1156,6 @@ type StatSection = { title: string; rows: StatRow[] };
 const row = (label: string, value: string): StatRow => ({ label, value });
 
 const governorLines = (view: ViewGovernorStats): StatSection => {
-  const cloud = view.members[0] ?? null;
   const adjustment = view.lastAdjustment;
   return {
     title: "Budget chain",
@@ -1163,31 +1183,7 @@ const governorLines = (view: ViewGovernorStats): StatSection => {
         `${view.capacitySamples.eligible} clean, ` +
           `${view.capacitySamples.rejected} rejected`,
       ),
-      row("track budget", points(view.trackBudget)),
-      row(
-        "maximum",
-        view.configuredMaxPoints === null
-          ? "none configured"
-          : points(view.configuredMaxPoints),
-      ),
-      row(
-        "memory ceiling",
-        view.memoryCeilingPoints === null
-          ? "not reported"
-          : points(view.memoryCeilingPoints),
-      ),
-      row("draw budget", points(view.aggregateBudget)),
-      row("resident budget", points(view.selectionBudget)),
-      row("cloud draw", cloud ? points(cloud.effectiveBudget) : "no member"),
-      row(
-        "cloud resident",
-        cloud ? points(cloud.effectiveSelectionBudget) : "no member",
-      ),
-      row(
-        "density",
-        cloud ? `${(cloud.densityFraction * 100).toFixed(0)}%` : "no member",
-      ),
-      row("constraint", view.activeConstraint),
+      row("view quality", `${(view.viewQualityFraction * 100).toFixed(1)}%`),
       row(
         "adjustment",
         adjustment
@@ -1195,9 +1191,10 @@ const governorLines = (view: ViewGovernorStats): StatSection => {
           : "none yet",
       ),
       row(
-        "moved budget",
+        "moved quality",
         adjustment
-          ? `${points(adjustment.fromBudget)} → ${points(adjustment.toBudget)}`
+          ? `${(adjustment.fromFraction * 100).toFixed(1)}% → ` +
+              `${(adjustment.toFraction * 100).toFixed(1)}%`
           : "—",
       ),
       row(
@@ -1383,32 +1380,21 @@ const scheduleRender = (): void => {
 };
 
 /**
- * The per-frame report. `governorInputs()` reads held state only: the governor
- * needs the memory ceiling to bound the aggregate before it splits it, the
- * projected importance and the demand to size this cloud's share, and the
- * physical work counts to know whether another frame is still worth painting.
- * `stats()`
- * would answer all of that too, but by walking the selected and submitted
- * sets — a diagnostic snapshot no frame should be paying for.
+ * The per-frame report. View quality is normalized, so point demand and the
+ * memory ceiling stay in the point-member mapping above. The governor only
+ * needs the physical work state that decides whether a capacity sample is
+ * clean; `governorInputs()` provides it without a diagnostic selected-set walk.
  */
 const updateMember = (): void => {
   if (!controller || !adapter) return;
   const inputs = controller.governorInputs();
   adapter.setResourceCeilingBytes(inputs.memoryBudgetBytes);
-  member?.update({
-    active: true,
-    projectedImportance: inputs.projectedImportance,
-    memoryCeilingPoints: inputs.memoryCeilingPoints,
-    demandPoints: inputs.demandPoints,
+  governor?.setWorkState({
+    workPending: controllerWorkPending,
     physicalTileOperations: inputs.physicalTileOperations,
     physicalHierarchyOperations: inputs.physicalHierarchyOperations,
   });
-  fixedMember?.update({
-    active: true,
-    projectedImportance: inputs.projectedImportance,
-    memoryCeilingPoints: inputs.memoryCeilingPoints,
-    demandPoints: inputs.demandPoints,
-  });
+  if (budgetMode() === "adaptive") applyAdaptiveQuality();
 };
 
 /**
@@ -1419,7 +1405,13 @@ const updateMember = (): void => {
  */
 const reportWorkPending = (): void => {
   if (!controller) return;
-  member?.update({ workPending: controller.stats().workPending });
+  controllerWorkPending = controller.stats().workPending;
+  const inputs = controller.governorInputs();
+  governor?.setWorkState({
+    workPending: controllerWorkPending,
+    physicalTileOperations: inputs.physicalTileOperations,
+    physicalHierarchyOperations: inputs.physicalHierarchyOperations,
+  });
 };
 
 // Every paint the interactor drives ends here — ours and the ones its own
@@ -1440,6 +1432,7 @@ interactor.onRenderEvent(() => {
   updateMember();
   renderedCameras.set(renderer, view);
   governor?.noteRenderedCameras(renderedCameras, scheduleRender);
+  if (budgetMode() === "adaptive") applyAdaptiveQuality();
   if (startedAt !== null) {
     if (controller) recordFrameRate(lastFrameMs, gpuQueryId);
   }
@@ -1483,10 +1476,6 @@ const disposeCloud = (): void => {
   // simply undone by the load it was meant to cancel, which then wires a
   // controller into a page that asked for nothing.
   loadGeneration += 1;
-  member?.release();
-  member = null;
-  fixedMember?.release();
-  fixedMember = null;
   controller?.dispose();
   adapter?.dispose();
   loadedSource?.dispose?.();
@@ -1495,6 +1484,8 @@ const disposeCloud = (): void => {
   loadedSource = null;
   loadedName = "";
   loadedPointCount = 0;
+  controllerWorkPending = false;
+  stationaryQualityFraction = 1;
   framing = null;
   resetFrameRate();
   // Framing the next cloud is not motion the user asked for: this view stops
@@ -2141,13 +2132,14 @@ Object.assign(window, {
       scheduleRender();
     },
     /**
-     * The view-wide allocator owns the controller's density: writing it into
-     * the controller directly would be overwritten by the next allocation
-     * pass. Only fixed quality takes a preference.
+     * Fixed point quality bypasses the normalized adaptive governor, so this
+     * point-specific presentation control writes the controller directly.
      */
     setDensityFraction: (fraction: number) => {
       fixedDensityFraction = fraction;
-      fixedBudget?.setDensityFraction(fraction);
+      if (budgetMode() === "fixed") {
+        controller?.setDensityFraction(fraction);
+      }
       scheduleRender();
     },
     /** Report every frame as this duration; null restores real measurement. */

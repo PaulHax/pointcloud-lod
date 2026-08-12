@@ -2075,6 +2075,31 @@ describe("createLodController — budget and memory ceiling", () => {
     other.dispose();
     controller.dispose();
   });
+
+  it("accepts a coordinator-owned byte allowance without joining the pool", async () => {
+    const pool = createMemoryPool({ totalBytes: 999 });
+    const { source, deferred } = makeFakeSource(SMALL_TREE);
+    const controller = createLodController({
+      source,
+      onTiles: () => {},
+      scheduleRender: () => {},
+      selectionDelayMs: 0,
+      memoryBudgetBytes: 150 * BYTES_PER_POINT,
+    });
+    expect(pool.memberCount()).toBe(0);
+    controller.setCamera(VIEW);
+    await settle();
+    for (const d of deferred.values()) d.resolve();
+    await settle();
+    expect(controller.stats().pointBudget).toBe(150);
+    controller.setMemoryBudgetBytes(300 * BYTES_PER_POINT);
+    await settle();
+    for (const d of deferred.values()) d.resolve();
+    await settle();
+    expect(controller.stats().pointBudget).toBe(300);
+    expect(pool.memberCount()).toBe(0);
+    controller.dispose();
+  });
 });
 
 describe("createLodController — selection stats", () => {
@@ -2923,6 +2948,9 @@ describe("createLodController — numeric configuration", () => {
       expect(() => make({ refinementCutoffPx: value })).toThrow(
         /refinementCutoffPx/,
       );
+      expect(() => make({ memoryBudgetBytes: value })).toThrow(
+        /memoryBudgetBytes/,
+      );
     }
     for (const value of [...NON_FINITE, -0.01, 1.01]) {
       expect(() => make({ densityFraction: value })).toThrow(/densityFraction/);
@@ -3090,6 +3118,7 @@ describe("createLodController — pickPoint", () => {
     expect(result.pointOnRay[0]).toBeCloseTo(0.5);
     expect(result.pointOnRay[1]).toBeCloseTo(0.2);
     expect(result.pointOnRay[2]).toBeCloseTo(0);
+    expect(result.rayDepth).toBeCloseTo(1);
     // A pick from elsewhere in the viewport supports through an outer radius
     // bucket, and its pointOnRay lies on the WORLD cursor ray — for the
     // identity view-projection, the z axis — at the supported depth.
@@ -3125,6 +3154,7 @@ describe("createLodController — pickPoint", () => {
     expect(result.pointOnRay[0]).toBeCloseTo(0);
     expect(result.pointOnRay[1]).toBeCloseTo(0);
     expect(result.pointOnRay[2]).toBeCloseTo(0);
+    expect(result.rayDepth).toBeCloseTo(1);
     expect(result.distancePx).toBeCloseTo(0);
     controller.dispose();
   });

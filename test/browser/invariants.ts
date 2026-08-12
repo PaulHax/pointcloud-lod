@@ -15,6 +15,11 @@
 
 import { expect } from "vitest";
 
+import {
+  MAX_VIEW_QUALITY_FRACTION,
+  MIN_VIEW_QUALITY_FRACTION,
+} from "../../src/viewBudget";
+
 // Both tiers report the whole sample, so a failure names the state it saw;
 // `shown` is the suite's one pretty-printer.
 import {
@@ -108,15 +113,15 @@ export const assertLive = (stats: ExampleStats): boolean => {
   const view = stats.governor;
   if (view !== null) {
     expect(
-      Number.isFinite(view.trackBudget),
-      `the governor's budget stopped being a finite number\n${shown(stats)}`,
+      Number.isFinite(view.viewQualityFraction),
+      `the governor's quality stopped being finite\n${shown(stats)}`,
     ).toBe(true);
-    // No live `trackBudget <= memoryCeilingPoints` here: `setCeiling`
-    // deliberately leaves an already-learned budget above a ceiling that just
-    // fell (a second member registering shrinks every share), and only the
-    // next adjustment walks it down. Asserting the bound between those two
-    // moments reports the library's documented behaviour as a defect. The
-    // settled tier owns the comparison, after the loop has had its frames.
+    expect(view.viewQualityFraction).toBeGreaterThanOrEqual(
+      MIN_VIEW_QUALITY_FRACTION,
+    );
+    expect(view.viewQualityFraction).toBeLessThanOrEqual(
+      MAX_VIEW_QUALITY_FRACTION,
+    );
   }
   return true;
 };
@@ -202,17 +207,6 @@ export const assertSettled = (stats: ExampleStats, keys: ExampleKeys): void => {
       stats.adapter.gpuResidentBytes,
       `renderer resources outlived the ceiling they are held under\n${shown(stats)}`,
     ).toBeLessThanOrEqual(stats.adapter.resourceCeilingBytes);
-  }
-
-  // Not `pointBudget <= memoryCeilingPoints`: the controller reports
-  // min(budget, ceiling), so that comparison is min(a,b) <= b and cannot fail.
-  // What can fail is the number the governor arrived at independently — the
-  // ceiling binds the loop, not just the value the loop is read back through.
-  if (stats.governor !== null && stats.governor.memoryCeilingPoints !== null) {
-    expect(
-      stats.governor.trackBudget,
-      `the governor's own budget exceeded what memory allows\n${shown(stats)}`,
-    ).toBeLessThanOrEqual(stats.governor.memoryCeilingPoints);
   }
 
   if (stats.governor !== null) {

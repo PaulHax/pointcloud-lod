@@ -9,7 +9,14 @@ export type StubActor = {
   setMapper: (mapper: unknown) => void;
   setUserMatrix: (matrix: number[]) => void;
   setVisibility: (visible: boolean) => void;
-  getProperty: () => { setPointSize: (size: number) => void };
+  setForceOpaque: (value: boolean) => void;
+  setForceTranslucent: (value: boolean) => void;
+  getProperty: () => {
+    setPointSize: (size: number) => void;
+    setColor: (...color: number[]) => void;
+    setOpacity: (opacity: number) => void;
+  };
+  addTexture: (texture: unknown) => void;
   delete: () => void;
   // Recorded state:
   mapper: unknown;
@@ -17,6 +24,11 @@ export type StubActor = {
   visibility: boolean;
   pointSize: number;
   deleted: boolean;
+  textures: unknown[];
+  color: number[];
+  opacity: number;
+  forceOpaque: boolean;
+  forceTranslucent: boolean;
 };
 
 export const actorInstances: StubActor[] = [];
@@ -28,6 +40,11 @@ export const makeActor = (): StubActor => {
     visibility: true,
     pointSize: 0,
     deleted: false,
+    textures: [],
+    color: [1, 1, 1],
+    opacity: 1,
+    forceOpaque: false,
+    forceTranslucent: false,
     setMapper(mapper) {
       actor.mapper = mapper;
     },
@@ -37,12 +54,27 @@ export const makeActor = (): StubActor => {
     setVisibility(visible) {
       actor.visibility = visible;
     },
+    setForceOpaque(value) {
+      actor.forceOpaque = value;
+    },
+    setForceTranslucent(value) {
+      actor.forceTranslucent = value;
+    },
     getProperty() {
       return {
         setPointSize(size: number) {
           actor.pointSize = size;
         },
+        setColor(...color: number[]) {
+          actor.color = color;
+        },
+        setOpacity(opacity: number) {
+          actor.opacity = opacity;
+        },
       };
+    },
+    addTexture(texture) {
+      actor.textures.push(texture);
     },
     delete() {
       actor.deleted = true;
@@ -57,12 +89,26 @@ export type StubMapper = {
   setStatic: (value: boolean) => void;
   setScaleFactor: (scale: number) => void;
   setMaximumPointCount: (count: number) => void;
+  setViewSpecificProperties: (properties: StubViewSpecificProperties) => void;
   delete: () => void;
   inputData: unknown;
   static: boolean;
   scaleFactor: number;
   maximumPointCount: number;
   deleted: boolean;
+  viewSpecificProperties: StubViewSpecificProperties;
+};
+
+export type StubShaderReplacement = {
+  shaderType: string;
+  originalValue: string;
+  replacementValue: string;
+  replaceAll: boolean;
+  replaceFirst: boolean;
+};
+
+export type StubViewSpecificProperties = {
+  OpenGL?: { ShaderReplacements?: StubShaderReplacement[] };
 };
 
 export const mapperInstances: StubMapper[] = [];
@@ -74,6 +120,7 @@ export const makeMapper = (): StubMapper => {
     scaleFactor: 1,
     maximumPointCount: -1,
     deleted: false,
+    viewSpecificProperties: {},
     setInputData(data) {
       mapper.inputData = data;
     },
@@ -86,6 +133,9 @@ export const makeMapper = (): StubMapper => {
     setMaximumPointCount(count) {
       mapper.maximumPointCount = count;
     },
+    setViewSpecificProperties(properties) {
+      mapper.viewSpecificProperties = properties;
+    },
     delete() {
       mapper.deleted = true;
     },
@@ -94,12 +144,22 @@ export const makeMapper = (): StubMapper => {
   return mapper;
 };
 
+export const makeMeshMapper = makeMapper;
+
 export type StubPolyData = {
   getPoints: () => { setData: (values: unknown, components: number) => void };
-  getPointData: () => { setScalars: (array: unknown) => void };
+  getPointData: () => {
+    setScalars: (array: unknown) => void;
+    setNormals: (array: unknown) => void;
+    setTCoords: (array: unknown) => void;
+  };
+  getPolys: () => { setData: (values: unknown) => void };
   delete: () => void;
   points: unknown;
   scalars: unknown;
+  normals: unknown;
+  tcoords: unknown;
+  polys: unknown;
   deleted: boolean;
 };
 
@@ -109,6 +169,9 @@ export const makePolyData = (): StubPolyData => {
   const polyData: StubPolyData = {
     points: null,
     scalars: null,
+    normals: null,
+    tcoords: null,
+    polys: null,
     deleted: false,
     getPoints() {
       return {
@@ -122,6 +185,19 @@ export const makePolyData = (): StubPolyData => {
         setScalars(array: unknown) {
           polyData.scalars = array;
         },
+        setNormals(array: unknown) {
+          polyData.normals = array;
+        },
+        setTCoords(array: unknown) {
+          polyData.tcoords = array;
+        },
+      };
+    },
+    getPolys() {
+      return {
+        setData(values: unknown) {
+          polyData.polys = values;
+        },
       };
     },
     delete() {
@@ -132,8 +208,83 @@ export const makePolyData = (): StubPolyData => {
   return polyData;
 };
 
+export type StubTexture = {
+  setSampler(data: unknown): void;
+  setFlipY(value: boolean): void;
+  setCompressedData(data: unknown): void;
+  setJsImageData(data: unknown): void;
+  setInterpolate(value: boolean): void;
+  setRepeat(value: boolean): void;
+  setEdgeClamp(value: boolean): void;
+  delete(): void;
+  compressedData: unknown;
+  imageData: unknown;
+  interpolate: boolean;
+  repeat: boolean;
+  edgeClamp: boolean;
+  sampler: unknown;
+  flipY: boolean;
+  deleted: boolean;
+};
+
+export const textureInstances: StubTexture[] = [];
+let nextTextureFailure: "compressed" | "rgba" | null = null;
+
+export const failNextTexturePayload = (kind: "compressed" | "rgba"): void => {
+  nextTextureFailure = kind;
+};
+
+export const makeTexture = (): StubTexture => {
+  const texture: StubTexture = {
+    compressedData: null,
+    imageData: null,
+    interpolate: false,
+    repeat: false,
+    edgeClamp: false,
+    sampler: null,
+    flipY: true,
+    deleted: false,
+    setSampler(data) {
+      texture.sampler = data;
+    },
+    setFlipY(value) {
+      texture.flipY = value;
+    },
+    setCompressedData(data) {
+      if (nextTextureFailure === "compressed") {
+        nextTextureFailure = null;
+        throw new Error("injected compressed payload failure");
+      }
+      texture.compressedData = data;
+    },
+    setJsImageData(data) {
+      if (nextTextureFailure === "rgba") {
+        nextTextureFailure = null;
+        throw new Error("injected rgba payload failure");
+      }
+      texture.imageData = data;
+    },
+    setInterpolate(value) {
+      texture.interpolate = value;
+    },
+    setRepeat(value) {
+      texture.repeat = value;
+    },
+    setEdgeClamp(value) {
+      texture.edgeClamp = value;
+    },
+    delete() {
+      texture.deleted = true;
+    },
+  };
+  textureInstances.push(texture);
+  return texture;
+};
+
 export const resetStubs = (): void => {
   actorInstances.length = 0;
   mapperInstances.length = 0;
   polyDataInstances.length = 0;
+  textureInstances.length = 0;
+  nextTextureFailure = null;
 };

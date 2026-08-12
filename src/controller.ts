@@ -130,6 +130,12 @@ export type LodControllerOptions = {
    * out-of-memory failure it has no way to sense.
    */
   memory?: MemoryPool | number;
+  /**
+   * Coordinator-owned byte allowance. When supplied, the controller does not
+   * register with a memory pool; the coordinator updates the allowance through
+   * `setMemoryBudgetBytes`. Mutually exclusive with `memory`.
+   */
+  memoryBudgetBytes?: number;
   /** Parallel tile fetches. Default 6. */
   fetchConcurrency?: number;
   /**
@@ -382,6 +388,8 @@ export type LodController = {
    * Values outside [0, 1] and non-finite values are ignored.
    */
   setDensityFraction(densityFraction: number): void;
+  /** Update a coordinator-owned byte allowance (ignored in pool-owned mode). */
+  setMemoryBudgetBytes(bytes: number): void;
   /**
    * Swap the tile source (e.g. a new asset revision behind a new endpoint).
    * All resident tiles, caches, hierarchy state, and in-flight requests are
@@ -963,17 +971,28 @@ export const createLodController = (
   // measured bytes-per-point of resident tiles (falling back to an estimate
   // until enough points are resident to measure). Whatever budget the host
   // asks for, this ceiling is what keeps selection inside GPU memory.
-  const memoryPool: MemoryPool =
-    typeof options.memory === "object"
-      ? options.memory
-      : createMemoryPool(
-          typeof options.memory === "number"
-            ? { totalBytes: wholeAtLeast("memory", options.memory, 1) }
-            : {},
+  if (options.memory !== undefined && options.memoryBudgetBytes !== undefined) {
+    throw new Error("memory and memoryBudgetBytes are mutually exclusive");
+  }
+  let externalMemoryBudgetBytes =
+    options.memoryBudgetBytes === undefined
+      ? null
+      : Math.floor(
+          finiteAtLeast("memoryBudgetBytes", options.memoryBudgetBytes, 0),
         );
+  const memoryPool: MemoryPool | null =
+    externalMemoryBudgetBytes !== null
+      ? null
+      : typeof options.memory === "object"
+        ? options.memory
+        : createMemoryPool(
+            typeof options.memory === "number"
+              ? { totalBytes: wholeAtLeast("memory", options.memory, 1) }
+              : {},
+          );
   let poolMember: MemoryPoolMember | null = null;
   const joinMemoryPool = (): void => {
-    if (poolMember !== null) return;
+    if (poolMember !== null || memoryPool === null) return;
     poolMember = memoryPool.register(() => {
       if (disposed || !active) return;
       requestSelection();
@@ -995,6 +1014,7 @@ export const createLodController = (
    * memory statistics NaN, so nonsense reads as no memory at all.
    */
   const memoryBudgetBytes = (): number => {
+    if (externalMemoryBudgetBytes !== null) return externalMemoryBudgetBytes;
     const bytes = poolMember?.budgetBytes() ?? 0;
     return !finitePositive(bytes) ? 0 : bytes;
   };
@@ -1947,6 +1967,28 @@ export const createLodController = (
       invalidateFrontier();
     },
 
+    setMemoryBudgetBytes(bytes) {
+      if (
+        disposed ||
+        externalMemoryBudgetBytes === null ||
+        !finiteNonNegative(bytes)
+      ) {
+        return;
+      }
+      const next = Math.floor(bytes);
+      if (next === externalMemoryBudgetBytes) return;
+      const previousBudget = currentBudget();
+      externalMemoryBudgetBytes = next;
+      const nextBudget = currentBudget();
+      runSelection(
+        nextBudget > previousBudget &&
+          target.size > 0 &&
+          selectionStats.targetPoints <= nextBudget
+          ? target
+          : undefined,
+      );
+    },
+
     setSource(nextSource) {
       if (disposed) return;
       if (presentation.mode === "auto") {
@@ -2131,6 +2173,7 @@ export const createLodController = (
       return result?.status === "hit" && modelFrame
         ? {
             ...result,
+            rayDepth: result.rayDepth * modelFrame.scale,
             pointOnRay: transformPointBy(modelFrame.matrix, result.pointOnRay),
           }
         : result;

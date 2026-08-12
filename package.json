@@ -36,12 +36,15 @@
       "import": "./dist/index.js"
     },
     "./vtk": {
-      "types": "./dist/rendererAdapter.d.ts",
-      "import": "./dist/rendererAdapter.js"
+      "types": "./dist/vtk.d.ts",
+      "import": "./dist/vtk.js"
     },
     "./copc-worker": {
       "types": "./dist/copcWorker.d.ts",
       "import": "./dist/copcWorker.js"
+    },
+    "./tiles3d-decode-worker": {
+      "default": "./dist/tiles3dDecodeWorker.classic.js"
     }
   },
   "scripts": {
@@ -51,17 +54,24 @@
     "format": "oxfmt",
     "format:check": "oxfmt --check",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tools.json && tsc --noEmit -p examples/vtk/tsconfig.json",
-    "build": "vite build && tsc -p tsconfig.build.json",
+    "build": "vite build && vite build --config vite.tiles3d-worker.config.ts && tsc -p tsconfig.build.json",
     "example": "vite --config examples/vtk/vite.config.ts",
     "example:build": "vite build --config examples/vtk/vite.config.ts",
-    "test:browser": "npm run example:build && vitest run --config vitest.browser.config.ts",
+    "test:browser": "npm run build && npm run example:build && vitest run --config vitest.browser.config.ts",
     "test:perf": "npm run example:build && vitest run --config vitest.perf.config.ts",
     "telemetry:capture": "POINTCLOUD_LOD_BROWSER_GPU=1 npm run test:perf -- test/browser/telemetry-capture.perf.spec.ts",
+    "fixture:tiles3d": "node scripts/generateTiles3dFixture.mjs",
     "verify:chain": "node scripts/verifyChain.mjs",
     "prepare": "npm run build && node .husky/install.mjs"
   },
   "dependencies": {
+    "@loaders.gl/core": "4.4.4",
+    "@loaders.gl/draco": "4.4.4",
+    "@loaders.gl/gltf": "4.4.4",
+    "@loaders.gl/textures": "4.4.4",
+    "@loaders.gl/worker-utils": "4.4.4",
     "copc": "^0.0.8",
+    "ktx-parse": "0.7.1",
     "laz-perf": "^0.0.7"
   },
   "devDependencies": {
@@ -71,10 +81,20 @@
     "@semantic-release/npm": "^13.1.0",
     "@types/node": "^26.1.1",
     "husky": "^9.1.7",
+    "3d-tiles-validator": "^0.6.1",
+    "@gltf-transform/core": "^4.4.2",
+    "@gltf-transform/extensions": "^4.4.2",
+    "@gltf-transform/functions": "^4.4.2",
+    "@semantic-release/github": "^11.0.0",
+    "@semantic-release/npm": "^13.1.0",
+    "@types/node": "^26.1.1",
+    "draco3dgltf": "^1.5.7",
+    "ktx2-encoder": "^0.6.0",
     "oxfmt": "^0.61.0",
     "oxlint": "^1.76.0",
     "playwright": "^1.62.0",
     "semantic-release": "^25.0.0",
+    "sharp": "^0.34.4",
     "typescript": "^7.0.2",
     "vite": "^8.1.5",
     "vitest": "^4.1.10"

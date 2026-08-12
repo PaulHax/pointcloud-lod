@@ -67,6 +67,8 @@ export type PickTile = {
 export type PointPickResult =
   | {
       readonly status: "hit";
+      /** Positive distance from the ray origin along its normalized direction. */
+      readonly rayDepth: number;
       /** The cursor ray evaluated at the support depth — not the vertex. */
       readonly pointOnRay: Vec3;
       /** Css-pixel distance from the cursor to the supporting vertex. */
@@ -195,7 +197,7 @@ export const sweepPickPoints = (
       const ndcZ = (m2 * x + m6 * y + m10 * z + m14) * invW;
       if (!(ndcZ >= -1 && ndcZ <= 1)) continue;
       const depth = (x - rayX) * dirX + (y - rayY) * dirY + (z - rayZ) * dirZ;
-      if (!(depth >= 0)) continue;
+      if (!(depth > 0)) continue;
       const offsetX =
         (((m0 * x + m4 * y + m8 * z + m12) * invW + 1) / 2) * width -
         cursorXCssPx;
@@ -218,6 +220,7 @@ export const sweepPickPoints = (
     if (Number.isNaN(depth)) continue;
     return {
       status: "hit",
+      rayDepth: depth,
       pointOnRay: [
         rayX + dirX * depth,
         rayY + dirY * depth,

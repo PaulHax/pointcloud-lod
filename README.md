@@ -213,7 +213,7 @@ must not paint synchronously from either callback. That lets a newly resident
 tile, the frontier-derived diameter, and the renderer batch land before the
 same frame.
 
-#### Point-budget flow: adaptive or fixed
+#### View-quality flow: adaptive or fixed
 
 With a `ViewGovernor`, the host closes a frame-time feedback loop:
 
@@ -221,19 +221,19 @@ With a `ViewGovernor`, the host closes a frame-time feedback loop:
 paint frame
   → recordTransientFrame({ hostFrameMs, vtkFrameMs })
   → recordCapacitySample(clean asynchronous GPU result)
-  → governor adjusts the aggregate draw budget
-  → settled capacity stays selected and resident
-  → each controller receives selection budget + density fraction
+  → governor adjusts one normalized view-quality fraction
+  → coordinator demand-caps and water-fills that fraction across members
+  → each point member maps its allocation to selection + draw density
   → moving changes thin existing VBO prefixes; settled changes may reselect
   → needsFrame() says whether another measurement is useful
 ```
 
-The governor is optional. It chooses targets from frame timing, then hands them
-to the same view-budget coordinator fixed quality uses. It never reads the
-renderer or schedules a frame on its own. The host reports completed frames,
-camera-motion references, member importance, memory ceilings, and outstanding
-physical work. See [Adaptive quality](#adaptive-quality) for the complete
-wiring.
+The governor is optional. It controls a format-neutral fraction in `[0.05, 1]`
+and never reads the renderer or schedules a frame on its own. The streamed
+scene coordinator reports completed frames, camera motion, and aggregate work,
+then water-fills quality by projected importance and member demand. Memory is
+a separate byte allocation from the page-wide pool. See
+[Adaptive quality](#adaptive-quality) for the complete wiring.
 
 For one cloud, a fixed budget can still be set directly:
 
@@ -282,8 +282,6 @@ These methods are useful when application policy lives outside the library:
 | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `controller.setPointBudget(points)`                   | Set the visible-point target directly. Use this instead of a governor for a fixed or externally managed budget.                                                            |
 | `controller.setDensityFraction(fraction)`             | Redistribute that fraction of selected points into parent-closed, importance-ranked tile prefixes without changing selection, I/O, actors, or VBO contents.                |
-| `budget.setPointBudget(points)`                       | Set one fixed aggregate target for every controller registered with a `ViewBudgetCoordinator`.                                                                             |
-| `budget.setDensityFraction(fraction)`                 | Thin or restore the aggregate draw target without changing the coordinator's selected-point target.                                                                        |
 | `controller.setPresentation(...)`                     | Switch live between Auto and Fixed point presentation.                                                                                                                     |
 | `controller.setRefinementCutoffPx(pixels)`            | Stop descending when a node's projected spacing is below this threshold. Lower values allow finer traversal; the point and memory budgets still apply.                     |
 | `controller.refresh()`                                | Force immediate reselection against the current camera, useful after external state changes that do not produce a new camera value.                                        |
@@ -300,7 +298,7 @@ These methods are useful when application policy lives outside the library:
 | `adapter.setVisible(false)`                           | Hide drawing only. Actors, GPU resources, selection, and streaming remain live for an immediate show.                                                                      |
 | `controller.setActive(false)`                         | Stop selection and tile fetches, emit removals that move actors into the bounded adapter pool, and retain decoded payloads in the bounded CPU cache.                       |
 | `controller.setSource(source)`                        | Replace the dataset or revision, dropping old hierarchy, residency, cache, and pending results before bootstrapping the new source.                                        |
-| `controller.governorInputs()`                         | The five numbers a governor member and an adapter resource ceiling need, read straight from held state. Prefer it to `stats()` on a per-frame path.                        |
+| `controller.governorInputs()`                         | Point-specific demand, importance, memory ceiling, and physical-operation inputs used by the point member. Prefer it to `stats()` on a per-frame path.                     |
 | `controller.setModelMatrix(matrix)`                   | The transform the tiles draw under, so cameras and picks are given in world coordinates. Must be a similarity; an unchanged matrix is a no-op, so forward it every pass.   |
 | `adapter.setBaseMatrix(matrix)`                       | Apply or update the registration transform without rebuilding tile payloads. Pair it with `controller.setModelMatrix()` so selection and drawing agree.                    |
 
@@ -494,42 +492,15 @@ memory ceilings, or per-tile draw plans; only frame-time learning is absent.
 controller.setPointBudget(5_000_000);
 ```
 
-Use a view-budget coordinator when a slider represents one target for the
-whole view, including views with several clouds:
-
-```js
-import { createViewBudgetCoordinator } from "pointcloud-lod";
-
-const budget = createViewBudgetCoordinator({ pointBudget: 2_000_000 });
-const member = budget.register({
-  id: "cloud-1",
-  setPointBudget: (points) => controller.setPointBudget(points),
-  setDensityFraction: (fraction) => controller.setDensityFraction(fraction),
-});
-
-// One application detail slider changes one aggregate view target.
-budget.setPointBudget(detailSliderPoints);
-
-const stats = controller.stats();
-member.update({
-  projectedImportance: stats.selection.projectedImportance,
-  memoryCeilingPoints: stats.memoryCeilingPoints,
-});
-```
-
-The coordinator applies the memory ceiling to the aggregate before splitting
-it by projected importance. Its statistics distinguish the requested target
-from the effective draw and selection budgets.
-
-An application that wants a simple interaction policy can lower only the draw
-allowance while input is active. This keeps the fixed selection resident and
-uses the same importance-ranked tile prefixes as adaptive mode:
+An application that wants a simple fixed interaction policy can lower only the
+draw allowance while input is active. This keeps the fixed selection resident
+and uses the same importance-ranked tile prefixes as adaptive mode:
 
 ```js
 controller.beginInteraction();
-budget.setDensityFraction(0.6);
+controller.setDensityFraction(0.6);
 // ...camera input...
-budget.setDensityFraction(1);
+controller.setDensityFraction(1);
 controller.endInteraction();
 ```
 
@@ -538,80 +509,52 @@ most predictable configuration.
 
 ### Adaptive quality
 
-A controller on its own draws to whatever fixed budget you set. To adapt
-quality to what the machine can actually paint, add a view governor: one per
-view, shared by every controller drawing into that view. It drives the same
-view-budget coordinator from measured host-frame timings, so several clouds in
-a view compete for a single frame-time target instead of each chasing its own.
+A controller on its own draws to whatever fixed point budget you set. Adaptive
+views use one streamed-scene coordinator, which owns one normalized governor
+and allocates its fraction across every format member in the view.
 
 Two regimes, two targets. A moving camera is being steered, so it gets the
 tighter **16 ms** target and trades drawn points for responsiveness; a settled
 camera is being read, so it gets the looser **33 ms** target and spends the
 extra frame time on detail. With the default 20% hysteresis the no-change bands
 are 12.8-19.2 ms while moving and 26.4-39.6 ms while settled. Both tracks start
-at **1,000,000** points (`initialBudget`) and never drop below **200,000**
-(`minBudget`). The denser proven budget stays selected while moving. The
-interaction budget becomes parent-closed per-tile prefixes, so coarse coverage
-stays present while the most important visible branches retain more detail.
-Cuts and settled restoration change the next draw without replacing tiles or
-buffers.
+at quality **1** and never drop below **0.05**. Point `minBudget`/`maxBudget`
+remain point-member clamps; they are not governor options. The point member
+keeps the denser proven stationary selection while moving and expresses the
+interaction allocation as parent-closed per-tile prefixes.
 
 ```js
-import { createViewGovernor } from "pointcloud-lod";
+import {
+  createMemoryPool,
+  createStreamedSceneCoordinator,
+} from "pointcloud-lod";
+import { createPointCloudMember } from "pointcloud-lod/vtk";
 
-const governor = createViewGovernor();
-
-// Register each controller in the view. The governor pushes budgets in.
-const member = governor.register({
-  id: "cloud-1",
-  setPointBudget: (points) => controller.setPointBudget(points),
-  setDensityFraction: (fraction) => controller.setDensityFraction(fraction),
+const coordinator = createStreamedSceneCoordinator({
+  scheduleRender,
+  memory: pageMemoryPool ?? createMemoryPool(),
 });
-
-// Immediate cadence protects interaction without changing lasting capacity.
-governor.recordTransientFrame({ hostFrameMs, vtkFrameMs });
-
-// Feed asynchronous GPU results to the regime that drew the frame. `eligible`
-// is false when controller workRevision, adapter workRevision, or workPending
-// shows streaming, decode, renderer-batch, or first-upload contamination.
-governor.recordCapacitySample({ frameMs: gpuMs, regime, eligible });
-if (governor.needsFrame()) scheduleRender();
-
-// Feed the split from `governorInputs()`, which reads held state only. Run it
-// on every frame: `stats()` answers the same questions but walks the selected
-// and submitted sets to do it.
-const updateMember = () => {
-  const inputs = controller.governorInputs();
-  member.update({
-    projectedImportance: inputs.projectedImportance,
-    memoryCeilingPoints: inputs.memoryCeilingPoints,
-    physicalTileOperations: inputs.physicalTileOperations,
-    physicalHierarchyOperations: inputs.physicalHierarchyOperations,
-  });
-  adapter.setResourceCeilingBytes(inputs.memoryBudgetBytes);
-};
-updateMember();
-
-// `workPending` is the one member field that costs the selected-set walk, and
-// it cannot change without the controller reporting a work change — so report
-// it from `onWorkChange`, not from the frame.
-const reportWorkPending = () => {
-  member.update({ workPending: controller.stats().workPending });
-};
+const cloud = createPointCloudMember(
+  coordinator.context(renderer, dpr),
+  config,
+);
+coordinator.register(cloud, {
+  id: "cloud-1",
+  qualityManaged: config.adaptive,
+  qualityTargets: config.adaptive ? config.adaptiveOptions : undefined,
+});
 
 // Hold the moving regime while the camera moves. References compose across
 // sources and the regime ends only when the last one is released, so an
 // inferred playback motion overlapping a pointer gesture behaves correctly.
-const gesture = governor.beginMotion("explicit");
-controller.beginInteraction();
+coordinator.beginInteraction();
 // ...camera moves...
-gesture.release();
-controller.endInteraction();
+coordinator.endInteraction();
 
 // Motion the host cannot announce — playback, scrubbing, programmatic
 // animation — is classified by the governor. Hand it the camera each view
 // actually rendered, once per rendered frame, keyed by anything stable:
-governor.noteRenderedCameras(new Map([[renderer, view]]), scheduleRender);
+coordinator.noteRenderedCameras(new Map([[renderer, view]]));
 // It owns the jitter epsilon, ignores the clip-z row a host rewrites when
 // tiles arrive, holds one inferred motion reference for the whole burst, and
 // releases it after the debounce — asking for one frame back, because the
@@ -621,39 +564,19 @@ governor.noteRenderedCameras(new Map([[renderer, view]]), scheduleRender);
 // When a view stops feeding cameras, drop its baseline. Otherwise the first
 // camera after it returns is compared against one from before it left, and all
 // the travel between reads as a gesture nobody made.
-governor.resetMotionBaselines();
-
-// Re-target a running governor rather than replacing it. Memberships, motion
-// references and camera stability survive; only the adaptive tracks restart,
-// because their learned budgets measured the targets being replaced.
-governor.setOptions({ interactionTargetMs: 16, stationaryTargetMs: 33 });
-
-// Drop a controller out of the split without disposing it:
-member.update({ active: false });
-member.release();
-governor.dispose();
+coordinator.recordHostFrame({ hostFrameMs, vtkFrameMs, gpuMs });
+if (coordinator.needsFrame()) scheduleRender();
+coordinator.dispose();
 ```
 
-Pass a callback that runs `updateMember()` and `reportWorkPending()` as the
-controller's `onWorkChange` when constructing it. If that update makes
-`governor.needsFrame()` true, call `scheduleRender()`. Pending I/O alone does
-not dirty the current pixels, but its completion may make clean capacity
-measurement useful again.
+The point member reports retry-aware `workPending` through the coordinator
+context's work callback. Fixed point members still register for byte and work
+accounting but bypass normalized quality allocation.
 
-`governor.stats()` explains any drawn point count without reading internal
-state: the regime and what is holding it, the target frame time, the recent
-percentile estimate and sample count, the adaptive track budget, the optional
-configured maximum (`maxBudget`), the memory-derived ceiling, the aggregate
-draw and resident-selection budgets, each member's draw/selection shares and
-density fraction, the last adjustment's time, direction and reason, and which
-of `adaptive | configured-maximum | memory | inactive` is the binding
-constraint.
-
-The effective budget is `min(adaptive track budget, configured maximum,
-memory-derived ceiling)`, applied to the aggregate before the split so no
-member's share is sized against memory another member owns. The memory ceiling
-stays authoritative; `maxBudget` is an optional policy, diagnostics, and
-hardware-safety bound, and omitting it leaves memory as the only ceiling.
+`coordinator.stats()` reports the normalized view fraction, target-override
+member, governor motion/samples, byte allocations, and each member's neutral
+inputs. Point-specific diagnostics—including configured point ceiling and
+effective full point ceiling—live on `PointCloudMember.stats()`.
 
 ## Picking
 
@@ -743,12 +666,11 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
   a draw switch that keeps every actor alive (batches still apply while
   hidden, so showing again restores exactly the submitted set), while
   releasing a hidden cloud's tiles is the controller's `setActive(false)`.
-- **View governor** (`createViewGovernor`) — optional, one per view. Owns the
-  draw and resident-selection budgets for every controller registered to that
-  view and adapts drawing from measured host-frame timings, holding VTK to a
-  fraction of the frame and guaranteeing each active member a floor so one
-  busy cloud cannot starve the rest. Controllers have no adaptive loop of their
-  own; this is the only route to adaptive quality.
+- **View governor** (`createViewGovernor`) — one format-neutral normalized
+  fraction per adaptive view. It owns frame-time learning, motion, capacity
+  eligibility, and nothing point- or memory-specific. The streamed-scene
+  coordinator demand-caps and water-fills that fraction across members while
+  the page memory pool allocates bytes separately.
 
 Camera math (`frustumPlanes`, `nodeScreenSpaceError`) is pure and
 renderer-agnostic: the controller takes a view-projection matrix and camera
