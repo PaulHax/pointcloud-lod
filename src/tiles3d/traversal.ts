@@ -239,14 +239,13 @@ export const traverseTileset = (
         !submitted && hasSubmittedDescendant(tile)
           ? tile.children.map((child) => visit(child, accumulated))
           : [];
+      const visibleFallbacks = fallbacks.filter((child) => child.visible);
       return {
         visible: true,
         coverageSubmitted:
           submitted ||
-          (fallbacks.some((child) => child.visible) &&
-            fallbacks
-              .filter((child) => child.visible)
-              .every((child) => child.coverageSubmitted)),
+          (visibleFallbacks.length > 0 &&
+            visibleFallbacks.every((child) => child.coverageSubmitted)),
         desired: [tile.id],
         requested: [tile.id, ...fallbacks.flatMap((child) => child.requested)],
         drawn: submitted

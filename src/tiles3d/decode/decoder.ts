@@ -12,6 +12,7 @@ import {
   type RtcPrimitiveResult,
 } from "../rtc";
 import { capabilityTarget, loadersBasisFormat } from "./capabilities";
+import { collectContentBuffers } from "./transfer";
 import type {
   CompressedTextureFormat,
   DecodeTileRequest,
@@ -1115,34 +1116,19 @@ const materialFor = async (
   };
 };
 
+const totalByteLength = (buffers: ReadonlySet<ArrayBuffer>): number => {
+  let total = 0;
+  for (const buffer of buffers) total += buffer.byteLength;
+  return total;
+};
+
 const actualBytes = (
   primitives: readonly DecodedPrimitive[],
 ): DecodedTileContent["byteEstimate"] => {
-  const geometry = new Set<ArrayBuffer>();
-  const textures = new Set<ArrayBuffer>();
-  for (const primitive of primitives) {
-    for (const array of [
-      primitive.positions,
-      primitive.normals,
-      primitive.uvs,
-      primitive.indices,
-    ]) {
-      if (array?.buffer instanceof ArrayBuffer) geometry.add(array.buffer);
-    }
-    const texture = primitive.material.baseColorTexture;
-    if (texture?.kind === "rgba") {
-      if (texture.rgba.buffer instanceof ArrayBuffer)
-        textures.add(texture.rgba.buffer);
-    } else if (texture?.kind === "compressed") {
-      for (const level of texture.levels) {
-        if (level.data.buffer instanceof ArrayBuffer)
-          textures.add(level.data.buffer);
-      }
-    }
-  }
+  const { geometry, textures } = collectContentBuffers(primitives);
   return {
-    geometry: [...geometry].reduce((sum, buffer) => sum + buffer.byteLength, 0),
-    textures: [...textures].reduce((sum, buffer) => sum + buffer.byteLength, 0),
+    geometry: totalByteLength(geometry),
+    textures: totalByteLength(textures),
   };
 };
 

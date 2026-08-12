@@ -1,5 +1,7 @@
 /** Bounded, revision-safe fetch/decode queue for renderer-neutral tile content. */
 
+import { integerAtLeast } from "../numeric";
+
 export type TileContentRequest = {
   readonly id: string;
   readonly url: string;
@@ -178,17 +180,6 @@ const systemClock: ContentQueueClock = {
     globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
-const integerAtLeast = (
-  name: string,
-  value: number,
-  minimum: number,
-): number => {
-  if (!Number.isInteger(value) || value < minimum) {
-    throw new RangeError(`${name} must be an integer >= ${minimum}`);
-  }
-  return value;
-};
-
 const finiteAtLeast = (
   name: string,
   value: number,
@@ -200,8 +191,7 @@ const finiteAtLeast = (
   return value;
 };
 
-const safeCall = (callback: (() => void) | undefined): void => {
-  if (!callback) return;
+const safeCall = (callback: () => void): void => {
   try {
     callback();
   } catch {
@@ -303,12 +293,11 @@ export const createContentQueue = <T>(
     });
   };
 
-  const emit = (): void =>
-    safeCall(
-      options.onStateChange
-        ? () => options.onStateChange!(snapshot())
-        : undefined,
-    );
+  // Deliberately lazy: the snapshot is only built when someone is listening.
+  const emit = (): void => {
+    const onStateChange = options.onStateChange;
+    if (onStateChange) safeCall(() => onStateChange(snapshot()));
+  };
 
   const evict = (id: string): boolean => {
     const entry = cache.get(id);
@@ -317,11 +306,7 @@ export const createContentQueue = <T>(
     decodedBytes -= entry.bytes;
     cacheEvictions += 1;
     previouslyEvicted.add(id);
-    safeCall(
-      options.onEvict
-        ? () => options.onEvict!(entry.request, entry.content)
-        : undefined,
-    );
+    safeCall(() => options.onEvict?.(entry.request, entry.content));
     return true;
   };
 
@@ -443,11 +428,7 @@ export const createContentQueue = <T>(
           }
           putCache(request, content, byteLength);
           entry.status = "ready";
-          safeCall(
-            options.onContent
-              ? () => options.onContent!(request, content)
-              : undefined,
-          );
+          safeCall(() => options.onContent?.(request, content));
         }
       } catch (error) {
         failure =
@@ -503,19 +484,11 @@ export const createContentQueue = <T>(
               "retry policy or timer scheduling failed",
               { cause: error },
             );
-            safeCall(
-              options.onError
-                ? () => options.onError!(request, retryError)
-                : undefined,
-            );
+            safeCall(() => options.onError?.(request, retryError));
           }
         } else {
           entry.status = "failed";
-          safeCall(
-            options.onError
-              ? () => options.onError!(request, failure!)
-              : undefined,
-          );
+          safeCall(() => options.onError?.(request, failure!));
         }
       }
       pump();
@@ -584,11 +557,7 @@ export const createContentQueue = <T>(
           cacheHits += 1;
           cache.delete(item.id);
           cache.set(item.id, cached);
-          safeCall(
-            options.onContent
-              ? () => options.onContent!(item, cached.content)
-              : undefined,
-          );
+          safeCall(() => options.onContent?.(item, cached.content));
         } else {
           cacheMisses += 1;
           if (previouslyEvicted.delete(item.id)) cacheRevisits += 1;

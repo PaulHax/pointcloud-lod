@@ -31,6 +31,21 @@ export const finiteAtLeast = (
   return value;
 };
 
+/**
+ * Construction guard for counts that must be stated exactly. Unlike
+ * `wholeAtLeast`, a fractional value is rejected rather than truncated.
+ */
+export const integerAtLeast = (
+  name: string,
+  value: number,
+  minimum: number,
+): number => {
+  if (!Number.isInteger(value) || value < minimum) {
+    throw new RangeError(`${name} must be an integer >= ${minimum}`);
+  }
+  return value;
+};
+
 /** Construction guard for counts and point budgets; fractions truncate. */
 export const wholeAtLeast = (
   name: string,

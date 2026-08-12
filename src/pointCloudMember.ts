@@ -4,13 +4,14 @@ import {
   type PointPresentation,
 } from "./controller";
 import { createRendererAdapter, type RendererAdapter } from "./rendererAdapter";
-import type {
-  Allocation,
-  GovernorInputs,
-  MemberPickResult,
-  OcclusionResult,
-  StreamedMember,
-  StreamedMemberContext,
+import {
+  occlusionFromPick,
+  type Allocation,
+  type GovernorInputs,
+  type MemberPickResult,
+  type OcclusionResult,
+  type StreamedMember,
+  type StreamedMemberContext,
 } from "./streamedMember";
 import type { TileSource } from "./tileSource";
 
@@ -233,12 +234,7 @@ export const createPointCloudMember = (
     },
 
     occlusionDepth(view, cssX, cssY): OcclusionResult | null {
-      const result = controller.pickPoint(view, cssX, cssY);
-      return result === null
-        ? null
-        : result.status === "hit"
-          ? { status: "hit", rayDepth: result.rayDepth }
-          : { status: "clear" };
+      return occlusionFromPick(controller.pickPoint(view, cssX, cssY));
     },
 
     stats(): PointCloudMemberStats {

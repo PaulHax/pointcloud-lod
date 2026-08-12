@@ -62,6 +62,16 @@ export type OcclusionResult =
   | { readonly status: "hit"; readonly rayDepth: number }
   | { readonly status: "clear" };
 
+/** The one pick-to-occlusion projection every member shares. */
+export const occlusionFromPick = (
+  result: MemberPickResult | null,
+): OcclusionResult | null =>
+  result === null
+    ? null
+    : result.status === "hit"
+      ? { status: "hit", rayDepth: result.rayDepth }
+      : { status: "clear" };
+
 /** Renderer-neutral lifecycle every streamed scene format implements. */
 export interface StreamedMember {
   setCamera(view: CameraView): void;

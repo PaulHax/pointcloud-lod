@@ -54,12 +54,11 @@ const finiteMatrix = (matrix: readonly number[], label: string): Mat4 => {
   return [...matrix] as Mat4;
 };
 
-export const multiplyMat4 = (
-  leftInput: readonly number[],
-  rightInput: readonly number[],
-): Mat4 => {
-  const left = finiteMatrix(leftInput, "left matrix");
-  const right = finiteMatrix(rightInput, "right matrix");
+/** Column-major 4x4 product without validation, shared by the checked paths. */
+export const multiplyMat4Values = (
+  left: readonly number[],
+  right: readonly number[],
+): number[] => {
   const result = Array.from({ length: 16 }, () => 0);
   for (let column = 0; column < 4; column += 1) {
     for (let row = 0; row < 4; row += 1) {
@@ -70,8 +69,20 @@ export const multiplyMat4 = (
       result[column * 4 + row] = value;
     }
   }
-  return finiteMatrix(result, "composed matrix");
+  return result;
 };
+
+export const multiplyMat4 = (
+  leftInput: readonly number[],
+  rightInput: readonly number[],
+): Mat4 =>
+  finiteMatrix(
+    multiplyMat4Values(
+      finiteMatrix(leftInput, "left matrix"),
+      finiteMatrix(rightInput, "right matrix"),
+    ),
+    "composed matrix",
+  );
 
 export const composeSceneTransform = (
   ecefToScene: readonly number[],
@@ -121,16 +132,6 @@ export const composeVerticalExaggeratedSceneTransform = (
 ): Mat4 =>
   multiplyMat4(
     createVerticalExaggerationTransform(exaggeration, pivotZ),
-    composeSceneTransform(ecefToScene, accumulatedTilesTransform),
-  );
-
-export const composeAnchoredSceneTransform = (
-  anchorUserMatrix: readonly number[],
-  ecefToScene: readonly number[],
-  accumulatedTilesTransform: readonly number[],
-): Mat4 =>
-  multiplyMat4(
-    anchorUserMatrix,
     composeSceneTransform(ecefToScene, accumulatedTilesTransform),
   );
 
@@ -304,17 +305,28 @@ export const flattenPrimitiveToRtc = (
   const transformed = new Float64Array(positions.length);
   const minimum: Vec3 = [Infinity, Infinity, Infinity];
   const maximum: Vec3 = [-Infinity, -Infinity, -Infinity];
+  // `combined` is already validated, so the per-vertex path stays pure
+  // arithmetic: no matrix revalidation, copy, or tuple allocation per vertex.
+  const [m0, m1, m2, , m4, m5, m6, , m8, m9, m10, , m12, m13, m14] = combined;
   for (let offset = 0; offset < positions.length; offset += 3) {
-    const point = transformPoint(combined, [
-      positions[offset]!,
-      positions[offset + 1]!,
-      positions[offset + 2]!,
-    ]);
-    for (let axis = 0; axis < 3; axis += 1) {
-      transformed[offset + axis] = point[axis]!;
-      minimum[axis] = Math.min(minimum[axis]!, point[axis]!);
-      maximum[axis] = Math.max(maximum[axis]!, point[axis]!);
+    const x = positions[offset]!;
+    const y = positions[offset + 1]!;
+    const z = positions[offset + 2]!;
+    const px = m0 * x + m4 * y + m8 * z + m12;
+    const py = m1 * x + m5 * y + m9 * z + m13;
+    const pz = m2 * x + m6 * y + m10 * z + m14;
+    if (!Number.isFinite(px) || !Number.isFinite(py) || !Number.isFinite(pz)) {
+      throw new Error("point transform produced a non-finite coordinate");
     }
+    transformed[offset] = px;
+    transformed[offset + 1] = py;
+    transformed[offset + 2] = pz;
+    minimum[0] = Math.min(minimum[0], px);
+    minimum[1] = Math.min(minimum[1], py);
+    minimum[2] = Math.min(minimum[2], pz);
+    maximum[0] = Math.max(maximum[0], px);
+    maximum[1] = Math.max(maximum[1], py);
+    maximum[2] = Math.max(maximum[2], pz);
   }
   const origin: Vec3 = [
     minimum[0] + (maximum[0] - minimum[0]) / 2,

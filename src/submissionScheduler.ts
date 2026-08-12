@@ -54,7 +54,8 @@ export type SubmissionScheduler = {
   dispose(): void;
 };
 
-type QueuedJob = SubmissionJob & { cancelled: boolean };
+/** `settled` means admitted or dropped, so it can no longer be cancelled. */
+type QueuedJob = SubmissionJob & { cancelled: boolean; settled: boolean };
 
 export const createSubmissionScheduler = (
   options: SubmissionSchedulerOptions,
@@ -96,7 +97,12 @@ export const createSubmissionScheduler = (
           `submission job is ${bytes} bytes, exceeding the ${maxBytes}-byte per-frame cap; split it into smaller jobs`,
         );
       }
-      const queued: QueuedJob = { ...job, bytes, cancelled: false };
+      const queued: QueuedJob = {
+        ...job,
+        bytes,
+        cancelled: false,
+        settled: false,
+      };
       if (!disposed) {
         const wasEmpty = queue.length === 0;
         queue.push(queued);
@@ -106,10 +112,11 @@ export const createSubmissionScheduler = (
         if (wasEmpty) options.scheduleRender();
       } else {
         queued.cancelled = true;
+        queued.settled = true;
       }
       return {
         cancel() {
-          if (queued.cancelled || !queue.includes(queued)) return false;
+          if (queued.cancelled || queued.settled) return false;
           queued.cancelled = true;
           queuedBytes -= queued.bytes;
           return true;
@@ -137,6 +144,7 @@ export const createSubmissionScheduler = (
           break;
         }
         queue.shift();
+        next.settled = true;
         queuedBytes -= next.bytes;
         if (next.cancelled) {
           discardCancelledHead();
@@ -193,6 +201,7 @@ export const createSubmissionScheduler = (
     dispose() {
       if (disposed) return;
       disposed = true;
+      for (const job of queue) job.settled = true;
       queue.length = 0;
       queuedBytes = 0;
     },
