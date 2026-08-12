@@ -635,6 +635,81 @@ describe("createTiles3dMember", () => {
     member.dispose();
   });
 
+  it("re-places rather than reloads when a host rebuilds equal wasm URLs each push", async () => {
+    // Hosts resolve wasm URLs against the page every time they push config, so
+    // the object is fresh on each call. Decode inputs are its URLs, not its
+    // identity: an equal set must not look like a decode change.
+    const wasmUrls = () => ({
+      draco: { wrapperUrl: "/draco.js", wasmUrl: "/draco.wasm" },
+      basis: { encoderUrl: "/basis.js", wasmUrl: "/basis.wasm" },
+    });
+    const h = harness();
+    const member = createTiles3dMember(h.context, {
+      ...h.config,
+      wasm: wasmUrls(),
+      role: "terrain",
+      textureAssetId: "ortho-7",
+    });
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    await settle();
+    h.submissions.prepareFrame();
+    const decodedRequestCount = h.decodedRequests.length;
+    expect(decodedRequestCount).toBeGreaterThan(0);
+
+    member.setConfig({
+      ...h.config,
+      wasm: wasmUrls(),
+      verticalExaggeration: 3,
+      role: "terrain",
+      textureAssetId: "ortho-7",
+    });
+
+    expect(h.renderer.removeActor).not.toHaveBeenCalled();
+    expect(member.stats()).toMatchObject({
+      configGeneration: 1,
+      sourceState: "ready",
+      verticalExaggeration: 3,
+      renderer: { submittedTiles: 1 },
+    });
+    await settle();
+    expect(h.decodedRequests).toHaveLength(decodedRequestCount);
+    member.dispose();
+  });
+
+  it("reloads when the wasm URLs a tile decodes with actually change", async () => {
+    const h = harness();
+    const member = createTiles3dMember(h.context, {
+      ...h.config,
+      wasm: { draco: { wrapperUrl: "/draco.js", wasmUrl: "/draco.wasm" } },
+    });
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    await settle();
+    h.submissions.prepareFrame();
+
+    member.setConfig({
+      ...h.config,
+      wasm: { draco: { wrapperUrl: "/draco.js", wasmUrl: "/draco-v2.wasm" } },
+    });
+
+    expect(h.renderer.removeActor).toHaveBeenCalledOnce();
+    expect(member.stats()).toMatchObject({
+      configGeneration: 2,
+      sourceState: "loading",
+      renderer: { submittedTiles: 0 },
+    });
+    member.dispose();
+  });
+
   it("retries a requested decoded tile after allocation shrink cancels partial admission", async () => {
     const h = harness(false, 64);
     const member = createTiles3dMember(h.context, h.config);

@@ -14,7 +14,7 @@ import {
   type ContentQueueEntrySnapshot,
   type ContentQueueSnapshot,
 } from "./contentQueue";
-import type { DecodedTileContent } from "./decode";
+import type { DecodedTileContent, DecodeWasmUrls } from "./decode";
 import { createMeshAdapter, type MeshAdapter } from "./meshAdapter";
 import { createMeshPickSet } from "./meshPicking";
 import {
@@ -46,6 +46,21 @@ const errorMessage = (error: unknown): string => {
   }
   return messages.join(": ");
 };
+
+/** Whether two wasm URL sets decode to the same bytes.
+ *
+ * A host resolves these URLs against the page on every config push, so the
+ * object is fresh each time. Only the URLs it names are decode inputs.
+ */
+const sameDecodeWasm = (
+  left: DecodeWasmUrls | undefined,
+  right: DecodeWasmUrls | undefined,
+): boolean =>
+  left === right ||
+  (left?.draco?.wrapperUrl === right?.draco?.wrapperUrl &&
+    left?.draco?.wasmUrl === right?.draco?.wasmUrl &&
+    left?.basis?.encoderUrl === right?.basis?.encoderUrl &&
+    left?.basis?.wasmUrl === right?.basis?.wasmUrl);
 
 const finiteMatrix = (
   matrix: readonly number[],
@@ -586,7 +601,7 @@ export const createTiles3dMember = (
       const decodeChanged =
         next.ecefToScene.some(
           (value, index) => value !== config.ecefToScene[index],
-        ) || next.wasm !== config.wasm;
+        ) || !sameDecodeWasm(next.wasm, config.wasm);
       const placementChanged =
         next.verticalExaggeration !== config.verticalExaggeration ||
         next.verticalPivotZ !== config.verticalPivotZ;
