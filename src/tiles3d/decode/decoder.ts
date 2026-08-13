@@ -219,6 +219,24 @@ const COMPONENT_BYTES: Readonly<Record<number, number>> = {
   5126: 4,
 };
 
+/**
+ * Fetch bytes, refusing to treat an HTTP error body as content.
+ *
+ * Without the status check a 410 for a retired revision hands ~30 bytes of
+ * `text/plain` to the glTF/KTX2 parser, which reports a buffer-overrun or
+ * corrupt-container error — sending debugging at the exporter for what was a
+ * routine retirement.
+ */
+const fetchOkBytes = async (url: string): Promise<ArrayBuffer> => {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(
+      `dependency fetch failed: ${response.status} ${response.statusText} (${url})`,
+    );
+  }
+  return response.arrayBuffer();
+};
+
 const requireIndex = <T>(
   array: readonly T[] | undefined,
   index: number,
@@ -888,8 +906,7 @@ const decodeTexture = async (
     gltf,
     image,
     request,
-    options.fetchDependency ??
-      (async (url) => (await fetch(url)).arrayBuffer()),
+    options.fetchDependency ?? fetchOkBytes,
   );
   const sampler = samplerFor(gltf.json, texture.sampler);
   if (image.mimeType === "image/ktx2") {
@@ -1166,10 +1183,7 @@ export const decodeTileContent = async (
         `glTF parser requested an unauthorized dependency: ${value}`,
       );
     }
-    const data = await (
-      options.fetchDependency ??
-      (async (target) => (await fetch(target)).arrayBuffer())
-    )(url);
+    const data = await (options.fetchDependency ?? fetchOkBytes)(url);
     return new Response(data, { status: 200 });
   };
   const parsed = (await parse(request.content.slice(0), GLTFLoader, {
