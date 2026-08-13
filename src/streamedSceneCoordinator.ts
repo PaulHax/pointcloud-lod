@@ -1,4 +1,9 @@
-import type { CameraView, Mat16 } from "./camera";
+import {
+  sameCameraView,
+  sameMatrix,
+  type CameraView,
+  type Mat16,
+} from "./camera";
 import type { MemoryPool, MemoryPoolMember } from "./memoryPool";
 import { allocateViewQuality } from "./viewBudget";
 import {
@@ -71,6 +76,10 @@ export type StreamedSceneCoordinatorOptions = {
   >;
   readonly textureCapabilities?: TextureCapabilities;
   readonly devicePixelRatio?: number;
+  /** Lack-of-progress window before one member is isolated from view gating. */
+  readonly stallWindowMs?: number;
+  /** Injectable monotonic-ish clock for deterministic stall tests. */
+  readonly now?: () => number;
   /** Motion/sample policy. Quality range and member target override are owned here. */
   readonly governor?: Omit<
     ViewGovernorOptions,
@@ -91,6 +100,7 @@ export type StreamedSceneCoordinatorStats = {
   readonly targetOverrideMemberId: string | null;
   readonly governor: ViewGovernorStats;
   readonly submissions: ReturnType<SubmissionScheduler["stats"]>;
+  readonly stalledMembers: readonly string[];
   readonly members: readonly StreamedCoordinatorMemberStats[];
 };
 
@@ -111,7 +121,7 @@ export type StreamedSceneCoordinator = {
   beginInteraction(): void;
   endInteraction(): void;
   /** Member preparation followed by the shared admission drain. */
-  prepareFrame(): void;
+  prepareFrame(frameSerial: number): void;
   recordHostFrame(metrics: HostFrameMetrics): void;
   needsFrame(): boolean;
   stats(): StreamedSceneCoordinatorStats;
@@ -127,12 +137,16 @@ type MemberState = {
   memoryMember: MemoryPoolMember | null;
   inputs: GovernorInputs;
   allocation: Allocation;
+  lastProgressSerial: number;
+  lastProgressAt: number;
+  stalled: boolean;
+  stallReported: boolean;
 };
 
 const EMPTY_INPUTS: GovernorInputs = {
   projectedImportance: CULLED,
   qualityDemand: 0,
-  workPending: false,
+  work: { operations: 0, progressSerial: 0 },
   physicalTileOperations: 0,
   physicalHierarchyOperations: 0,
   residentBytes: 0,
@@ -149,7 +163,10 @@ const normalizeInputs = (inputs: GovernorInputs): GovernorInputs => ({
   // non-finite value reaching the allocator.
   projectedImportance: usableFraction(inputs.projectedImportance) as Importance,
   qualityDemand: usableFraction(inputs.qualityDemand),
-  workPending: !!inputs.workPending,
+  work: {
+    operations: Math.floor(usableNonNegative(inputs.work.operations)),
+    progressSerial: Math.floor(usableNonNegative(inputs.work.progressSerial)),
+  },
   physicalTileOperations: Math.floor(
     usableNonNegative(inputs.physicalTileOperations),
   ),
@@ -171,6 +188,12 @@ const sameTargets = (
   left?.interactionTargetMs === right?.interactionTargetMs &&
   left?.stationaryTargetMs === right?.stationaryTargetMs;
 
+const copyCameraView = (view: CameraView): CameraView => ({
+  ...view,
+  position: [...view.position],
+  viewProj: Array.from(view.viewProj) as Mat16,
+});
+
 export const createStreamedSceneCoordinator = (
   options: StreamedSceneCoordinatorOptions,
 ): StreamedSceneCoordinator => {
@@ -188,6 +211,10 @@ export const createStreamedSceneCoordinator = (
     });
   const members = new Set<MemberState>();
   let disposed = false;
+  const now = options.now ?? Date.now;
+  const stallWindowMs = Math.max(1, options.stallWindowMs ?? 4_000);
+  let stallTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastPreparedFrameSerial = -1;
   let refreshing = false;
   let viewQualityFraction = 1;
   let appliedTargetState: MemberState | null = null;
@@ -257,6 +284,49 @@ export const createStreamedSceneCoordinator = (
           ? normalizeInputs(state.member.governorInputs())
           : EMPTY_INPUTS;
       }
+      if (stallTimer !== null) clearTimeout(stallTimer);
+      stallTimer = null;
+      const checkedAt = now();
+      let nextStallDelay = Number.POSITIVE_INFINITY;
+      for (const state of members) {
+        const operations =
+          state.inputs.work.operations +
+          state.inputs.physicalTileOperations +
+          state.inputs.physicalHierarchyOperations;
+        if (!state.active || operations === 0) {
+          state.lastProgressSerial = state.inputs.work.progressSerial;
+          state.lastProgressAt = checkedAt;
+          state.stalled = false;
+          state.stallReported = false;
+          continue;
+        }
+        if (state.inputs.work.progressSerial !== state.lastProgressSerial) {
+          state.lastProgressSerial = state.inputs.work.progressSerial;
+          state.lastProgressAt = checkedAt;
+          state.stalled = false;
+          state.stallReported = false;
+        }
+        const remaining = stallWindowMs - (checkedAt - state.lastProgressAt);
+        if (remaining <= 0) {
+          state.stalled = true;
+          if (!state.stallReported) {
+            state.stallReported = true;
+            state.member.onStall?.(
+              new Error(
+                `streamed member ${state.id ?? "<unnamed>"} made no progress for ${stallWindowMs} ms`,
+              ),
+            );
+          }
+        } else {
+          nextStallDelay = Math.min(nextStallDelay, remaining);
+        }
+      }
+      if (Number.isFinite(nextStallDelay)) {
+        stallTimer = setTimeout(
+          refresh,
+          Math.max(1, Math.ceil(nextStallDelay)),
+        );
+      }
       // Insertion order is the conflict rule. A hidden managed member yields
       // to the first active one and regains precedence if it is shown again.
       const adaptive = adaptiveStates();
@@ -282,9 +352,11 @@ export const createStreamedSceneCoordinator = (
       let pending = submissions.hasPending();
       for (const state of members) {
         if (!state.active) continue;
-        tileOperations += state.inputs.physicalTileOperations;
-        hierarchyOperations += state.inputs.physicalHierarchyOperations;
-        pending = pending || state.inputs.workPending;
+        if (!state.stalled) {
+          tileOperations += state.inputs.physicalTileOperations;
+          hierarchyOperations += state.inputs.physicalHierarchyOperations;
+          pending = pending || state.inputs.work.operations > 0;
+        }
       }
       governor.setWorkState({
         physicalTileOperations: tileOperations,
@@ -324,6 +396,10 @@ export const createStreamedSceneCoordinator = (
           memoryBudgetBytes: -1,
           regime: "stationary",
         },
+        lastProgressSerial: 0,
+        lastProgressAt: now(),
+        stalled: false,
+        stallReported: false,
       };
       if (disposed) {
         member.dispose();
@@ -351,19 +427,31 @@ export const createStreamedSceneCoordinator = (
       }
       refresh();
       let released = false;
+      let lastCamera: CameraView | null = null;
+      let lastModelMatrix: Mat16 | null = null;
+      let modelMatrixSet = false;
+      let lastDevicePixelRatio: number | null = null;
       return {
         setCamera(view) {
           if (released || disposed) return;
+          if (lastCamera !== null && sameCameraView(lastCamera, view)) return;
+          lastCamera = copyCameraView(view);
           state.member.setCamera(view);
           refresh();
         },
         setModelMatrix(matrix) {
           if (released || disposed) return;
+          if (modelMatrixSet && sameMatrix(lastModelMatrix, matrix)) return;
+          modelMatrixSet = true;
+          lastModelMatrix =
+            matrix === null ? null : (Array.from(matrix) as Mat16);
           state.member.setModelMatrix(matrix);
           refresh();
         },
         setDevicePixelRatio(devicePixelRatio) {
           if (released || disposed) return;
+          if (devicePixelRatio === lastDevicePixelRatio) return;
+          lastDevicePixelRatio = devicePixelRatio;
           state.member.setDevicePixelRatio(devicePixelRatio);
         },
         setActive(active) {
@@ -421,8 +509,13 @@ export const createStreamedSceneCoordinator = (
       refresh();
     },
 
-    prepareFrame() {
+    prepareFrame(frameSerial) {
       if (disposed) return;
+      if (!Number.isSafeInteger(frameSerial) || frameSerial < 0) {
+        throw new TypeError("frameSerial must be a non-negative safe integer");
+      }
+      if (frameSerial <= lastPreparedFrameSerial) return;
+      lastPreparedFrameSerial = frameSerial;
       for (const state of members) {
         if (state.active) state.member.prepareFrame();
       }
@@ -452,6 +545,9 @@ export const createStreamedSceneCoordinator = (
         targetOverrideMemberId: appliedTargetState?.id ?? null,
         governor: governor.stats(),
         submissions: submissions.stats(),
+        stalledMembers: [...members]
+          .filter((state) => state.stalled)
+          .map((state) => state.id ?? "<unnamed>"),
         members: [...members].map((state) => ({
           id: state.id,
           active: state.active,
@@ -465,6 +561,7 @@ export const createStreamedSceneCoordinator = (
     dispose() {
       if (disposed) return;
       disposed = true;
+      if (stallTimer !== null) clearTimeout(stallTimer);
       for (const reference of motionReferences) reference.release();
       motionReferences.length = 0;
       for (const state of members) {

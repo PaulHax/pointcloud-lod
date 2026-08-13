@@ -211,6 +211,13 @@ describe("createTiles3dMember", () => {
     await settle();
     expect(traversals).toBe(afterFirst);
 
+    const selectionPasses = (member.stats() as Tiles3dMemberStats)
+      .selectionPasses;
+    for (let serial = 0; serial < 5; serial += 1) member.prepareFrame();
+    expect((member.stats() as Tiles3dMemberStats).selectionPasses).toBe(
+      selectionPasses,
+    );
+
     member.dispose();
   });
 
@@ -230,7 +237,7 @@ describe("createTiles3dMember", () => {
       // the view for no refinement quality even though it is on screen.
       projectedImportance: 0,
       qualityDemand: 1,
-      workPending: true,
+      work: { operations: 1 },
     });
     expect(h.decodedRequests[0]).toMatchObject({
       revision: "r1",
@@ -270,7 +277,7 @@ describe("createTiles3dMember", () => {
 
     member.setActive(false);
     expect(actorInstances[0]?.visibility).toBe(false);
-    expect(member.governorInputs().workPending).toBe(false);
+    expect(member.governorInputs().work.operations).toBe(0);
     member.setActive(true);
     member.prepareFrame();
     member.dispose();
@@ -513,7 +520,7 @@ describe("createTiles3dMember", () => {
     // something outside the member acts. Claiming pending work here stops the
     // view governor sampling capacity for every member in the view, so the
     // whole view's adaptive quality freezes behind one over-budget tileset.
-    expect(member.governorInputs().workPending).toBe(false);
+    expect(member.governorInputs().work.operations).toBe(0);
     expect(member.stats()).toMatchObject({
       memoryConstrained: true,
       irreducibleBudget: true,
@@ -525,9 +532,11 @@ describe("createTiles3dMember", () => {
       regime: "stationary",
     });
     // A bigger allowance clears the latch and the work resumes on its own.
-    expect((member.stats() as Tiles3dMemberStats).irreducibleBudget).toBe(false);
+    expect((member.stats() as Tiles3dMemberStats).irreducibleBudget).toBe(
+      false,
+    );
     expect(h.submissions.stats().queuedJobs).toBeGreaterThan(0);
-    expect(member.governorInputs().workPending).toBe(true);
+    expect(member.governorInputs().work.operations).toBeGreaterThan(0);
     h.submissions.prepareFrame();
     expect(h.renderer.addActor).toHaveBeenCalledOnce();
     member.dispose();
@@ -559,7 +568,7 @@ describe("createTiles3dMember", () => {
       memoryConstrained: true,
       renderer: { drawnTiles: 2, submittedTiles: 2, pendingTiles: 1 },
     });
-    expect(member.governorInputs().workPending).toBe(true);
+    expect(member.governorInputs().work.operations).toBeGreaterThan(0);
 
     h.submissions.prepareFrame();
     const converged = member.stats() as Tiles3dMemberStats;
@@ -570,6 +579,99 @@ describe("createTiles3dMember", () => {
     });
     expect(converged.renderer.residentBytes).toBeLessThanOrEqual(60);
     expect(h.renderer.removeActor).toHaveBeenCalledTimes(3);
+    member.dispose();
+  });
+
+  it("credits a submitted parent when the complete child frontier fits without the transient peak", async () => {
+    const h = harness(true, 88);
+    (h.context.workers as any).decode = (request: DecodeTileRequest) => {
+      h.decodedRequests.push(request);
+      const value = decoded();
+      if (request.contentUrl.endsWith("/root.glb")) {
+        value.primitives[0]!.normals = new Float32Array([
+          0, 0, 1, 0, 0, 1, 0, 0, 1,
+        ]);
+      }
+      return { promise: Promise.resolve(value), cancel: vi.fn() };
+    };
+    const member = createTiles3dMember(h.context, h.config);
+    member.applyAllocation({
+      qualityFraction: 1,
+      // The parent retains 88 bytes and each child 52. Neither child can
+      // coexist with the parent under 110, but the final 104-byte frontier fits.
+      memoryBudgetBytes: 110,
+      regime: "stationary",
+    });
+    member.setCamera({
+      ...view,
+      projection: "orthographic",
+      parallelScale: 1e9,
+    });
+    await settle();
+    while (h.submissions.hasPending()) {
+      h.submissions.prepareFrame();
+      await settle();
+    }
+    expect(member.stats()).toMatchObject({
+      memoryConstrained: false,
+      renderer: { drawnTiles: 1, submittedTiles: 1, residentBytes: 88 },
+    });
+
+    member.setCamera(view);
+    await settle();
+    expect(member.stats()).toMatchObject({
+      renderer: { drawnTiles: 1, submittedTiles: 1, pendingTiles: 2 },
+    });
+    h.submissions.prepareFrame();
+    // One child is realized but held behind the group barrier. The parent is
+    // still the only resident/drawn frontier, so there is no visible gap or
+    // over-budget submitted peak.
+    expect(member.stats()).toMatchObject({
+      renderer: {
+        drawnTiles: 1,
+        submittedTiles: 1,
+        pendingTiles: 2,
+        residentBytes: 88,
+      },
+    });
+    h.submissions.prepareFrame();
+    await settle();
+    expect(member.stats()).toMatchObject({
+      memoryConstrained: false,
+      renderer: { drawnTiles: 2, submittedTiles: 2, residentBytes: 104 },
+    });
+    member.dispose();
+  });
+
+  it("retries a memory-constrained member when the camera changes its desired frontier", async () => {
+    const h = harness(true, 128);
+    const member = createTiles3dMember(h.context, h.config);
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 60,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    await settle();
+    while (h.submissions.hasPending()) {
+      h.submissions.prepareFrame();
+      await settle();
+    }
+    expect(member.stats()).toMatchObject({
+      memoryConstrained: true,
+      renderer: { drawnTiles: 1, residentBytes: 52 },
+    });
+
+    member.setCamera({
+      ...view,
+      projection: "orthographic",
+      parallelScale: 1e9,
+    });
+    await settle();
+    expect(member.stats()).toMatchObject({
+      memoryConstrained: false,
+      renderer: { drawnTiles: 1, residentBytes: 52 },
+    });
     member.dispose();
   });
 
@@ -606,7 +708,7 @@ describe("createTiles3dMember", () => {
       /texture is 2048 bytes.*submission cap/,
     );
     expect(member.governorInputs()).toMatchObject({
-      workPending: false,
+      work: { operations: 0 },
       physicalTileOperations: 0,
     });
     member.applyAllocation({

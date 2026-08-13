@@ -8,11 +8,7 @@
  * only way two members can share a camera.
  */
 
-import {
-  createEcefToEnuTransform,
-  multiplyMat4,
-  type Mat4,
-} from "../../../src/tiles3d/rtc";
+import { createEcefToEnuTransform, type Mat4 } from "../../../src/tiles3d/rtc";
 
 /** 3DBAG LoD2.2, CC BY 4.0, no key, CORS-enabled. */
 export const BAG3D_ENDPOINT =
@@ -86,18 +82,6 @@ export const PLACES: readonly Place[] = [
   },
 ];
 
-/**
- * 3D Tiles states its glTF content in a Y-up frame and has renderers apply the
- * y-up-to-z-up rotation before the tile transform chain. The library does not:
- * it takes content in the tile's own frame, which is what its Z-up fixtures
- * produce. A published tileset like 3DBAG is Y-up, so the rotation is folded
- * into the placement here — without it every tile lands thousands of
- * kilometres away, the camera clipping range explodes, and nothing is drawn.
- */
-const Z_UP_FROM_Y_UP: readonly number[] = [
-  1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1,
-];
-
 /** ECEF to the place's ENU scene frame — the mesh member's placement. */
 export const ecefToEnu = (place: Place): Mat4 =>
   createEcefToEnuTransform(
@@ -106,9 +90,8 @@ export const ecefToEnu = (place: Place): Mat4 =>
     place.napZeroHeight,
   );
 
-/** Y-up glTF content coordinates to the place's ENU scene frame. */
-export const contentToScene = (place: Place): Mat4 =>
-  multiplyMat4(ecefToEnu(place), Z_UP_FROM_Y_UP);
+/** Tile ECEF to the place's ENU scene frame; content-axis correction is internal. */
+export const contentToScene = ecefToEnu;
 
 /**
  * RD New (x, y, NAP z) to the same ENU frame — the point cloud's model matrix.

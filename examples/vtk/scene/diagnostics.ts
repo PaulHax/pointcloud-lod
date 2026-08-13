@@ -107,7 +107,10 @@ export const renderDiagnostics = (
               "memory allowance",
               megabytes(shared.allocation.memoryBudgetBytes),
             ],
-            ["work pending", shared.governorInputs.workPending ? "yes" : "no"],
+            [
+              "work pending",
+              shared.governorInputs.work.operations > 0 ? "yes" : "no",
+            ],
           ]
         : [];
       const own = isMesh(row.stats)

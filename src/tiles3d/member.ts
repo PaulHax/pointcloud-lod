@@ -207,6 +207,7 @@ export const createTiles3dMember = (
   let interactionDepth = 0;
   let memoryConstrained = false;
   let irreducibleBudget = false;
+  let constrainedDesiredSignature: string | null = null;
   let configGeneration = 1;
   let loadGeneration = 0;
   let loadController: AbortController | null = null;
@@ -218,12 +219,15 @@ export const createTiles3dMember = (
   let traversal: TilesetTraversalResult | null = null;
   let errorCount = 0;
   let lastError: string | null = null;
+  let workProgressSerial = 0;
+  let selectionPasses = 0;
   const requested = new Set<string>();
   const decoded = new Set<string>();
   const admissionBlocked = new Set<string>();
   const admissionFailed = new Set<string>();
   let refreshing = false;
   let refreshAgain = false;
+  let drawSetDirty = true;
 
   const report = (error: unknown): void => {
     errorCount += 1;
@@ -317,6 +321,134 @@ export const createTiles3dMember = (
       .map((tile) => tile.id)
       .filter((submittedId) => submittedId.startsWith(`${id}/`));
 
+  const submittedAncestorReplacement = (id: string): string | null => {
+    if (!traversal) return null;
+    const ancestors = adapter
+      .submittedTiles()
+      .map((tile) => tile.id)
+      .filter((candidate) => id.startsWith(`${candidate}/`))
+      .sort((left, right) => right.length - left.length);
+    for (const ancestor of ancestors) {
+      const desired = traversal.desiredTileIds.filter((candidate) =>
+        candidate.startsWith(`${ancestor}/`),
+      );
+      if (
+        desired.length > 0 &&
+        desired.every(
+          (candidate) =>
+            candidate === id || adapter.tileState(candidate) === "submitted",
+        )
+      ) {
+        return ancestor;
+      }
+    }
+    return null;
+  };
+
+  const replacementsForAdmission = (id: string): string[] => {
+    const replacements = replacedDescendants(id);
+    const ancestor = submittedAncestorReplacement(id);
+    return ancestor === null ? replacements : [...replacements, ancestor];
+  };
+
+  const waitingForSiblingBeforeReplacement = (id: string): boolean => {
+    if (!traversal) return false;
+    return adapter.submittedTiles().some((tile) => {
+      if (!id.startsWith(`${tile.id}/`)) return false;
+      const siblings = traversal!.desiredTileIds.filter(
+        (candidate) => candidate !== id && candidate.startsWith(`${tile.id}/`),
+      );
+      return siblings.some((candidate) => {
+        const state = adapter.tileState(candidate);
+        return (
+          state === "queued" ||
+          decoded.has(candidate) ||
+          (requested.has(candidate) && readiness(candidate) !== "failed")
+        );
+      });
+    });
+  };
+
+  const coveredSoonByDesiredDescendants = (id: string): boolean => {
+    if (!traversal) return false;
+    const descendants = traversal.desiredTileIds.filter((candidate) =>
+      candidate.startsWith(`${id}/`),
+    );
+    return (
+      descendants.length > 0 &&
+      descendants.every((candidate) => {
+        const state = adapter.tileState(candidate);
+        return (
+          state === "queued" || state === "submitted" || decoded.has(candidate)
+        );
+      })
+    );
+  };
+
+  const trySubmitDesiredGroup = (id: string) => {
+    if (!traversal || !queue) return null;
+    const ancestor = adapter
+      .submittedTiles()
+      .map((tile) => tile.id)
+      .filter((candidate) => id.startsWith(`${candidate}/`))
+      .sort((left, right) => right.length - left.length)[0];
+    if (!ancestor) return null;
+    const desired = traversal.desiredTileIds.filter((candidate) =>
+      candidate.startsWith(`${ancestor}/`),
+    );
+    if (
+      desired.length < 2 ||
+      desired.some(
+        (candidate) =>
+          adapter.tileState(candidate) !== "absent" || !decoded.has(candidate),
+      )
+    ) {
+      return null;
+    }
+    const entries = desired.flatMap((candidate) => {
+      const content = queue!.get(candidate);
+      return content
+        ? [
+            {
+              id: candidate,
+              content,
+              onSubmitted: () => onAdmitted(candidate),
+            },
+          ]
+        : [];
+    });
+    if (entries.length !== desired.length) return null;
+    const outcome = adapter.submitTileGroup(entries, [ancestor]);
+    if (outcome === "queued") {
+      for (const candidate of desired) admissionBlocked.delete(candidate);
+    }
+    return outcome;
+  };
+
+  const unconstrainedDesiredSignature = (): string | null => {
+    if (!source || !camera) return null;
+    selectionPasses += 1;
+    return traverseTileset({
+      root: source.root,
+      camera,
+      maximumScreenSpaceErrorPx: maximumSse(),
+      qualityFraction: allocation.qualityFraction,
+      modelMatrix: traversalModelMatrix(),
+      readiness,
+    }).desiredTileIds.join("\n");
+  };
+
+  const retryIfDesiredSelectionChanged = (): void => {
+    if (
+      memoryConstrained &&
+      constrainedDesiredSignature !== unconstrainedDesiredSignature()
+    ) {
+      memoryConstrained = false;
+      irreducibleBudget = false;
+      constrainedDesiredSignature = null;
+    }
+  };
+
   const readiness = (id: string) => {
     const state = adapter.tileState(id);
     if (state === "submitted") return "submitted" as const;
@@ -352,6 +484,8 @@ export const createTiles3dMember = (
   };
 
   const updateDrawSet = (): void => {
+    if (!drawSetDirty) return;
+    drawSetDirty = false;
     if (!source || !camera || !active || disposed) {
       adapter.setDrawnTiles([]);
       pickSet.replaceDrawn([]);
@@ -365,12 +499,14 @@ export const createTiles3dMember = (
       modelMatrix: traversalModelMatrix(),
       readiness,
     });
+    selectionPasses += 1;
     adapter.setDrawnTiles(traversal.drawnTileIds);
     pickSet.replaceDrawn(adapter.submittedTiles());
   };
 
   const refreshSelection = (): void => {
     if (disposed) return;
+    drawSetDirty = true;
     if (refreshing) {
       refreshAgain = true;
       return;
@@ -384,6 +520,7 @@ export const createTiles3dMember = (
         updateDrawSet();
         return;
       }
+      selectionPasses += 1;
       const next = traverseTileset({
         root: source.root,
         camera,
@@ -416,7 +553,7 @@ export const createTiles3dMember = (
           continue;
         const content = queue.get(id);
         if (content && !irreducibleBudget) {
-          const replacements = replacedDescendants(id);
+          const replacements = replacementsForAdmission(id);
           const outcome = adapter.submitTile(
             id,
             content,
@@ -495,9 +632,22 @@ export const createTiles3dMember = (
       },
       decodedByteLength: decodedBytes,
       onContent: (request, content) => {
+        workProgressSerial += 1;
         if (disposed || !active || !requested.has(request.id)) return;
         decoded.add(request.id);
-        const replacements = replacedDescendants(request.id);
+        const groupOutcome = trySubmitDesiredGroup(request.id);
+        if (groupOutcome === "queued") {
+          updateDrawSet();
+          return;
+        }
+        if (groupOutcome === "budget-blocked") {
+          memoryConstrained = true;
+          constrainedDesiredSignature = unconstrainedDesiredSignature();
+          irreducibleBudget = false;
+          refreshSelection();
+          return;
+        }
+        const replacements = replacementsForAdmission(request.id);
         const outcome = adapter.submitTile(
           request.id,
           content,
@@ -506,8 +656,17 @@ export const createTiles3dMember = (
         );
         if (outcome === "budget-blocked") {
           admissionBlocked.add(request.id);
+          if (coveredSoonByDesiredDescendants(request.id)) {
+            updateDrawSet();
+            return;
+          }
+          if (waitingForSiblingBeforeReplacement(request.id)) {
+            updateDrawSet();
+            return;
+          }
           if (!memoryConstrained) {
             memoryConstrained = true;
+            constrainedDesiredSignature = unconstrainedDesiredSignature();
             irreducibleBudget = false;
             refreshSelection();
           } else if (request.id === tileset.root.id) {
@@ -520,10 +679,15 @@ export const createTiles3dMember = (
         updateDrawSet();
       },
       onEvict: (request) => {
+        workProgressSerial += 1;
         decoded.delete(request.id);
       },
-      onError: (_request, error) => report(error),
+      onError: (_request, error) => {
+        workProgressSerial += 1;
+        report(error);
+      },
       onStateChange: (snapshot) => {
+        workProgressSerial += 1;
         setQueueSnapshot(snapshot);
         context.onWorkChange?.();
       },
@@ -554,6 +718,7 @@ export const createTiles3dMember = (
         )
           return;
         source = loaded;
+        workProgressSerial += 1;
         sourceState = "ready";
         createQueue(loaded);
         refreshSelection();
@@ -567,6 +732,7 @@ export const createTiles3dMember = (
         )
           return;
         sourceState = "failed";
+        workProgressSerial += 1;
         report(error);
       },
     );
@@ -583,6 +749,7 @@ export const createTiles3dMember = (
       // traversal for nothing, and does it inside the span the host times.
       if (camera !== null && sameCameraView(camera, view)) return;
       camera = view;
+      retryIfDesiredSelectionChanged();
       refreshSelection();
     },
 
@@ -599,6 +766,8 @@ export const createTiles3dMember = (
         return;
       }
       applyPlacement();
+      drawSetDirty = true;
+      retryIfDesiredSelectionChanged();
       refreshSelection();
     },
 
@@ -611,6 +780,7 @@ export const createTiles3dMember = (
       if (disposed || active === next) return;
       active = next;
       adapter.setVisible(next);
+      drawSetDirty = true;
       if (!next) {
         loadController?.abort();
         loadGeneration += 1;
@@ -624,9 +794,13 @@ export const createTiles3dMember = (
         admissionFailed.clear();
         memoryConstrained = false;
         irreducibleBudget = false;
+        constrainedDesiredSignature = null;
         updateDrawSet();
       } else if (!source) beginLoad();
-      else refreshSelection();
+      else {
+        retryIfDesiredSelectionChanged();
+        refreshSelection();
+      }
       context.onWorkChange?.();
     },
 
@@ -666,12 +840,14 @@ export const createTiles3dMember = (
         admissionFailed.clear();
         memoryConstrained = false;
         irreducibleBudget = false;
+        constrainedDesiredSignature = null;
         if (active) beginLoad();
       } else {
         queue?.configure({
           maxConcurrency: concurrency(),
           maxDecodedBytes: config.cacheBytes ?? DEFAULT_TILES3D_CACHE_BYTES,
         });
+        retryIfDesiredSelectionChanged();
         refreshSelection();
       }
     },
@@ -683,7 +859,7 @@ export const createTiles3dMember = (
       if (!disposed && interactionDepth > 0) interactionDepth -= 1;
     },
     prepareFrame() {
-      if (!disposed) updateDrawSet();
+      if (!disposed && drawSetDirty) updateDrawSet();
     },
 
     governorInputs(): GovernorInputs {
@@ -698,21 +874,30 @@ export const createTiles3dMember = (
               )
             : CULLED,
         qualityDemand: active && hasContent ? 1 : 0,
-        workPending:
-          active &&
-          (sourceState === "loading" ||
-            !!queueSnapshot?.workPending ||
-            renderer.pendingJobs > 0 ||
-            (traversal?.requestedTileIds.some((id) => {
-              const state = readiness(id);
-              return state !== "submitted" && state !== "failed";
-            }) ??
-              false)),
+        work: {
+          operations:
+            active &&
+            (sourceState === "loading" ||
+              !!queueSnapshot?.workPending ||
+              renderer.pendingJobs > 0 ||
+              (traversal?.requestedTileIds.some((id) => {
+                const state = readiness(id);
+                return state !== "submitted" && state !== "failed";
+              }) ??
+                false))
+              ? Math.max(1, (queueSnapshot?.active ?? 0) + renderer.pendingJobs)
+              : 0,
+          progressSerial: workProgressSerial + renderer.workRevision,
+        },
         physicalTileOperations: active ? (queueSnapshot?.active ?? 0) : 0,
         physicalHierarchyOperations:
           active && sourceState === "loading" ? 1 : 0,
         residentBytes: renderer.residentBytes,
       };
+    },
+
+    onStall(error) {
+      if (!disposed) report(error);
     },
 
     applyAllocation(next) {
@@ -726,9 +911,13 @@ export const createTiles3dMember = (
       if (allocation.memoryBudgetBytes > previousMemoryBudgetBytes) {
         memoryConstrained = false;
         irreducibleBudget = false;
+        constrainedDesiredSignature = null;
       } else if (adapter.stats().residentBytes > allocation.memoryBudgetBytes) {
         memoryConstrained = true;
         irreducibleBudget = false;
+        constrainedDesiredSignature = unconstrainedDesiredSignature();
+      } else {
+        retryIfDesiredSelectionChanged();
       }
       for (const id of adapter.setResourceCeilingBytes(
         allocation.memoryBudgetBytes,
@@ -798,6 +987,7 @@ export const createTiles3dMember = (
         memoryConstrained,
         selectedTiles: traversal?.desiredTileIds.length ?? 0,
         requestedTiles: traversal?.requestedTileIds.length ?? 0,
+        selectionPasses,
         errorCount,
         lastError,
         queue: queueSnapshot,

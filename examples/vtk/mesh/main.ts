@@ -131,7 +131,10 @@ const message = (stats: Tiles3dMemberStats | null): string => {
   return `${place.label} — ${externalTilesets} external tilesets resolved, ${stats.selectedTiles} tiles selected`;
 };
 
-host.onFrame((view) => registration?.setCamera(view));
+host.onBeforeFrame((view, devicePixelRatio) => {
+  registration?.setCamera(view);
+  registration?.setDevicePixelRatio(devicePixelRatio);
+});
 
 for (const candidate of PLACES) {
   const option = document.createElement("option");

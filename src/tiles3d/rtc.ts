@@ -89,6 +89,11 @@ export const composeSceneTransform = (
   accumulatedTilesTransform: readonly number[],
 ): Mat4 => multiplyMat4(ecefToScene, accumulatedTilesTransform);
 
+/** Standard 3D Tiles glTF Y-up content into the tile's Z-up coordinate system. */
+export const Y_UP_TO_Z_UP: Mat4 = [
+  1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1,
+];
+
 /**
  * Scene-local ENU vertical exaggeration, in column-major convention.
  * The pivot is invariant: `z' = pivotZ + exaggeration * (z - pivotZ)`.

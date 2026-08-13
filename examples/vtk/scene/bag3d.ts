@@ -135,35 +135,6 @@ const resolveChildren = async (
 };
 
 /**
- * 3D Tiles states bounding volumes in the tile's frame — ECEF here — and glTF
- * content in a Y-up frame a renderer is expected to rotate into it. The
- * library applies one `ecefToScene` matrix to both, which is exact only for
- * Z-up content like its own fixtures. Since the placement matrix has to be the
- * one the content needs, the bounds are rotated to match: ECEF (X, Y, Z)
- * becomes Y-up (X, Z, -Y), for the centre and for each half axis.
- *
- * Skipping this leaves geometry and bounds in frames a quarter turn apart, and
- * the traversal culls tiles that are on screen.
- */
-const toContentFrame = (tile: RawTile): RawTile => {
-  const box = tile.boundingVolume?.box;
-  const children = tile.children?.map(toContentFrame);
-  if (!Array.isArray(box) || box.length !== 12) {
-    return children ? { ...tile, children } : tile;
-  }
-  const rotated = [0, 3, 6, 9].flatMap((offset) => [
-    box[offset]!,
-    box[offset + 2]!,
-    -box[offset + 1]!,
-  ]);
-  return {
-    ...tile,
-    boundingVolume: { ...tile.boundingVolume, box: rotated },
-    ...(children ? { children } : {}),
-  };
-};
-
-/**
  * A `TilesetFetch` the tiles3d member can be handed directly. It answers the
  * one `tileset.json` request the member makes with the resolved document, so
  * every content URL still resolves against the real 3DBAG endpoint.
@@ -176,7 +147,7 @@ export const createBag3dTilesetFetch = (
     const index = (await fetchJson(url, init.signal)) as RawTileset;
     const root = index.root;
     const resolved = root
-      ? toContentFrame(await resolveTile(root, options, state, init.signal))
+      ? await resolveTile(root, options, state, init.signal)
       : undefined;
     const document = resolved ? { ...index, root: resolved } : index;
     return {

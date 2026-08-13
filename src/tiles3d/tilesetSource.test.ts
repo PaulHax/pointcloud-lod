@@ -49,6 +49,42 @@ const response = (body: unknown, status = 200) => ({
 });
 
 describe("loadTileset", () => {
+  it("inherits REPLACE into children while still rejecting explicit ADD", async () => {
+    const inherited = document();
+    delete (inherited.root.children![0] as { refine?: string }).refine;
+    const source = await loadTileset({
+      endpoint: "/tiles",
+      fetch: vi.fn().mockResolvedValue(response(inherited)),
+    });
+    expect(source.root.children[0]?.id).toBe("root/0");
+
+    const add = document();
+    (add.root.children![0] as { refine?: string }).refine = "ADD";
+    await expect(
+      loadTileset({
+        endpoint: "/tiles",
+        fetch: vi.fn().mockResolvedValue(response(add)),
+      }),
+    ).rejects.toThrow(/root\.children\[0\]\.refine/);
+  });
+
+  it("uses the shared affine tolerance for fixed matrix entries", async () => {
+    const tolerated = documentWithRootTransform([
+      1,
+      0,
+      0,
+      0.5e-12,
+      ...identity.slice(4, 15),
+      1 + 0.5e-12,
+    ]);
+    await expect(
+      loadTileset({
+        endpoint: "/tiles",
+        fetch: vi.fn().mockResolvedValue(response(tolerated)),
+      }),
+    ).resolves.toBeDefined();
+  });
+
   it("fetches and validates the constrained profile with stable IDs and URLs", async () => {
     const fetcher = vi.fn().mockResolvedValue(response(document()));
     const source = await loadTileset({

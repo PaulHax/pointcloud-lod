@@ -223,9 +223,18 @@ export const createPointCloudMember = (
           narrow.projectedImportance > 0 && full > 0
             ? Math.min(1, narrow.demandPoints / full)
             : 0,
-        // Read the controller's exact retry-aware obligation. It deliberately
-        // remains true during a backoff when physical operation counts are 0.
-        workPending: stats.workPending,
+        work: {
+          // Backoff remains one logical obligation even when physical counts
+          // are temporarily zero.
+          operations: stats.workPending
+            ? Math.max(
+                1,
+                narrow.physicalTileOperations +
+                  narrow.physicalHierarchyOperations,
+              )
+            : 0,
+          progressSerial: stats.workRevision,
+        },
         physicalTileOperations: narrow.physicalTileOperations,
         physicalHierarchyOperations: narrow.physicalHierarchyOperations,
         residentBytes: adapter.stats().gpuResidentBytes,

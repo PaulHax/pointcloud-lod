@@ -66,7 +66,13 @@ const host = createSceneHost(element<HTMLElement>("#viewer"));
 
 type Member = {
   readonly registration: StreamedMemberRegistration;
+  readonly source?: TileSource;
   stats(): Tiles3dMemberStats | PointCloudMemberStats;
+};
+
+const releaseMember = (member: Member | null): void => {
+  member?.registration.release();
+  member?.source?.dispose?.();
 };
 
 let mesh: Member | null = null;
@@ -143,10 +149,16 @@ const loadMesh = (revision: string): Member => {
   return { registration, stats: () => member.stats() as Tiles3dMemberStats };
 };
 
-const loadPoints = async (target: Place): Promise<Member | null> => {
+const loadPoints = async (
+  target: Place,
+  generation: number,
+): Promise<Member | null> => {
   const source = await copcSource(target.copcUrl);
-  // The place changed while the COPC header was in flight.
-  if (target !== place) return null;
+  // Place identity can cycle A -> B -> A while the first A is still loading.
+  if (generation !== loadRevision) {
+    source.dispose?.();
+    return null;
+  }
   pointsConfig = {
     source,
     presentation: presentation(),
@@ -170,7 +182,11 @@ const loadPoints = async (target: Place): Promise<Member | null> => {
   registration.setModelMatrix(rdToScene(target));
   registration.setActive(pointsToggle.checked);
   registration.setCamera(host.cameraView());
-  return { registration, stats: () => member.stats() as PointCloudMemberStats };
+  return {
+    registration,
+    source,
+    stats: () => member.stats() as PointCloudMemberStats,
+  };
 };
 
 /**
@@ -182,21 +198,26 @@ const loadPoints = async (target: Place): Promise<Member | null> => {
 const loadPlace = async (next: Place, reframe: boolean): Promise<void> => {
   place = next;
   loadRevision += 1;
+  const generation = loadRevision;
   const revision = `${place.label}@${radiusMeters()}m#${loadRevision}`;
-  mesh?.registration.release();
-  points?.registration.release();
+  releaseMember(mesh);
+  releaseMember(points);
   mesh = null;
   points = null;
   externalTilesets = 0;
   failure = null;
   if (reframe) host.lookAt([0, 0, 30], place.viewDistance);
   mesh = loadMesh(revision);
-  points = await loadPoints(place);
+  const loadedPoints = await loadPoints(place, generation);
+  if (generation === loadRevision) points = loadedPoints;
+  else releaseMember(loadedPoints);
 };
 
-host.onFrame((view) => {
+host.onBeforeFrame((view, devicePixelRatio) => {
   mesh?.registration.setCamera(view);
+  mesh?.registration.setDevicePixelRatio(devicePixelRatio);
   points?.registration.setCamera(view);
+  points?.registration.setDevicePixelRatio(devicePixelRatio);
 });
 
 for (const candidate of PLACES) {

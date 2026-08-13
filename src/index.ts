@@ -101,11 +101,17 @@ export type {
   Allocation,
   AllocationRegime,
   GovernorInputs,
+  Importance,
   MemberPickResult,
   OcclusionResult,
+  OutstandingWork,
   StreamedMember,
   StreamedMemberContext,
 } from "./streamedMember";
+
+export { sceneEnuPoint, type SceneEnuPoint } from "./frames";
+
+export { CULLED, importanceFromRootSseCssPx } from "./streamedMember";
 
 export {
   createStreamedSceneCoordinator,

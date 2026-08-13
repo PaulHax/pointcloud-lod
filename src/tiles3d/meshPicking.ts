@@ -12,12 +12,29 @@ import {
   type OcclusionResult,
 } from "../streamedMember";
 import type { Bounds } from "../octree";
-import type { DecodedPrimitive } from "./decode";
+import { sceneEnuPoint } from "../frames";
+import type { DecodedPrimitive, SerializableSampler } from "./decode";
+
+export type PickAlphaTexture = {
+  readonly width: number;
+  readonly height: number;
+  readonly alpha: Uint8Array;
+  readonly sampler: SerializableSampler;
+};
 
 export type SubmittedMeshPrimitive = Pick<
   DecodedPrimitive,
-  "positions" | "indices"
->;
+  "positions" | "indices" | "uvs"
+> & {
+  readonly alphaMask?:
+    | {
+        readonly kind: "known";
+        readonly factorAlpha: number;
+        readonly cutoff: number;
+        readonly texture?: PickAlphaTexture;
+      }
+    | { readonly kind: "unknown" };
+};
 
 export type SubmittedMeshTile = {
   readonly id: string;
@@ -81,9 +98,18 @@ const localPoint = (
 ];
 
 const transformPoint = (matrix: readonly number[], point: Vec3): Vec3 => [
-  matrix[0]! * point[0] + matrix[4]! * point[1] + matrix[8]! * point[2] + matrix[12]!,
-  matrix[1]! * point[0] + matrix[5]! * point[1] + matrix[9]! * point[2] + matrix[13]!,
-  matrix[2]! * point[0] + matrix[6]! * point[1] + matrix[10]! * point[2] + matrix[14]!,
+  matrix[0]! * point[0] +
+    matrix[4]! * point[1] +
+    matrix[8]! * point[2] +
+    matrix[12]!,
+  matrix[1]! * point[0] +
+    matrix[5]! * point[1] +
+    matrix[9]! * point[2] +
+    matrix[13]!,
+  matrix[2]! * point[0] +
+    matrix[6]! * point[1] +
+    matrix[10]! * point[2] +
+    matrix[14]!,
 ];
 
 const subtract = (left: Vec3, right: Vec3): Vec3 => [
@@ -144,6 +170,71 @@ const vertexAt = (
   corner: number,
 ): number =>
   primitive.indices?.[triangleIndex * 3 + corner] ?? triangleIndex * 3 + corner;
+
+const wrapped = (value: number, size: number, mode: number): number => {
+  if (mode === 10497) return ((value % size) + size) % size;
+  if (mode === 33648) {
+    const period = size * 2;
+    const repeated = ((value % period) + period) % period;
+    return repeated < size ? repeated : period - repeated - 1;
+  }
+  return Math.min(size - 1, Math.max(0, value));
+};
+
+const textureAlpha = (
+  texture: PickAlphaTexture,
+  u: number,
+  v: number,
+): number => {
+  const read = (x: number, y: number): number =>
+    texture.alpha[
+      wrapped(y, texture.height, texture.sampler.wrapT) * texture.width +
+        wrapped(x, texture.width, texture.sampler.wrapS)
+    ]! / 255;
+  if (texture.sampler.magFilter === 9728) {
+    return read(Math.floor(u * texture.width), Math.floor(v * texture.height));
+  }
+  const x = u * texture.width - 0.5;
+  const y = v * texture.height - 0.5;
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const tx = x - x0;
+  const ty = y - y0;
+  return (
+    read(x0, y0) * (1 - tx) * (1 - ty) +
+    read(x0 + 1, y0) * tx * (1 - ty) +
+    read(x0, y0 + 1) * (1 - tx) * ty +
+    read(x0 + 1, y0 + 1) * tx * ty
+  );
+};
+
+const alphaAtHit = (
+  primitive: SubmittedMeshPrimitive,
+  triangle: number,
+  barycentricU: number,
+  barycentricV: number,
+): "opaque" | "transparent" | "unknown" => {
+  const mask = primitive.alphaMask;
+  if (!mask) return "opaque";
+  if (mask.kind === "unknown") return "unknown";
+  let alpha = mask.factorAlpha;
+  if (mask.texture && primitive.uvs) {
+    const ia = vertexAt(primitive, triangle, 0);
+    const ib = vertexAt(primitive, triangle, 1);
+    const ic = vertexAt(primitive, triangle, 2);
+    const weightA = 1 - barycentricU - barycentricV;
+    const u =
+      primitive.uvs[ia * 2]! * weightA +
+      primitive.uvs[ib * 2]! * barycentricU +
+      primitive.uvs[ic * 2]! * barycentricV;
+    const v =
+      primitive.uvs[ia * 2 + 1]! * weightA +
+      primitive.uvs[ib * 2 + 1]! * barycentricU +
+      primitive.uvs[ic * 2 + 1]! * barycentricV;
+    alpha *= textureAlpha(mask.texture, u, v);
+  }
+  return alpha < mask.cutoff ? "transparent" : "opaque";
+};
 
 const projectedBoundsContain = (
   view: CameraView,
@@ -207,6 +298,7 @@ export const pickSubmittedTriangles = (
     return null;
   }
   let bestDepth = Number.POSITIVE_INFINITY;
+  let nearestUnknownDepth = Number.POSITIVE_INFINITY;
   // The winning triangle in the member's own ENU frame, plus where on it the
   // ray landed. Kept so the hit can be reported in scene space even though it
   // had to be found in drawn space.
@@ -244,13 +336,24 @@ export const pickSubmittedTriangles = (
           transformPoint(drawnMatrix, b),
           transformPoint(drawnMatrix, c),
         );
-        if (hit !== null && hit.depth < bestDepth) {
+        if (hit === null) continue;
+        const alpha = alphaAtHit(primitive, triangle, hit.u, hit.v);
+        if (alpha === "transparent") continue;
+        if (alpha === "unknown") {
+          nearestUnknownDepth = Math.min(nearestUnknownDepth, hit.depth);
+          continue;
+        }
+        if (hit.depth < bestDepth) {
           bestDepth = hit.depth;
           bestLocal = { a, b, c, u: hit.u, v: hit.v };
         }
       }
     }
   }
+  // Compressed MASK alpha is not CPU-readable. If it is in front of the first
+  // certain hit, report unavailable rather than inventing either a hit or a
+  // clear path through an unknown texel.
+  if (nearestUnknownDepth < bestDepth) return null;
   if (!Number.isFinite(bestDepth) || bestLocal === null) {
     return { status: "miss" };
   }
@@ -285,7 +388,7 @@ export const pickSubmittedTriangles = (
   return {
     status: "hit",
     rayDepth: bestDepth,
-    scenePoint: [scenePoint[0], scenePoint[1], scenePoint[2]],
+    scenePoint: sceneEnuPoint(scenePoint[0], scenePoint[1], scenePoint[2]),
     distancePx: Math.hypot(projected.xCssPx - cssX, projected.yCssPx - cssY),
   };
 };
@@ -304,8 +407,10 @@ export const createMeshPickSet = (): MeshPickSet => {
         next === null
           ? null
           : {
-              drawn: next.drawn === null ? null : (Array.from(next.drawn) as Mat16),
-              scene: next.scene === null ? null : (Array.from(next.scene) as Mat16),
+              drawn:
+                next.drawn === null ? null : (Array.from(next.drawn) as Mat16),
+              scene:
+                next.scene === null ? null : (Array.from(next.scene) as Mat16),
             };
     },
     pick(view, cssX, cssY) {
