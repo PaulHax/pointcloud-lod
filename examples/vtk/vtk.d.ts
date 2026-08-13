@@ -43,6 +43,22 @@ declare module "@kitware/vtk.js/Interaction/Manipulators/CompositeCameraManipula
   export default manipulator;
 }
 
+declare module "@kitware/vtk.js/Interaction/Manipulators/MouseCameraTrackballRotateManipulator" {
+  const manipulator: { newInstance(initialValues?: object): any };
+  export default manipulator;
+}
+
+declare module "@kitware/vtk.js/Interaction/Manipulators/MouseCameraTrackballZoomManipulator" {
+  const manipulator: { newInstance(initialValues?: object): any };
+  export default manipulator;
+}
+
+declare module "@kitware/vtk.js/Rendering/OpenGL/Texture/compressedFormats" {
+  export function getCompressedTextureCapabilities(
+    gl: unknown,
+  ): import("../../src/tiles3d/decode/types").TextureCapabilities;
+}
+
 declare module "@kitware/vtk.js/macros" {
   const macro: { obj(publicAPI: object, model: object): void };
   export default macro;

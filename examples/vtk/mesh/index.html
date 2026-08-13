@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>pointcloud-lod streamed mesh example</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="../scene/scene.css" />
+  </head>
+  <body>
+    <section class="panel" aria-label="Streamed mesh controls">
+      <header class="title-row">
+        <h1>pointcloud-lod · mesh</h1>
+        <a class="example-link" href="../">Point cloud</a>
+        <a class="example-link" href="../combined/">Combined</a>
+      </header>
+
+      <p>
+        3D Tiles streamed from
+        <a href="https://docs.3dbag.nl/" rel="noreferrer">3DBAG</a> — every
+        building in the Netherlands at LoD2.2, CC BY 4.0. Drag to orbit,
+        right-drag to pan, scroll to zoom; the mesh refines as you fly in.
+      </p>
+
+      <div>
+        <label for="place">Place</label>
+        <select id="place"></select>
+      </div>
+
+      <div>
+        <label for="radius">Streamed radius</label>
+        <div class="range-output">
+          <input
+            id="radius"
+            type="range"
+            min="500"
+            max="6000"
+            step="500"
+            value="3000"
+          />
+          <output id="radius-value" for="radius">3.0 km</output>
+        </div>
+      </div>
+
+      <div>
+        <label for="sse">Maximum screen-space error</label>
+        <div class="range-output">
+          <input id="sse" type="range" min="4" max="64" step="2" value="16" />
+          <output id="sse-value" for="sse">16 px</output>
+        </div>
+      </div>
+
+      <button id="reset-view" type="button">Reset view</button>
+
+      <output id="message" role="status">Loading…</output>
+      <div id="stats" aria-label="Streaming diagnostics"></div>
+    </section>
+    <main id="viewer"></main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
