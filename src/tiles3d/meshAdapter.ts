@@ -394,7 +394,14 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
           format: decoded.format,
           width: decoded.width,
           height: decoded.height,
-          srgb: decoded.colorSpace === "srgb",
+          // Deliberately not `colorSpace === "srgb"`. The RGBA fallback path
+          // below uploads raw bytes with no sRGB internal format, and the
+          // polydata shaders do no output encoding, so requesting sRGB here
+          // would decode the same texture differently depending on whether the
+          // context supports compression — the same tileset visibly darker on
+          // hardware than in a software-GL run. Both paths stay linear until
+          // the fork owns a real sRGB workflow end to end.
+          srgb: false,
           levels: decoded.levels,
         });
       } else {
