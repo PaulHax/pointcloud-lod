@@ -173,7 +173,13 @@ const loadPoints = async (target: Place): Promise<Member | null> => {
   return { registration, stats: () => member.stats() as PointCloudMemberStats };
 };
 
-const loadPlace = async (next: Place): Promise<void> => {
+/**
+ * Reloads both members, because the streamed radius is baked into the resolved
+ * document and the revision that keys it. Only a change of place reframes:
+ * widening the radius from where you are standing should bring more buildings
+ * to the same view, not move you.
+ */
+const loadPlace = async (next: Place, reframe: boolean): Promise<void> => {
   place = next;
   loadRevision += 1;
   const revision = `${place.label}@${radiusMeters()}m#${loadRevision}`;
@@ -183,7 +189,7 @@ const loadPlace = async (next: Place): Promise<void> => {
   points = null;
   externalTilesets = 0;
   failure = null;
-  host.lookAt([0, 0, 30], place.viewDistance);
+  if (reframe) host.lookAt([0, 0, 30], place.viewDistance);
   mesh = loadMesh(revision);
   points = await loadPoints(place);
 };
@@ -204,13 +210,13 @@ placeSelect.addEventListener("change", () => {
   const next = PLACES.find(
     (candidate) => candidate.label === placeSelect.value,
   );
-  if (next) void loadPlace(next);
+  if (next) void loadPlace(next, true);
 });
 
 radiusInput.addEventListener("input", () => {
   radiusValue.textContent = `${(radiusMeters() / 1000).toFixed(1)} km`;
 });
-radiusInput.addEventListener("change", () => void loadPlace(place));
+radiusInput.addEventListener("change", () => void loadPlace(place, false));
 
 sseInput.addEventListener("input", () => {
   sseValue.textContent = `${maximumSse()} px`;
@@ -272,7 +278,7 @@ placeSelect.value = (requested ?? PLACES[0]!).label;
 radiusValue.textContent = `${(radiusMeters() / 1000).toFixed(1)} km`;
 sseValue.textContent = `${maximumSse()} px`;
 pointSizeValue.textContent = `${Number(pointSizeInput.value).toFixed(2)}×`;
-void loadPlace(requested ?? PLACES[0]!);
+void loadPlace(requested ?? PLACES[0]!, true);
 
 // Driving handles for browser checks. Everything here moves the page the way a
 // user would, so a passing check says the assembled scene works.
