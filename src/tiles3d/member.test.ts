@@ -111,7 +111,7 @@ const harness = (withChildren = false, schedulerBytes = 1024) => {
   const config: Tiles3dMemberConfig = {
     endpoint: "/tiles",
     revision: "r1",
-    ecefToScene: identity,
+    tilesetToScene: identity,
     maximumScreenSpaceErrorPx: 4,
     minConcurrency: 1,
     maxConcurrency: 3,
@@ -269,8 +269,6 @@ describe("createTiles3dMember", () => {
       configGeneration: 1,
       verticalExaggeration: 1,
       verticalPivotZ: 0,
-      role: "model",
-      textureAssetId: null,
       maximumScreenSpaceErrorPx: 8,
       renderer: { drawnTiles: 1, drawnTriangles: 1 },
     });
@@ -738,7 +736,7 @@ describe("createTiles3dMember", () => {
       ...h.config,
       endpoint: "/tiles-next",
       revision: "r2",
-      ecefToScene: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 0, 0, 1],
+      tilesetToScene: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 0, 0, 1],
     });
     expect(h.renderer.removeActor).toHaveBeenCalledOnce();
     expect(member.pick(view, 50, 50)).toEqual({ status: "miss" });
@@ -753,16 +751,14 @@ describe("createTiles3dMember", () => {
 
   it("places vertical exaggeration after the tile origin without changing the live anchor", async () => {
     const h = harness();
-    const ecefToScene = [
+    const tilesetToScene = [
       0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0.25, 0.5, 0.25, 1,
     ];
     const member = createTiles3dMember(h.context, {
       ...h.config,
-      ecefToScene,
+      tilesetToScene,
       verticalExaggeration: 2,
       verticalPivotZ: 0.5,
-      role: "terrain",
-      textureAssetId: "ortho-7",
     });
     const anchor = [0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] as const;
     member.setModelMatrix(anchor);
@@ -774,9 +770,9 @@ describe("createTiles3dMember", () => {
     member.setCamera(view);
     await settle();
 
-    // Decoded vertices stay in unexaggerated scene ENU: exaggeration is a
+    // Decoded vertices stay in unexaggerated scene coordinates: exaggeration is a
     // render-time placement, so changing it never re-fetches or re-decodes.
-    expect(h.decodedRequests[0]?.ecefToScene).toEqual(ecefToScene);
+    expect(h.decodedRequests[0]?.tilesetToScene).toEqual(tilesetToScene);
     h.submissions.prepareFrame();
     expect(actorInstances[0]?.userMatrix).toEqual([
       0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 2, 0, 0, 0, -0.5, 1,
@@ -786,26 +782,20 @@ describe("createTiles3dMember", () => {
       configGeneration: 1,
       verticalExaggeration: 2,
       verticalPivotZ: 0.5,
-      role: "terrain",
-      textureAssetId: "ortho-7",
     });
 
     const decodedRequestCount = h.decodedRequests.length;
     member.setConfig({
       ...h.config,
-      ecefToScene,
+      tilesetToScene,
       verticalExaggeration: 4,
       verticalPivotZ: -0.25,
-      role: "terrain",
-      textureAssetId: "ortho-8",
     });
     expect(h.renderer.removeActor).not.toHaveBeenCalled();
     expect(member.stats()).toMatchObject({
       configGeneration: 1,
       verticalExaggeration: 4,
       verticalPivotZ: -0.25,
-      role: "terrain",
-      textureAssetId: "ortho-8",
       renderer: { submittedTiles: 1 },
     });
     expect(actorInstances[0]?.userMatrix).toEqual([
@@ -828,8 +818,6 @@ describe("createTiles3dMember", () => {
     const member = createTiles3dMember(h.context, {
       ...h.config,
       wasm: wasmUrls(),
-      role: "terrain",
-      textureAssetId: "ortho-7",
     });
     member.applyAllocation({
       qualityFraction: 1,
@@ -846,8 +834,6 @@ describe("createTiles3dMember", () => {
       ...h.config,
       wasm: wasmUrls(),
       verticalExaggeration: 3,
-      role: "terrain",
-      textureAssetId: "ortho-7",
     });
 
     expect(h.renderer.removeActor).not.toHaveBeenCalled();
@@ -935,13 +921,13 @@ describe("createTiles3dMember", () => {
     expect(() =>
       createTiles3dMember(h.context, {
         ...h.config,
-        ecefToScene: [1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+        tilesetToScene: [1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
       }),
     ).toThrow(/affine/);
     expect(() =>
       createTiles3dMember(h.context, {
         ...h.config,
-        ecefToScene: [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+        tilesetToScene: [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
       }),
     ).toThrow(/invertible/);
   });
@@ -982,46 +968,11 @@ describe("createTiles3dMember", () => {
     ).toThrow(/verticalExaggeration/);
   });
 
-  it("validates durable terrain role and imagery association semantics", () => {
-    const h = harness();
-    const terrain = createTiles3dMember(h.context, {
-      ...h.config,
-      role: "terrain",
-      textureAssetId: "  ortho-asset  ",
-    });
-    expect(terrain.stats()).toMatchObject({
-      role: "terrain",
-      textureAssetId: "ortho-asset",
-    });
-    terrain.dispose();
-
-    expect(() =>
-      createTiles3dMember(h.context, {
-        ...h.config,
-        role: "other" as unknown as "model",
-      }),
-    ).toThrow(/role/);
-    expect(() =>
-      createTiles3dMember(h.context, {
-        ...h.config,
-        role: "model",
-        textureAssetId: "ortho",
-      }),
-    ).toThrow(/only.*terrain/);
-    expect(() =>
-      createTiles3dMember(h.context, {
-        ...h.config,
-        role: "terrain",
-        textureAssetId: "   ",
-      }),
-    ).toThrow(/non-empty/);
-  });
-
-  it("composes anchor after ecefToScene for traversal while decode keeps anchor live", async () => {
+  it("composes anchor after tilesetToScene for traversal while decode keeps anchor live", async () => {
     const h = harness();
     const member = createTiles3dMember(h.context, {
       ...h.config,
-      ecefToScene: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 10, 0, 0, 1],
+      tilesetToScene: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 10, 0, 0, 1],
     });
     member.applyAllocation({
       qualityFraction: 1,
@@ -1034,7 +985,7 @@ describe("createTiles3dMember", () => {
     member.setModelMatrix([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -10, 0, 0, 1]);
     await settle();
     expect(h.decodedRequests).toHaveLength(1);
-    expect(h.decodedRequests[0]?.ecefToScene[12]).toBe(10);
+    expect(h.decodedRequests[0]?.tilesetToScene[12]).toBe(10);
     member.dispose();
   });
 });

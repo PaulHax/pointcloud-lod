@@ -4,11 +4,12 @@
  *
  * Each place fixes a scene origin: a local ENU frame whose Z is NAP, the Dutch
  * height datum both datasets are levelled to. From that one origin the mesh
- * gets its `ecefToScene` and the cloud gets its model matrix, which is the
+ * gets its `tilesetToScene` and the cloud gets its model matrix, which is the
  * only way two members can share a camera.
  */
 
 import { createEcefToEnuTransform, type Mat4 } from "../../../src/tiles3d/rtc";
+import { PLACE_LABELS } from "./sceneCatalog";
 
 /** 3DBAG LoD2.2, CC BY 4.0, no key, CORS-enabled. */
 export const BAG3D_ENDPOINT =
@@ -48,7 +49,7 @@ export type Place = {
  */
 export const PLACES: readonly Place[] = [
   {
-    label: "Rotterdam — Kop van Zuid",
+    label: PLACE_LABELS.rotterdam,
     rdOrigin: [92_600, 436_500],
     longitude: 4.4802686,
     latitude: 51.9134896,
@@ -59,7 +60,7 @@ export const PLACES: readonly Place[] = [
     viewDistance: 1400,
   },
   {
-    label: "Delft — city centre",
+    label: PLACE_LABELS.delft,
     rdOrigin: [84_100, 447_000],
     longitude: 4.3545773,
     latitude: 52.0068349,
@@ -70,7 +71,7 @@ export const PLACES: readonly Place[] = [
     viewDistance: 1100,
   },
   {
-    label: "Amsterdam — canal ring",
+    label: PLACE_LABELS.amsterdam,
     rdOrigin: [121_000, 486_300],
     longitude: 4.8880409,
     latitude: 52.3635352,

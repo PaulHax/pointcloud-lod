@@ -1,18 +1,19 @@
 # pointcloud-lod
 
-Octree LOD point-cloud streaming for [vtk.js](https://kitware.github.io/vtk-js/).
+Governed point-cloud and 3D Tiles streaming for
+[vtk.js](https://kitware.github.io/vtk-js/).
 
 **Status: early development.** APIs are provisional and will change without
 notice.
 
 ## What it is
 
-A standalone library that streams massive point clouds into vtk.js scenes by
-walking an octree level-of-detail hierarchy: only the tiles that matter for
-the current camera are fetched, decoded, and submitted to the renderer. Decoded
-CPU payloads, renderer/GPU residency, and active draw are separate lifecycle
-states; hiding a controller releases renderer resources while its byte-bounded
-decoded cache remains reusable.
+A standalone library that streams large point clouds and explicit 3D Tiles 1.1
+trees into vtk.js scenes. A shared scene coordinator governs frame time, memory,
+submission work, interaction, and cross-member quality while each format owns
+its traversal and renderer adapter. Only content relevant to the current camera
+is fetched, decoded, and submitted. Decoded CPU payloads, renderer/GPU
+residency, and active draw are separate lifecycle states.
 
 ## Install
 
@@ -354,7 +355,7 @@ more than one streamed dataset needs, and are the reference for it:
   governor gave it back, which is the only place that negotiation is visible.
 
 Both meet in a local ENU frame whose Z is NAP: the mesh arrives in ECEF and is
-placed by `ecefToScene`, the lidar arrives in RD New (EPSG:28992) and is placed
+placed by `tilesetToScene`, the lidar arrives in RD New (EPSG:28992) and is placed
 by a model matrix, and `examples/vtk/scene/places.ts` derives both from one
 origin. Public data is rarely shaped the way a strict reader wants, and
 `examples/vtk/scene/` carries what that costs at the host boundary: resolving

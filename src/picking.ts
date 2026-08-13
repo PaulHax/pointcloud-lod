@@ -20,7 +20,7 @@ import {
   type Mat16,
 } from "./camera";
 import { finitePositive } from "./numeric";
-import { sceneEnuPoint, type SceneEnuPoint } from "./frames";
+import { scenePoint, type ScenePoint } from "./frames";
 import type { Bounds, Vec3 } from "./octree";
 
 /** Mirrors `DEFAULT_PICK_PIXEL_RADIUS` in telesculptor-web `ray_depth.py`. */
@@ -71,7 +71,7 @@ export type PointPickResult =
       /** Positive distance from the ray origin along its normalized direction. */
       readonly rayDepth: number;
       /** The cursor ray evaluated at the support depth — not the vertex. */
-      readonly scenePoint: SceneEnuPoint;
+      readonly scenePoint: ScenePoint;
       /** Css-pixel distance from the cursor to the supporting vertex. */
       readonly distancePx: number;
     }
@@ -222,7 +222,7 @@ export const sweepPickPoints = (
     return {
       status: "hit",
       rayDepth: depth,
-      scenePoint: sceneEnuPoint(
+      scenePoint: scenePoint(
         rayX + dirX * depth,
         rayY + dirY * depth,
         rayZ + dirZ * depth,

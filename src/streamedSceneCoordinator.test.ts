@@ -148,6 +148,28 @@ describe("createStreamedSceneCoordinator", () => {
     });
   });
 
+  it("lets the host own global frame targets", () => {
+    const coordinator = createStreamedSceneCoordinator({
+      scheduleRender: vi.fn(),
+      memory: createMemoryPool({ totalBytes: 300 }),
+    });
+    coordinator.register(makeMember(), {
+      id: "point",
+      qualityManaged: true,
+      qualityTargets: { stationaryTargetMs: 45, interactionTargetMs: 18 },
+    });
+    coordinator.setQualityTargets({
+      stationaryTargetMs: 27,
+      interactionTargetMs: 12,
+    });
+    expect(coordinator.stats()).toMatchObject({
+      targetOverrideMemberId: null,
+      governor: { targetFrameTimeMs: 27 },
+    });
+    coordinator.beginInteraction();
+    expect(coordinator.stats().governor.targetFrameTimeMs).toBe(12);
+  });
+
   it("keeps camera/model/DPR/config member-specific and drains shared submissions", () => {
     const order: string[] = [];
     const coordinator = createStreamedSceneCoordinator({

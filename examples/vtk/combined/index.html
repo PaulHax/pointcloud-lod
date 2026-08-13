@@ -3,81 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>pointcloud-lod combined point-cloud and mesh example</title>
+    <title>pointcloud-lod combined explorer</title>
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="../scene/scene.css" />
   </head>
   <body>
-    <section class="panel" aria-label="Combined scene controls">
-      <header class="title-row">
-        <h1>pointcloud-lod · combined</h1>
-        <a class="example-link" href="../">Point cloud</a>
-        <a class="example-link" href="../mesh/">Mesh only</a>
-      </header>
-
-      <p>
-        <a href="https://www.ahn.nl/" rel="noreferrer">AHN4</a> lidar and
-        <a href="https://docs.3dbag.nl/" rel="noreferrer">3DBAG</a> buildings in
-        one scene, sharing one memory pool, one submission scheduler and one
-        view governor. Drag to orbit, right-drag to pan, scroll to zoom.
-      </p>
-
-      <div>
-        <label for="place">Place</label>
-        <select id="place"></select>
-      </div>
-
-      <div>
-        <label for="radius">Streamed building radius</label>
-        <div class="range-output">
-          <input
-            id="radius"
-            type="range"
-            min="500"
-            max="6000"
-            step="500"
-            value="2000"
-          />
-          <output id="radius-value" for="radius">2.0 km</output>
-        </div>
-      </div>
-
-      <div>
-        <label for="sse">Maximum screen-space error</label>
-        <div class="range-output">
-          <input id="sse" type="range" min="4" max="64" step="2" value="16" />
-          <output id="sse-value" for="sse">16 px</output>
-        </div>
-      </div>
-
-      <div>
-        <label for="point-size">Point size</label>
-        <div class="range-output">
-          <input
-            id="point-size"
-            type="range"
-            min="0.25"
-            max="3"
-            step="0.25"
-            value="0.5"
-          />
-          <output id="point-size-value" for="point-size">0.50×</output>
-        </div>
-      </div>
-
-      <div class="toggles">
-        <label
-          ><input id="show-mesh" type="checkbox" checked /> Buildings</label
-        >
-        <label><input id="show-points" type="checkbox" checked /> Lidar</label>
-      </div>
-
-      <button id="reset-view" type="button">Reset view</button>
-
-      <output id="message" role="status">Loading…</output>
-      <div id="stats" aria-label="Streaming diagnostics"></div>
-    </section>
-    <main id="viewer"></main>
     <script type="module" src="./main.ts"></script>
   </body>
 </html>

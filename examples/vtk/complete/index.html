@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>pointcloud-lod complete vtk.js example</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="../styles.css" />
+  </head>
+  <body>
+    <section class="panel" aria-label="Point-cloud controls">
+      <header class="title-row">
+        <h1>pointcloud-lod · complete</h1>
+        <div class="title-actions">
+          <a class="example-link" href="../">Explorer</a>
+          <a class="example-link" href="../simple/">Simple</a>
+          <a class="example-link" href="../mesh/">Mesh</a>
+          <a class="example-link" href="../combined/">Combined</a>
+          <button id="reset-view" type="button" class="reset-view">
+            Reset view
+          </button>
+        </div>
+      </header>
+
+      <section class="frame-rate-card" aria-labelledby="frame-rate-heading">
+        <div class="frame-rate-heading">
+          <h2 id="frame-rate-heading">Frame rate</h2>
+          <div class="frame-rate-values">
+            <span>
+              <output id="frame-rate-value">— fps</output>
+              <small>current</small>
+            </span>
+            <span>
+              <output id="frame-rate-filtered-value">— fps</output>
+              <small>average</small>
+            </span>
+          </div>
+        </div>
+        <div class="frame-rate-plot">
+          <svg
+            id="frame-rate-chart"
+            viewBox="0 0 320 80"
+            preserveAspectRatio="none"
+            role="img"
+            aria-label="No frame-rate samples yet"
+          >
+            <line class="frame-rate-grid" x1="0" y1="20" x2="320" y2="20" />
+            <line class="frame-rate-grid" x1="0" y1="40" x2="320" y2="40" />
+            <line class="frame-rate-grid" x1="0" y1="60" x2="320" y2="60" />
+            <path id="frame-rate-area" d="" />
+            <polyline id="frame-rate-line" points="" />
+            <line
+              id="frame-rate-target-line"
+              x1="0"
+              y1="40"
+              x2="320"
+              y2="40"
+              hidden
+            />
+            <circle id="frame-rate-latest" cx="320" cy="80" r="2.5" hidden />
+          </svg>
+          <span class="frame-rate-scale frame-rate-scale-top">120</span>
+          <span class="frame-rate-scale frame-rate-scale-bottom">0</span>
+        </div>
+        <div class="frame-rate-caption">
+          <span id="frame-rate-target">No target</span>
+          <span>Smoothed · 90 frames</span>
+        </div>
+      </section>
+
+      <label for="cloud-preset">Scene</label>
+      <select id="cloud-preset">
+        <option value="">Custom…</option>
+      </select>
+
+      <label for="cloud-url">COPC URL</label>
+      <div class="url-row">
+        <input
+          id="cloud-url"
+          type="url"
+          placeholder="https://example.com/cloud.copc.laz"
+          spellcheck="false"
+        />
+        <button id="load-url" type="button">Load</button>
+      </div>
+
+      <div class="divider"><span>or</span></div>
+
+      <label for="cloud-file">Local COPC file</label>
+      <input id="cloud-file" type="file" accept=".laz,.copc.laz" />
+
+      <div class="field-grid">
+        <div class="full-field">
+          <label for="budget-mode">Point budget</label>
+          <select id="budget-mode">
+            <option value="adaptive" selected>Adaptive</option>
+            <option value="fixed">Fixed</option>
+          </select>
+        </div>
+        <div hidden>
+          <label for="projection">Projection</label>
+          <select id="projection">
+            <option value="perspective" selected>Perspective</option>
+            <option value="orthographic">Orthographic</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="field-grid">
+        <div>
+          <label for="point-size-mode">Point size</label>
+          <select id="point-size-mode">
+            <option value="fixed">Fixed</option>
+            <option value="auto" selected>Auto</option>
+          </select>
+        </div>
+        <div>
+          <label id="point-size-label" for="point-size">Size (CSS px)</label>
+          <div class="range-output">
+            <input
+              id="point-size"
+              type="range"
+              min="0.25"
+              max="8"
+              step="0.25"
+              value="2"
+            />
+            <output id="point-size-value" for="point-size">2.00 px</output>
+          </div>
+        </div>
+      </div>
+
+      <div id="fixed-controls" hidden>
+        <label for="point-budget">Fixed budget (points)</label>
+        <input
+          id="point-budget"
+          type="number"
+          min="1000"
+          step="100000"
+          value="2000000"
+        />
+      </div>
+
+      <div id="adaptive-controls">
+        <div class="field-grid">
+          <div>
+            <label for="moving-target">Moving target (ms)</label>
+            <input
+              id="moving-target"
+              type="number"
+              min="1"
+              step="1"
+              value="16"
+            />
+          </div>
+          <div>
+            <label for="stationary-target">Settled target (ms)</label>
+            <input
+              id="stationary-target"
+              type="number"
+              min="1"
+              step="1"
+              value="33"
+            />
+          </div>
+        </div>
+        <label for="max-points"
+          >Maximum budget (points, blank = memory only)</label
+        >
+        <input
+          id="max-points"
+          type="number"
+          min="200000"
+          step="100000"
+          placeholder="none"
+        />
+      </div>
+
+      <section aria-labelledby="telemetry-heading">
+        <h2 id="telemetry-heading">Local telemetry</h2>
+        <output id="telemetry-status">Off · renderer not inspected</output>
+        <div class="title-actions">
+          <button id="telemetry-toggle" type="button">Start</button>
+          <button id="telemetry-download" type="button" disabled>
+            Download JSON
+          </button>
+          <button id="telemetry-clear" type="button" disabled>Clear</button>
+        </div>
+      </section>
+
+      <output id="message" role="status"
+        >Choose a local COPC file or URL.</output
+      >
+      <div id="stats" aria-label="Streaming diagnostics"></div>
+    </section>
+    <main id="viewer"></main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

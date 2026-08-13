@@ -92,7 +92,7 @@ describe("classic 3D Tiles decode worker", () => {
                       accumulatedTransform: [
                         1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
                       ],
-                      ecefToScene: [
+                      tilesetToScene: [
                         1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
                       ],
                       textureCapabilities: { capabilityKey, compressedFormats },

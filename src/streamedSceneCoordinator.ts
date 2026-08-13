@@ -118,6 +118,8 @@ export type StreamedSceneCoordinator = {
   noteRenderedCameras(
     views: ReadonlyMap<unknown, CameraView | null | undefined>,
   ): void;
+  /** Set the view-wide frame targets independently of any scene member. */
+  setQualityTargets(targets: AdaptiveQualityTargets): void;
   beginInteraction(): void;
   endInteraction(): void;
   /** Member preparation followed by the shared admission drain. */
@@ -217,6 +219,7 @@ export const createStreamedSceneCoordinator = (
   let lastPreparedFrameSerial = -1;
   let refreshing = false;
   let viewQualityFraction = 1;
+  let globalQualityTargets: AdaptiveQualityTargets | undefined;
   let appliedTargetState: MemberState | null = null;
   let appliedTargets: AdaptiveQualityTargets | undefined;
   const motionReferences: MotionReference[] = [];
@@ -333,17 +336,18 @@ export const createStreamedSceneCoordinator = (
       // Only adaptive point members supply a target bag. A tiles member is
       // quality-managed too, but must not mask the first adaptive point's
       // stable registry-order override; a tiles-only view uses defaults.
-      const targetState =
-        adaptive.find((state) => state.qualityTargets !== undefined) ?? null;
+      const targetState = globalQualityTargets
+        ? null
+        : (adaptive.find((state) => state.qualityTargets !== undefined) ??
+          null);
+      const nextTargets = globalQualityTargets ?? targetState?.qualityTargets;
       if (
         targetState !== appliedTargetState ||
-        !sameTargets(targetState?.qualityTargets, appliedTargets)
+        !sameTargets(nextTargets, appliedTargets)
       ) {
-        governor.setOptions(governorOptions(targetState?.qualityTargets));
+        governor.setOptions(governorOptions(nextTargets));
         appliedTargetState = targetState;
-        appliedTargets = targetState?.qualityTargets
-          ? { ...targetState.qualityTargets }
-          : undefined;
+        appliedTargets = nextTargets ? { ...nextTargets } : undefined;
       }
       // Fixed members do not consume normalized quality, but their frame cost
       // and incomplete work still contaminate the same view-wide sample.
@@ -492,6 +496,12 @@ export const createStreamedSceneCoordinator = (
     noteRenderedCameras(views) {
       if (disposed) return;
       governor.noteRenderedCameras(views, options.scheduleRender);
+      refresh();
+    },
+
+    setQualityTargets(targets) {
+      if (disposed || sameTargets(globalQualityTargets, targets)) return;
+      globalQualityTargets = { ...targets };
       refresh();
     },
 

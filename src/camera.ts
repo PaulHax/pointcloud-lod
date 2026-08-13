@@ -649,10 +649,7 @@ export const sameCameraView = (a: CameraView, b: CameraView): boolean => {
 };
 
 /** Element-wise matrix equality, treating null as its own value. */
-export const sameMatrix = (
-  a: Mat16 | null,
-  b: Mat16 | null,
-): boolean => {
+export const sameMatrix = (a: Mat16 | null, b: Mat16 | null): boolean => {
   if (a === null || b === null) return a === null && b === null;
   if (a.length !== b.length) return false;
   for (let index = 0; index < a.length; index += 1) {

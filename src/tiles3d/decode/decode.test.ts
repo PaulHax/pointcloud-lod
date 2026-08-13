@@ -54,7 +54,7 @@ const request = async (
   contentUrl: `https://fixture.invalid/content/${name}`,
   revision: "fixture-revision",
   accumulatedTransform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
-  ecefToScene: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+  tilesetToScene: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
   textureCapabilities,
 });
 
@@ -132,7 +132,87 @@ const transformedPointGlb = async (): Promise<ArrayBuffer> => {
   ) as ArrayBuffer;
 };
 
+const embeddedGltf = ({
+  bufferUri,
+  imageUri = "DATA:IMAGE/PNG;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+X7S6AAAAAElFTkSuQmCC",
+  texCoord = 1,
+  sampler,
+}: {
+  bufferUri?: string;
+  imageUri?: string;
+  texCoord?: number;
+  sampler?: Record<string, number>;
+} = {}): { content: ArrayBuffer; binary: ArrayBuffer } => {
+  const binary = new ArrayBuffer(90);
+  new Float32Array(binary, 0, 9).set([0, 0, 0, 1, 0, 0, 0, 1, 0]);
+  new Float32Array(binary, 36, 6).set([0, 0, 0.5, 0, 0, 0.5]);
+  new Float32Array(binary, 60, 6).set([0.2, 0.3, 0.7, 0.4, 0.4, 0.8]);
+  new Uint16Array(binary, 84, 3).set([0, 1, 2]);
+  const uri =
+    bufferUri ??
+    `data:application/octet-stream;base64,${Buffer.from(binary).toString("base64")}`;
+  const json = {
+    asset: { version: "2.0" },
+    scene: 0,
+    scenes: [{ nodes: [0] }],
+    nodes: [{ mesh: 0 }],
+    meshes: [
+      {
+        primitives: [
+          {
+            attributes: { POSITION: 0, TEXCOORD_0: 1, TEXCOORD_1: 2 },
+            indices: 3,
+            material: 0,
+          },
+        ],
+      },
+    ],
+    buffers: [{ uri, byteLength: binary.byteLength }],
+    bufferViews: [
+      { buffer: 0, byteOffset: 0, byteLength: 36 },
+      { buffer: 0, byteOffset: 36, byteLength: 24 },
+      { buffer: 0, byteOffset: 60, byteLength: 24 },
+      { buffer: 0, byteOffset: 84, byteLength: 6 },
+    ],
+    accessors: [
+      { bufferView: 0, componentType: 5126, count: 3, type: "VEC3" },
+      { bufferView: 1, componentType: 5126, count: 3, type: "VEC2" },
+      { bufferView: 2, componentType: 5126, count: 3, type: "VEC2" },
+      { bufferView: 3, componentType: 5123, count: 3, type: "SCALAR" },
+    ],
+    images: [{ uri: imageUri }],
+    textures: [{ source: 0, ...(sampler ? { sampler: 0 } : {}) }],
+    ...(sampler ? { samplers: [sampler] } : {}),
+    materials: [
+      { pbrMetallicRoughness: { baseColorTexture: { index: 0, texCoord } } },
+    ],
+  };
+  const encoded = new TextEncoder().encode(JSON.stringify(json));
+  return {
+    content: encoded.buffer.slice(
+      encoded.byteOffset,
+      encoded.byteOffset + encoded.byteLength,
+    ),
+    binary,
+  };
+};
+
 describe("decoded tile contract", () => {
+  it("rejects glTF sampler enums before they reach a renderer backend", async () => {
+    const embedded = embeddedGltf({ sampler: { magFilter: 7 } });
+    await expect(
+      decodeTileContent(
+        {
+          ...(await request("level-0-root.glb")),
+          content: embedded.content,
+          contentUrl: "https://fixture.invalid/content/tile.gltf",
+          dependencyRootUrl: "https://fixture.invalid/content/",
+        },
+        testOptions,
+      ),
+    ).rejects.toThrow(/invalid magFilter/);
+  });
+
   it("applies glTF nodes, then mandatory Y-up correction, then tile and scene transforms", async () => {
     const result = await decodeTileContent(
       {
@@ -141,7 +221,9 @@ describe("decoded tile contract", () => {
         accumulatedTransform: [
           1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 100, 200, 300, 1,
         ],
-        ecefToScene: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1000, 2000, 3000, 1],
+        tilesetToScene: [
+          1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1000, 2000, 3000, 1,
+        ],
       },
       testOptions,
     );
@@ -203,6 +285,25 @@ describe("decoded tile contract", () => {
       expect.objectContaining({ version: 1, kind: "gltf-material" }),
       expect.objectContaining({ version: 1, kind: "gltf-material" }),
     ]);
+    const absolutePoints = result.primitives.map((primitive) =>
+      Array.from({ length: primitive.positions.length / 3 }, (_, index) =>
+        [0, 1, 2].map(
+          (axis) =>
+            primitive.positions[index * 3 + axis]! + result.origin[axis]!,
+        ),
+      ),
+    );
+    expect(absolutePoints[0]?.map((point) => point[2])).toEqual([0, 0, 0, 0]);
+    expect(absolutePoints[1]?.map((point) => point[2])).toEqual([3, 3, 3, 3]);
+    for (const points of absolutePoints) {
+      expect(new Set(points.map((point) => point[0])).size).toBe(2);
+      expect(new Set(points.map((point) => point[1])).size).toBe(2);
+    }
+    for (const primitive of result.primitives) {
+      expect(primitive.normals && [...primitive.normals]).toEqual([
+        0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1,
+      ]);
+    }
     expect(() => structuredClone(result)).not.toThrow();
     expect(JSON.stringify(result.primitives[0]?.material.raw)).not.toContain(
       "loaderData",
@@ -322,23 +423,129 @@ describe("decoded tile contract", () => {
       dependencyRootUrl: "https://fixture.invalid/root/",
       revision: "r1",
       accumulatedTransform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
-      ecefToScene: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+      tilesetToScene: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
       textureCapabilities: capabilities("rgba", []),
     } satisfies DecodeTileRequest;
-    expect(resolveGltfDependencyUrl(base, "../buffers/mesh.bin")).toBe(
-      "https://fixture.invalid/root/buffers/mesh.bin",
+    expect(resolveGltfDependencyUrl(base, "buffers/mesh.bin")).toBe(
+      "https://fixture.invalid/root/models/buffers/mesh.bin",
+    );
+    expect(resolveGltfDependencyUrl(base, "mesh%2Ebin")).toBe(
+      "https://fixture.invalid/root/models/mesh.bin",
+    );
+    expect(resolveGltfDependencyUrl(base, "%2e/mesh.bin")).toBe(
+      "https://fixture.invalid/root/models/mesh.bin",
+    );
+    expect(resolveGltfDependencyUrl(base, "%252e/mesh.bin")).toBe(
+      "https://fixture.invalid/root/models/mesh.bin",
+    );
+    expect(resolveGltfDependencyUrl(base, "buffers//%252e/mesh.bin")).toBe(
+      "https://fixture.invalid/root/models/buffers/mesh.bin",
     );
     for (const value of [
       "https://other.invalid/file.bin",
       "//other.invalid/file.bin",
       "/absolute.bin",
+      "../buffers/mesh.bin",
       "../../escape.bin",
       "%2e%2e/escape.bin",
       "..%2fescape.bin",
       "..\\escape.bin",
+      "mesh%252fsecret.bin",
+      "%2568%2574%2574%2570%2573%253Aevil.invalid/file.bin",
+      "%252e%252e/escape.bin",
+      "mesh%00.bin",
+      "mesh%ZZ.bin",
     ]) {
       expect(() => resolveGltfDependencyUrl(base, value)).toThrow();
     }
+  });
+
+  it("decodes declared data URI buffers and images locally and selects the material UV set", async () => {
+    const authored = embeddedGltf();
+    const { content } = embeddedGltf({
+      bufferUri: `DATA:APPLICATION/OCTET-STREAM;base64,${Buffer.from(
+        authored.binary,
+      ).toString("base64")}`,
+    });
+    const fetched: string[] = [];
+    let decodedImage: { bytes: Uint8Array; mimeType: string } | undefined;
+    const result = await decodeTileContent(
+      {
+        ...(await request("level-0-root.glb")),
+        content,
+        contentUrl: "https://fixture.invalid/content/embedded.gltf",
+      },
+      {
+        fetchDependency: async (url) => {
+          fetched.push(url);
+          throw new Error("embedded dependencies must not be fetched");
+        },
+        decodeRasterImage: async (bytes, mimeType) => {
+          decodedImage = { bytes: bytes.slice(), mimeType };
+          return raster();
+        },
+      },
+    );
+
+    expect(fetched).toEqual([]);
+    expect(decodedImage?.mimeType).toBe("image/png");
+    expect(Array.from(decodedImage!.bytes.slice(0, 8))).toEqual([
+      137, 80, 78, 71, 13, 10, 26, 10,
+    ]);
+    expect(result.primitives[0]?.material.raw.baseColorTexture?.texCoord).toBe(
+      1,
+    );
+    expect(result.primitives[0]?.uvs && [...result.primitives[0].uvs]).toEqual(
+      expect.arrayContaining([
+        expect.closeTo(0.2),
+        expect.closeTo(0.3),
+        expect.closeTo(0.7),
+        expect.closeTo(0.4),
+        expect.closeTo(0.4),
+        expect.closeTo(0.8),
+      ]),
+    );
+  });
+
+  it("fetches percent-encoded external dependencies at the validated canonical URL", async () => {
+    const { content, binary } = embeddedGltf({
+      bufferUri: "%252e/mesh%252Ebin",
+    });
+    const fetched: string[] = [];
+    const result = await decodeTileContent(
+      {
+        ...(await request("level-0-root.glb")),
+        content,
+        contentUrl: "https://fixture.invalid/root/models/model.gltf",
+        dependencyRootUrl: "https://fixture.invalid/root/",
+      },
+      {
+        ...testOptions,
+        fetchDependency: async (url) => {
+          fetched.push(url);
+          return binary.slice(0);
+        },
+      },
+    );
+
+    expect(result.primitives).toHaveLength(1);
+    expect(fetched).toEqual(["https://fixture.invalid/root/models/mesh.bin"]);
+  });
+
+  it("rejects malformed embedded dependency data before parsing", async () => {
+    const { content } = embeddedGltf({
+      bufferUri: "data:application/octet-stream;base64,%%%",
+    });
+    await expect(
+      decodeTileContent(
+        {
+          ...(await request("level-0-root.glb")),
+          content,
+          contentUrl: "https://fixture.invalid/content/malformed.gltf",
+        },
+        testOptions,
+      ),
+    ).rejects.toThrow(/data URI.*base64/i);
   });
 
   it.each([

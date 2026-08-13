@@ -1,16 +1,14 @@
 /**
- * The camera controls every example in this app shares.
+ * Reusable camera controls for z-up vtk.js scenes.
  *
  * Left drag pans, right drag orbits, middle drag and the wheel zoom.
  *
  * The stock trackball rolls the camera freely, which loses the horizon on the
  * first diagonal drag over a landscape. Orbiting about the focal point with a
- * fixed world up keeps the scene the way up the data is — which matters as
- * much for a city of buildings as for the point clouds these were written for.
+ * fixed world up keeps the scene the way up the data is.
  */
 
 import vtkInteractorStyleManipulator from "@kitware/vtk.js/Interaction/Style/InteractorStyleManipulator";
-import vtkMouseCameraTrackballPanManipulator from "@kitware/vtk.js/Interaction/Manipulators/MouseCameraTrackballPanManipulator";
 import vtkCompositeMouseManipulator from "@kitware/vtk.js/Interaction/Manipulators/CompositeMouseManipulator";
 import vtkCompositeCameraManipulator from "@kitware/vtk.js/Interaction/Manipulators/CompositeCameraManipulator";
 import macro from "@kitware/vtk.js/macros";
@@ -47,6 +45,102 @@ export type CameraControlsOptions = {
 };
 
 type Position = { x: number; y: number };
+
+// vtk.js exposes this helper at runtime but omits it from the module's public
+// declaration, even though its own manipulators call the same implementation.
+const vtkDollyToPosition = (
+  vtkInteractorStyleManipulator as typeof vtkInteractorStyleManipulator & {
+    dollyToPosition(
+      factor: number,
+      position: Position,
+      renderer: any,
+      interactor: any,
+    ): void;
+  }
+).dollyToPosition;
+
+/**
+ * Pan on the camera's projected focal plane at the point where the button
+ * went down.
+ *
+ * Holding that one world anchor and translating eye and focus together makes
+ * the grabbed plane point follow the cursor exactly, including long drags
+ * that begin far from the screen centre. This is entirely camera geometry:
+ * streamed scene contents are never queried by an interaction.
+ */
+const createPanManipulator = (initialValues: object): any => {
+  const publicAPI = {};
+  const model = { ...initialValues };
+  macro.obj(publicAPI, model);
+  vtkCompositeMouseManipulator.extend(publicAPI, model, initialValues);
+  vtkCompositeCameraManipulator.extend(publicAPI, model, initialValues);
+
+  let anchor: readonly [number, number, number] | null = null;
+  const api = publicAPI as {
+    onButtonDown: (i: any, r: any, p: Position) => void;
+    onMouseMove: (i: any, r: any, p: Position | null) => void;
+  };
+  api.onButtonDown = (interactor, renderer, position) => {
+    const panCamera = renderer.getActiveCamera();
+    const focalPoint = panCamera.getFocalPoint() as number[];
+    const style = interactor.getInteractorStyle();
+    const displayFocal = style.computeWorldToDisplay(
+      renderer,
+      focalPoint[0],
+      focalPoint[1],
+      focalPoint[2],
+    ) as number[];
+    const planePoint = style.computeDisplayToWorld(
+      renderer,
+      position.x,
+      position.y,
+      displayFocal[2],
+    ) as number[];
+    anchor = null;
+    if (planePoint.slice(0, 3).every(Number.isFinite)) {
+      anchor = [planePoint[0]!, planePoint[1]!, planePoint[2]!];
+    }
+  };
+  api.onMouseMove = (interactor, renderer, position) => {
+    if (!position || anchor === null) return;
+    const style = interactor.getInteractorStyle();
+    const displayAnchor = style.computeWorldToDisplay(
+      renderer,
+      anchor[0],
+      anchor[1],
+      anchor[2],
+    ) as number[];
+    const worldAtCursor = style.computeDisplayToWorld(
+      renderer,
+      position.x,
+      position.y,
+      displayAnchor[2],
+    ) as number[];
+    if (!worldAtCursor.slice(0, 3).every(Number.isFinite)) return;
+
+    const translation = anchor.map(
+      (value, axis) => value - worldAtCursor[axis]!,
+    );
+    if (!translation.every(Number.isFinite)) return;
+    const panCamera = renderer.getActiveCamera();
+    const cameraPosition = panCamera.getPosition() as number[];
+    const focalPoint = panCamera.getFocalPoint() as number[];
+    const nextPosition = cameraPosition.map(
+      (value, axis) => value + translation[axis]!,
+    );
+    const nextFocal = focalPoint.map(
+      (value, axis) => value + translation[axis]!,
+    );
+    panCamera.setPosition(nextPosition[0], nextPosition[1], nextPosition[2]);
+    panCamera.setFocalPoint(nextFocal[0], nextFocal[1], nextFocal[2]);
+    style.setCenterOfRotation(nextFocal[0], nextFocal[1], nextFocal[2]);
+    renderer.resetCameraClippingRange();
+    if (interactor.getLightFollowCamera()) {
+      renderer.updateLightsGeometryToFollowCamera();
+    }
+  };
+  return publicAPI;
+};
 
 /**
  * Dolly without letting a perspective camera collapse through its focus.
@@ -104,12 +198,7 @@ const dollyToPosition = (
   }
 
   if (!Number.isFinite(appliedFactor) || appliedFactor === 1) return 1;
-  vtkInteractorStyleManipulator.dollyToPosition(
-    appliedFactor,
-    position,
-    renderer,
-    interactor,
-  );
+  vtkDollyToPosition(appliedFactor, position, renderer, interactor);
   if (approachDirection !== null) {
     const focalPoint = dollyCamera.getFocalPoint() as number[];
     const cameraPosition = dollyCamera.getPosition() as number[];
@@ -351,9 +440,7 @@ const trackPointer = (
 export const installCameraControls = (options: CameraControlsOptions): any => {
   const pointerPosition = trackPointer(options.viewer, options.canvas);
   const style = vtkInteractorStyleManipulator.newInstance();
-  style.addMouseManipulator(
-    vtkMouseCameraTrackballPanManipulator.newInstance({ button: 1 }),
-  );
+  style.addMouseManipulator(createPanManipulator({ button: 1 }));
   style.addMouseManipulator(createOrbitManipulator({ button: 3 }));
   // Middle drag and the wheel both zoom toward the cursor: the camera moves
   // along the ray through whatever is under the pointer, so that point stays

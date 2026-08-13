@@ -40,8 +40,8 @@ describe("3D Tiles RTC conversion", () => {
     expect(origin[1]).toBeCloseTo(-4_844_350.577, 2);
     expect(origin[2]).toBeCloseTo(3_982_802.63, 2);
 
-    const ecefToScene = createEcefToEnuTransform(-77.0353, 38.8895, 42);
-    expect(transformPoint(ecefToScene, origin)).toEqual(
+    const tilesetToScene = createEcefToEnuTransform(-77.0353, 38.8895, 42);
+    expect(transformPoint(tilesetToScene, origin)).toEqual(
       expect.arrayContaining([
         expect.closeTo(0, 8),
         expect.closeTo(0, 8),
@@ -55,7 +55,7 @@ describe("3D Tiles RTC conversion", () => {
       origin[1] + Math.cos(longitude),
       origin[2],
     ];
-    const east = transformPoint(ecefToScene, eastOneMeter);
+    const east = transformPoint(tilesetToScene, eastOneMeter);
     expect(east[0]).toBeCloseTo(1, 5);
     expect(east[1]).toBeCloseTo(0, 5);
     expect(east[2]).toBeCloseTo(0, 5);
@@ -63,13 +63,13 @@ describe("3D Tiles RTC conversion", () => {
 
   it("uses a different established session anchor and preserves composition order", () => {
     const anchor = translation(7, 11, 13);
-    const ecefToScene: Mat4 = [
+    const tilesetToScene: Mat4 = [
       0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 100, 200, 300, 1,
     ];
     const accumulated = translation(2, 3, 5);
     const composed = multiplyMat4(
       anchor,
-      composeSceneTransform(ecefToScene, accumulated),
+      composeSceneTransform(tilesetToScene, accumulated),
     );
 
     expect(transformPoint(composed, [1, 0, 0])).toEqual([104, 214, 318]);
@@ -77,19 +77,19 @@ describe("3D Tiles RTC conversion", () => {
 
   it("composes anchor, pivoted ENU exaggeration, ECEF placement, and tile-local transforms in that order", () => {
     const anchor: Mat4 = [0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 7, 11, 13, 1];
-    const ecefToScene: Mat4 = [
+    const tilesetToScene: Mat4 = [
       0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 100, 200, 10, 1,
     ];
     const accumulated = translation(2, 3, 4);
     const scene = composeVerticalExaggeratedSceneTransform(
       3,
       5,
-      ecefToScene,
+      tilesetToScene,
       accumulated,
     );
     const composed = multiplyMat4(anchor, scene);
 
-    // tile/local -> ECEFToScene gives [97, 203, 16], exaggeration gives
+    // tile/local -> tilesetToScene gives [97, 203, 16], exaggeration gives
     // [97, 203, 38], then the live anchor gives [-196, 108, 51].
     expect(transformPoint(composed, [1, 0, 2])).toEqual([-196, 108, 51]);
     expect(
@@ -146,13 +146,13 @@ describe("3D Tiles RTC conversion", () => {
   });
 
   it("uses the inverse transpose for normals under scene-local vertical exaggeration", () => {
-    const ecefToScene: Mat4 = [
+    const tilesetToScene: Mat4 = [
       0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 100, 200, 10, 1,
     ];
     const scene = composeVerticalExaggeratedSceneTransform(
       3,
       5,
-      ecefToScene,
+      tilesetToScene,
       translation(2, 3, 4),
     );
     const invSqrt2 = Math.SQRT1_2;
