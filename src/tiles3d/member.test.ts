@@ -145,6 +145,75 @@ const harness = (withChildren = false, schedulerBytes = 1024) => {
 describe("createTiles3dMember", () => {
   beforeEach(resetStubs);
 
+  it("weighs itself by how far its root sits above its own error cutoff", async () => {
+    // The governor can only read importance as a relative weight, so it has to
+    // arrive on the shared [0, 1] scale. A constant here is what let a mesh be
+    // water-filled down to the quality floor beneath a point cloud reporting
+    // raw pixels.
+    const h = harness(true);
+    const member = createTiles3dMember(h.context, {
+      ...h.config,
+      maximumScreenSpaceErrorPx: 16,
+    });
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    await settle();
+
+    const importance = member.governorInputs().projectedImportance;
+    expect(importance).toBeGreaterThan(0);
+    expect(importance).toBeLessThanOrEqual(1);
+
+    member.setActive(false);
+    expect(member.governorInputs().projectedImportance).toBe(0);
+  });
+
+  it("ignores restatements of an unchanged camera and anchor matrix", async () => {
+    const h = harness(true);
+    let traversals = 0;
+    const member = createTiles3dMember(h.context, {
+      ...h.config,
+      fetchTileset: async () => {
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: async () => document(true),
+        };
+      },
+      fetchContent: async () => {
+        traversals += 1;
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          arrayBuffer: async () => new ArrayBuffer(8),
+        };
+      },
+    });
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    await settle();
+    const afterFirst = traversals;
+
+    // The host restates both every pre-paint pass, whether or not they moved.
+    for (let index = 0; index < 5; index += 1) {
+      member.setCamera({ ...view });
+      member.setModelMatrix(null);
+    }
+    await settle();
+    expect(traversals).toBe(afterFirst);
+
+    member.dispose();
+  });
+
   it("implements the streamed member lifecycle without a second memory owner", async () => {
     const h = harness();
     const member = createTiles3dMember(h.context, h.config);
@@ -157,7 +226,9 @@ describe("createTiles3dMember", () => {
     member.setCamera(view);
     await settle();
     expect(member.governorInputs()).toMatchObject({
-      projectedImportance: 1,
+      // This fixture's root has geometricError 0 — already exact, so it asks
+      // the view for no refinement quality even though it is on screen.
+      projectedImportance: 0,
       qualityDemand: 1,
       workPending: true,
     });
@@ -438,9 +509,14 @@ describe("createTiles3dMember", () => {
     expect(
       (member.stats() as Tiles3dMemberStats).queue?.decodedBytes,
     ).toBeGreaterThan(1);
-    expect(member.governorInputs().workPending).toBe(true);
+    // Blocked on a budget increase, not on work: nothing will progress until
+    // something outside the member acts. Claiming pending work here stops the
+    // view governor sampling capacity for every member in the view, so the
+    // whole view's adaptive quality freezes behind one over-budget tileset.
+    expect(member.governorInputs().workPending).toBe(false);
     expect(member.stats()).toMatchObject({
       memoryConstrained: true,
+      irreducibleBudget: true,
       renderer: { residentBytes: 0 },
     });
     member.applyAllocation({
@@ -448,7 +524,10 @@ describe("createTiles3dMember", () => {
       memoryBudgetBytes: 4096,
       regime: "stationary",
     });
+    // A bigger allowance clears the latch and the work resumes on its own.
+    expect((member.stats() as Tiles3dMemberStats).irreducibleBudget).toBe(false);
     expect(h.submissions.stats().queuedJobs).toBeGreaterThan(0);
+    expect(member.governorInputs().workPending).toBe(true);
     h.submissions.prepareFrame();
     expect(h.renderer.addActor).toHaveBeenCalledOnce();
     member.dispose();

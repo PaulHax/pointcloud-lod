@@ -3115,18 +3115,18 @@ describe("createLodController — pickPoint", () => {
     const result = controller.pickPoint(VIEW, 75, 40);
     expect(result?.status).toBe("hit");
     if (result?.status !== "hit") throw new Error("unreachable");
-    expect(result.pointOnRay[0]).toBeCloseTo(0.5);
-    expect(result.pointOnRay[1]).toBeCloseTo(0.2);
-    expect(result.pointOnRay[2]).toBeCloseTo(0);
+    expect(result.scenePoint[0]).toBeCloseTo(0.5);
+    expect(result.scenePoint[1]).toBeCloseTo(0.2);
+    expect(result.scenePoint[2]).toBeCloseTo(0);
     expect(result.rayDepth).toBeCloseTo(1);
     // A pick from elsewhere in the viewport supports through an outer radius
-    // bucket, and its pointOnRay lies on the WORLD cursor ray — for the
+    // bucket, and its scenePoint lies on the WORLD cursor ray — for the
     // identity view-projection, the z axis — at the supported depth.
     const offCenter = controller.pickPoint(VIEW, 50, 50);
     expect(offCenter?.status).toBe("hit");
     if (offCenter?.status !== "hit") throw new Error("unreachable");
-    expect(offCenter.pointOnRay[0]).toBeCloseTo(0);
-    expect(offCenter.pointOnRay[1]).toBeCloseTo(0);
+    expect(offCenter.scenePoint[0]).toBeCloseTo(0);
+    expect(offCenter.scenePoint[1]).toBeCloseTo(0);
     expect(offCenter.distancePx).toBeGreaterThan(20);
     controller.dispose();
   });
@@ -3151,9 +3151,9 @@ describe("createLodController — pickPoint", () => {
     const result = pickCenter(controller);
     expect(result?.status).toBe("hit");
     if (result?.status !== "hit") throw new Error("unreachable");
-    expect(result.pointOnRay[0]).toBeCloseTo(0);
-    expect(result.pointOnRay[1]).toBeCloseTo(0);
-    expect(result.pointOnRay[2]).toBeCloseTo(0);
+    expect(result.scenePoint[0]).toBeCloseTo(0);
+    expect(result.scenePoint[1]).toBeCloseTo(0);
+    expect(result.scenePoint[2]).toBeCloseTo(0);
     expect(result.rayDepth).toBeCloseTo(1);
     expect(result.distancePx).toBeCloseTo(0);
     controller.dispose();

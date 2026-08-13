@@ -41,6 +41,14 @@ export type TilesetTraversalResult = {
   readonly drawnTileIds: readonly string[];
   readonly culledTileIds: readonly string[];
   readonly effectiveScreenSpaceErrorPx: number;
+  /**
+   * Screen-space error of the root's own content, before refinement.
+   *
+   * This is the member's demand in the one unit that is comparable across
+   * formats: how wrong the coarsest thing it can draw currently looks. Zero
+   * when the root is culled or carries no content.
+   */
+  readonly rootScreenSpaceErrorPx: number;
 };
 
 type Vec3 = readonly [number, number, number];
@@ -284,11 +292,24 @@ export const traverseTileset = (
 
   const rootParent = options.modelMatrix ?? IDENTITY;
   const result = visit(options.root, rootParent);
+  const rootAccumulated = multiplyTilesetMatrices(
+    rootParent,
+    options.root.transform,
+  );
+  const rootSse = result.visible
+    ? screenSpaceError(
+        options.root,
+        rootAccumulated,
+        worldBox(options.root.boundingVolume, rootAccumulated),
+        options.camera,
+      )
+    : 0;
   return Object.freeze({
     desiredTileIds: Object.freeze(result.desired),
     requestedTileIds: Object.freeze(result.requested),
     drawnTileIds: Object.freeze(result.drawn),
     culledTileIds: Object.freeze(culled),
     effectiveScreenSpaceErrorPx: effective,
+    rootScreenSpaceErrorPx: Number.isFinite(rootSse) && rootSse > 0 ? rootSse : 0,
   });
 };

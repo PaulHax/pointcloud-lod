@@ -6,6 +6,7 @@ import { createStreamedSceneCoordinator } from "./streamedSceneCoordinator";
 import type {
   Allocation,
   GovernorInputs,
+  Importance,
   MemberPickResult,
   OcclusionResult,
 } from "./streamedMember";
@@ -21,7 +22,7 @@ const VIEW: CameraView = {
 
 const makeMember = (overrides: Partial<GovernorInputs> = {}) => {
   const inputs: GovernorInputs = {
-    projectedImportance: 1,
+    projectedImportance: 1 as Importance,
     qualityDemand: 1,
     workPending: false,
     physicalTileOperations: 0,
@@ -205,7 +206,7 @@ describe("createStreamedSceneCoordinator", () => {
     let workPending = true;
     const member = makeMember();
     member.governorInputs = () => ({
-      projectedImportance: 1,
+      projectedImportance: 1 as Importance,
       qualityDemand: 1,
       workPending,
       physicalTileOperations: 0,

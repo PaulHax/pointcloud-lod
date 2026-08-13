@@ -17,6 +17,9 @@ import {
   modelFrameOf,
   nodeScreenSpaceError,
   boundsIntersectsFrustum,
+  projectionScalar,
+  sameCameraView,
+  sameMatrix,
   transformPointBy,
   viewInModelFrame,
   type CameraView,
@@ -425,7 +428,7 @@ export type LodController = {
    * can run ahead of a pending renderer flush, and never the decoded cache.
    * The view and cursor are in the same coordinates `setCamera` takes —
    * world coordinates when a model matrix is set — with the cursor in
-   * renderer-local css pixels. A hit's `pointOnRay` comes back in those same
+   * renderer-local css pixels. A hit's `scenePoint` comes back in those same
    * world coordinates: the controller solves on the model-local ray and
    * transforms the answer back through the model matrix itself.
    *
@@ -581,13 +584,6 @@ const normalizePresentation = (
  * JS, so an unrecognized discriminant reads as absent instead of silently
  * being treated as perspective.
  */
-const projectionScalar = (view: CameraView): number | undefined =>
-  view.projection === "perspective"
-    ? view.fovY
-    : view.projection === "orthographic"
-      ? view.parallelScale
-      : undefined;
-
 /**
  * A camera whose numbers are not all finite would poison the frustum planes,
  * every screen-space error, and the selection comparisons that read them.
@@ -1862,43 +1858,12 @@ export const createLodController = (
   // "interacting" — including renders the settle-timer reselect itself
   // triggers — flipping the regime back and oscillating between the two
   // budgets forever.
-  const sameView = (a: CameraView, b: CameraView): boolean => {
-    if (
-      a.projection !== b.projection ||
-      projectionScalar(a) !== projectionScalar(b) ||
-      a.viewportWidthCssPx !== b.viewportWidthCssPx ||
-      a.viewportHeightCssPx !== b.viewportHeightCssPx ||
-      a.position[0] !== b.position[0] ||
-      a.position[1] !== b.position[1] ||
-      a.position[2] !== b.position[2] ||
-      a.viewProj.length !== b.viewProj.length
-    ) {
-      return false;
-    }
-    for (let i = 0; i < a.viewProj.length; i += 1) {
-      if (a.viewProj[i] !== b.viewProj[i]) return false;
-    }
-    return true;
-  };
-
   /** Bootstrap path for the root page, used before any camera exists. */
   const queueRootPage = (): void => queuePages([ROOT_KEY_STRING]);
 
   // Bootstrap: an active controller loads hierarchy eagerly; an inactive one
   // waits until activation so a hidden cloud performs no hierarchy I/O.
   if (active) queueRootPage();
-
-  const sameMatrix = (
-    a: readonly number[] | null,
-    b: Mat16 | null,
-  ): boolean => {
-    if (a === null || b === null) return a === null && b === null;
-    if (a.length !== b.length) return false;
-    for (let index = 0; index < a.length; index += 1) {
-      if (a[index] !== b[index]) return false;
-    }
-    return true;
-  };
 
   /** Adopt the local restatement of the stored world camera, if usable. */
   const applyWorldView = (): void => {
@@ -1912,7 +1877,7 @@ export const createLodController = (
   return {
     setCamera(nextView) {
       if (disposed || !isFiniteView(nextView)) return;
-      if (worldView !== null && sameView(worldView, nextView)) return;
+      if (worldView !== null && sameCameraView(worldView, nextView)) return;
       worldView = nextView;
       applyWorldView();
     },
@@ -2174,7 +2139,7 @@ export const createLodController = (
         ? {
             ...result,
             rayDepth: result.rayDepth * modelFrame.scale,
-            pointOnRay: transformPointBy(modelFrame.matrix, result.pointOnRay),
+            scenePoint: transformPointBy(modelFrame.matrix, result.scenePoint),
           }
         : result;
     },

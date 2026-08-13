@@ -1,3 +1,4 @@
+import { ADAPTIVE_QUALITY_DEFAULTS } from "./adaptiveBudget";
 import {
   createLodController,
   type LodController,
@@ -6,6 +7,7 @@ import {
 import { createRendererAdapter, type RendererAdapter } from "./rendererAdapter";
 import {
   occlusionFromPick,
+  importanceFromRootSseCssPx,
   type Allocation,
   type GovernorInputs,
   type MemberPickResult,
@@ -16,7 +18,7 @@ import {
 import type { TileSource } from "./tileSource";
 
 export const DEFAULT_FIXED_POINT_BUDGET = 2_000_000;
-export const DEFAULT_MIN_POINT_BUDGET = 200_000;
+export const DEFAULT_MIN_POINT_BUDGET = ADAPTIVE_QUALITY_DEFAULTS.minBudget;
 
 export type PointCloudAdaptiveOptions = {
   readonly minBudget?: number;
@@ -211,7 +213,12 @@ export const createPointCloudMember = (
       const stats = controller.stats();
       const full = fullCeiling();
       return {
-        projectedImportance: narrow.projectedImportance,
+        // The controller reports root SSE in CSS pixels; the governor compares
+        // members, so it is normalized against this cloud's own cutoff here.
+        projectedImportance: importanceFromRootSseCssPx(
+          narrow.projectedImportance,
+          config.refinementCutoffPx ?? 1,
+        ),
         qualityDemand:
           narrow.projectedImportance > 0 && full > 0
             ? Math.min(1, narrow.demandPoints / full)

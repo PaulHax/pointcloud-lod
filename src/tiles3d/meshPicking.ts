@@ -26,9 +26,24 @@ export type SubmittedMeshTile = {
   readonly bounds?: Bounds;
 };
 
+/**
+ * Where the member's geometry sits, in the two frames that differ.
+ *
+ * `drawn` is what the renderer paints — it carries vertical exaggeration, so
+ * it is the only frame in which a screen ray means anything. `scene` is the
+ * canonical scene ENU the rest of the app reasons in: the same placement
+ * without exaggeration. Picking happens in `drawn` and reports in `scene`;
+ * collapsing the two is what let exaggerated z values reach saved control
+ * points.
+ */
+export type MeshPlacement = {
+  readonly drawn: Mat16 | null;
+  readonly scene: Mat16 | null;
+};
+
 export type MeshPickSet = {
   replaceDrawn(tiles: readonly SubmittedMeshTile[]): void;
-  setModelMatrix(matrix: Mat16 | null): void;
+  setPlacement(placement: MeshPlacement | null): void;
   pick(view: CameraView, cssX: number, cssY: number): MemberPickResult | null;
   occlusionDepth(
     view: CameraView,
@@ -54,21 +69,22 @@ const finiteMatrix = (matrix: Mat16 | null): readonly number[] => {
   return Array.from(matrix);
 };
 
-const worldPoint = (
-  matrix: readonly number[],
+/** Tile-local vertex lifted into the member's own unplaced ENU frame. */
+const localPoint = (
   origin: readonly [number, number, number],
   positions: Float32Array,
   vertexIndex: number,
-): Vec3 => {
-  const x = origin[0] + positions[vertexIndex * 3]!;
-  const y = origin[1] + positions[vertexIndex * 3 + 1]!;
-  const z = origin[2] + positions[vertexIndex * 3 + 2]!;
-  return [
-    matrix[0]! * x + matrix[4]! * y + matrix[8]! * z + matrix[12]!,
-    matrix[1]! * x + matrix[5]! * y + matrix[9]! * z + matrix[13]!,
-    matrix[2]! * x + matrix[6]! * y + matrix[10]! * z + matrix[14]!,
-  ];
-};
+): Vec3 => [
+  origin[0] + positions[vertexIndex * 3]!,
+  origin[1] + positions[vertexIndex * 3 + 1]!,
+  origin[2] + positions[vertexIndex * 3 + 2]!,
+];
+
+const transformPoint = (matrix: readonly number[], point: Vec3): Vec3 => [
+  matrix[0]! * point[0] + matrix[4]! * point[1] + matrix[8]! * point[2] + matrix[12]!,
+  matrix[1]! * point[0] + matrix[5]! * point[1] + matrix[9]! * point[2] + matrix[13]!,
+  matrix[2]! * point[0] + matrix[6]! * point[1] + matrix[10]! * point[2] + matrix[14]!,
+];
 
 const subtract = (left: Vec3, right: Vec3): Vec3 => [
   left[0] - right[0],
@@ -85,13 +101,21 @@ const cross = (left: Vec3, right: Vec3): Vec3 => [
 const dot = (left: Vec3, right: Vec3): number =>
   left[0] * right[0] + left[1] * right[1] + left[2] * right[2];
 
-const triangleDepth = (
+/**
+ * Möller–Trumbore hit, keeping the barycentric coordinates.
+ *
+ * `u`/`v` are what let the caller rebuild the intersection in a frame other
+ * than the one the ray was cast in: the same (u, v) name the same point on the
+ * same triangle under any placement, so a hit found against drawn geometry can
+ * be re-expressed in scene space without inverting a matrix.
+ */
+const triangleHit = (
   rayOrigin: Vec3,
   rayDirection: Vec3,
   a: Vec3,
   b: Vec3,
   c: Vec3,
-): number | null => {
+): { depth: number; u: number; v: number } | null => {
   const edge1 = subtract(b, a);
   const edge2 = subtract(c, a);
   const p = cross(rayDirection, edge2);
@@ -109,7 +133,9 @@ const triangleDepth = (
   const v = dot(rayDirection, q) * inverse;
   if (!(v >= 0 && u + v <= 1)) return null;
   const depth = dot(edge2, q) * inverse;
-  return Number.isFinite(depth) && depth > TRIANGLE_EPSILON ? depth : null;
+  return Number.isFinite(depth) && depth > TRIANGLE_EPSILON
+    ? { depth, u, v }
+    : null;
 };
 
 const vertexAt = (
@@ -160,7 +186,7 @@ export const pickSubmittedTriangles = (
   cssX: number,
   cssY: number,
   tiles: readonly SubmittedMeshTile[],
-  modelMatrix: Mat16 | null = null,
+  placement: MeshPlacement | null = null,
 ): MemberPickResult | null => {
   const ray = cursorRay(
     view.viewProj,
@@ -170,15 +196,24 @@ export const pickSubmittedTriangles = (
     view.viewportHeightCssPx,
   );
   if (ray === null) return null;
-  let matrix: readonly number[];
+  let drawnMatrix: readonly number[];
+  let sceneMatrix: readonly number[];
   try {
-    matrix = finiteMatrix(modelMatrix);
+    drawnMatrix = finiteMatrix(placement === null ? null : placement.drawn);
+    // A null `scene` means an identity scene placement, NOT "same as drawn" —
+    // coalescing the two would silently restore the exaggerated point.
+    sceneMatrix = finiteMatrix(placement === null ? null : placement.scene);
   } catch {
     return null;
   }
   let bestDepth = Number.POSITIVE_INFINITY;
+  // The winning triangle in the member's own ENU frame, plus where on it the
+  // ray landed. Kept so the hit can be reported in scene space even though it
+  // had to be found in drawn space.
+  let bestLocal: { a: Vec3; b: Vec3; c: Vec3; u: number; v: number } | null =
+    null;
   for (const tile of tiles) {
-    if (!projectedBoundsContain(view, cssX, cssY, tile.bounds, matrix))
+    if (!projectedBoundsContain(view, cssX, cssY, tile.bounds, drawnMatrix))
       continue;
     for (const primitive of tile.primitives) {
       const availableVertices = Math.floor(primitive.positions.length / 3);
@@ -199,28 +234,37 @@ export const pickSubmittedTriangles = (
         ) {
           continue;
         }
-        const depth = triangleDepth(
+        const a = localPoint(tile.origin, primitive.positions, ia);
+        const b = localPoint(tile.origin, primitive.positions, ib);
+        const c = localPoint(tile.origin, primitive.positions, ic);
+        const hit = triangleHit(
           ray.origin,
           ray.direction,
-          worldPoint(matrix, tile.origin, primitive.positions, ia),
-          worldPoint(matrix, tile.origin, primitive.positions, ib),
-          worldPoint(matrix, tile.origin, primitive.positions, ic),
+          transformPoint(drawnMatrix, a),
+          transformPoint(drawnMatrix, b),
+          transformPoint(drawnMatrix, c),
         );
-        if (depth !== null && depth < bestDepth) bestDepth = depth;
+        if (hit !== null && hit.depth < bestDepth) {
+          bestDepth = hit.depth;
+          bestLocal = { a, b, c, u: hit.u, v: hit.v };
+        }
       }
     }
   }
-  if (!Number.isFinite(bestDepth)) return { status: "miss" };
-  const pointOnRay: [number, number, number] = [
+  if (!Number.isFinite(bestDepth) || bestLocal === null) {
+    return { status: "miss" };
+  }
+  const drawnPoint: Vec3 = [
     ray.origin[0] + ray.direction[0] * bestDepth,
     ray.origin[1] + ray.direction[1] * bestDepth,
     ray.origin[2] + ray.direction[2] * bestDepth,
   ];
   // The ray itself is exact, but this projection also rejects intersections
   // outside the rendered near/far interval after arbitrary anchor transforms.
+  // It must use the drawn point: that is the one the cursor actually sits on.
   const projected = projectPointToCssPx(
     view.viewProj,
-    pointOnRay,
+    drawnPoint,
     view.viewportWidthCssPx,
     view.viewportHeightCssPx,
   );
@@ -232,41 +276,54 @@ export const pickSubmittedTriangles = (
   ) {
     return { status: "miss" };
   }
+  const { a, b, c, u, v } = bestLocal;
+  const scenePoint = transformPoint(sceneMatrix, [
+    a[0] + u * (b[0] - a[0]) + v * (c[0] - a[0]),
+    a[1] + u * (b[1] - a[1]) + v * (c[1] - a[1]),
+    a[2] + u * (b[2] - a[2]) + v * (c[2] - a[2]),
+  ]);
   return {
     status: "hit",
     rayDepth: bestDepth,
-    pointOnRay,
+    scenePoint: [scenePoint[0], scenePoint[1], scenePoint[2]],
     distancePx: Math.hypot(projected.xCssPx - cssX, projected.yCssPx - cssY),
   };
 };
 
 export const createMeshPickSet = (): MeshPickSet => {
   let drawn: readonly SubmittedMeshTile[] = [];
-  let modelMatrix: Mat16 | null = null;
+  let placement: MeshPlacement | null = null;
   let disposed = false;
   return {
     replaceDrawn(tiles) {
       if (!disposed) drawn = [...tiles];
     },
-    setModelMatrix(matrix) {
-      if (!disposed) modelMatrix = matrix === null ? null : Array.from(matrix);
+    setPlacement(next) {
+      if (disposed) return;
+      placement =
+        next === null
+          ? null
+          : {
+              drawn: next.drawn === null ? null : (Array.from(next.drawn) as Mat16),
+              scene: next.scene === null ? null : (Array.from(next.scene) as Mat16),
+            };
     },
     pick(view, cssX, cssY) {
       return disposed
         ? null
-        : pickSubmittedTriangles(view, cssX, cssY, drawn, modelMatrix);
+        : pickSubmittedTriangles(view, cssX, cssY, drawn, placement);
     },
     occlusionDepth(view, cssX, cssY) {
       return occlusionFromPick(
         disposed
           ? null
-          : pickSubmittedTriangles(view, cssX, cssY, drawn, modelMatrix),
+          : pickSubmittedTriangles(view, cssX, cssY, drawn, placement),
       );
     },
     dispose() {
       disposed = true;
       drawn = [];
-      modelMatrix = null;
+      placement = null;
     },
   };
 };

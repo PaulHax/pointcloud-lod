@@ -70,7 +70,7 @@ export type PointPickResult =
       /** Positive distance from the ray origin along its normalized direction. */
       readonly rayDepth: number;
       /** The cursor ray evaluated at the support depth — not the vertex. */
-      readonly pointOnRay: Vec3;
+      readonly scenePoint: Vec3;
       /** Css-pixel distance from the cursor to the supporting vertex. */
       readonly distancePx: number;
     }
@@ -221,7 +221,7 @@ export const sweepPickPoints = (
     return {
       status: "hit",
       rayDepth: depth,
-      pointOnRay: [
+      scenePoint: [
         rayX + dirX * depth,
         rayY + dirY * depth,
         rayZ + dirZ * depth,
