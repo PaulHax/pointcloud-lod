@@ -1,12 +1,19 @@
 /** StreamedMember implementation for the constrained explicit 3D Tiles profile. */
 
-import type { CameraView, Mat16 } from "../camera";
+import {
+  sameCameraView,
+  sameMatrix,
+  type CameraView,
+  type Mat16,
+} from "../camera";
 import { integerAtLeast } from "../numeric";
-import type {
-  Allocation,
-  GovernorInputs,
-  StreamedMember,
-  StreamedMemberContext,
+import {
+  CULLED,
+  importanceFromRootSseCssPx,
+  type Allocation,
+  type GovernorInputs,
+  type StreamedMember,
+  type StreamedMemberContext,
 } from "../streamedMember";
 import {
   createContentQueue,
@@ -264,10 +271,22 @@ export const createTiles3dMember = (
       ? multiplyTilesetMatrices(modelMatrix, verticalExaggeration())
       : verticalExaggeration();
 
+  /**
+   * The same placement without exaggeration — the frame a picked point must be
+   * reported in, since anything the app stores (control points, registration
+   * pairs) is canonical scene ENU and must not move when the user changes a
+   * display-only vertical scale.
+   */
+  const scenePlacementMatrix = (): readonly number[] | null => modelMatrix;
+
   const applyPlacement = (): void => {
     const placement = Array.from(placementMatrix()) as Mat16;
     adapter.setBaseMatrix(placement);
-    pickSet.setModelMatrix(placement);
+    const scene = scenePlacementMatrix();
+    pickSet.setPlacement({
+      drawn: placement,
+      scene: scene === null ? null : (Array.from(scene) as Mat16),
+    });
   };
 
   const traversalMaximumSse = (): number =>
@@ -302,11 +321,34 @@ export const createTiles3dMember = (
     const state = adapter.tileState(id);
     if (state === "submitted") return "submitted" as const;
     if (state === "failed" || admissionFailed.has(id)) return "failed" as const;
+    // A root that will not fit the member's whole byte allowance is terminal
+    // for this budget, not still arriving. Reporting it as outstanding kept
+    // `workPending` true forever, and the view governor stops sampling
+    // capacity for EVERY member while any of them claims pending work — so one
+    // over-budget tileset froze adaptive quality view-wide with nothing drawn.
+    // A larger allowance clears the latch and reopens the tile.
+    if (irreducibleBudget && source && id === source.root.id)
+      return "failed" as const;
     if (decoded.has(id)) return "decoded" as const;
     const entry = queueEntryById.get(id);
     if (entry?.status === "failed") return "failed" as const;
     if (entry) return "loading" as const;
     return "unloaded" as const;
+  };
+
+  /**
+   * Give up on fitting this tileset in the current byte allowance.
+   *
+   * Surfaced through `stats().irreducibleBudget` rather than `onError`: the
+   * member recovers by itself as soon as it is given more memory, so this is a
+   * state worth seeing in diagnostics, not a failure worth counting. Without
+   * it the only evidence is an absence of geometry.
+   */
+  const latchIrreducibleBudget = (): void => {
+    if (irreducibleBudget) return;
+    irreducibleBudget = true;
+    adapter.clearTiles();
+    pickSet.replaceDrawn([]);
   };
 
   const updateDrawSet = (): void => {
@@ -386,9 +428,7 @@ export const createTiles3dMember = (
             admissionBlocked.delete(id);
             admissionFailed.add(id);
           } else if (id === source.root.id && memoryConstrained) {
-            irreducibleBudget = true;
-            adapter.clearTiles();
-            pickSet.replaceDrawn([]);
+            latchIrreducibleBudget();
             refreshAgain = true;
           }
         }
@@ -471,9 +511,7 @@ export const createTiles3dMember = (
             irreducibleBudget = false;
             refreshSelection();
           } else if (request.id === tileset.root.id) {
-            irreducibleBudget = true;
-            adapter.clearTiles();
-            pickSet.replaceDrawn([]);
+            latchIrreducibleBudget();
             refreshSelection();
           }
         } else if (outcome === "failed") {
@@ -540,12 +578,17 @@ export const createTiles3dMember = (
   return {
     setCamera(view) {
       if (disposed) return;
+      // Hosts restate the camera unconditionally — every pre-paint pass and
+      // twice per pick — so acting on an unchanged view costs a full tileset
+      // traversal for nothing, and does it inside the span the host times.
+      if (camera !== null && sameCameraView(camera, view)) return;
       camera = view;
       refreshSelection();
     },
 
     setModelMatrix(matrix: Mat16 | null) {
       if (disposed) return;
+      if (sameMatrix(modelMatrix, matrix ?? null)) return;
       try {
         modelMatrix =
           matrix === null
@@ -647,7 +690,13 @@ export const createTiles3dMember = (
       const renderer = adapter.stats();
       const hasContent = !!traversal && traversal.requestedTileIds.length > 0;
       return {
-        projectedImportance: active && hasContent ? 1 : 0,
+        projectedImportance:
+          active && hasContent
+            ? importanceFromRootSseCssPx(
+                traversal!.rootScreenSpaceErrorPx,
+                maximumSse(),
+              )
+            : CULLED,
         qualityDemand: active && hasContent ? 1 : 0,
         workPending:
           active &&
@@ -731,6 +780,7 @@ export const createTiles3dMember = (
         active,
         disposed,
         sourceState,
+        irreducibleBudget,
         revision: config.revision,
         capabilityKey: context.textureCapabilities.capabilityKey,
         devicePixelRatio,

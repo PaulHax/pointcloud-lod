@@ -607,3 +607,56 @@ export const viewInModelFrame = (
     ? { ...local, parallelScale: local.parallelScale / frame.scale }
     : local;
 };
+
+/**
+ * The projection's own scalar: field of view, or parallel scale.
+ *
+ * Returned as `undefined` for an unrecognized discriminant so a bad value
+ * reads as absent rather than being silently treated as perspective.
+ */
+export const projectionScalar = (view: CameraView): number | undefined =>
+  view.projection === "perspective"
+    ? view.fovY
+    : view.projection === "orthographic"
+      ? view.parallelScale
+      : undefined;
+
+/**
+ * Whether two camera views would produce identical selection work.
+ *
+ * Hosts restate the camera every frame whether or not it moved, so a member
+ * that acts on every restatement re-traverses its whole hierarchy while the
+ * user is doing nothing — and, because that happens inside the span the host
+ * times, inflates the governor's own frame sample and drives quality down.
+ */
+export const sameCameraView = (a: CameraView, b: CameraView): boolean => {
+  if (
+    a.projection !== b.projection ||
+    projectionScalar(a) !== projectionScalar(b) ||
+    a.viewportWidthCssPx !== b.viewportWidthCssPx ||
+    a.viewportHeightCssPx !== b.viewportHeightCssPx ||
+    a.position[0] !== b.position[0] ||
+    a.position[1] !== b.position[1] ||
+    a.position[2] !== b.position[2] ||
+    a.viewProj.length !== b.viewProj.length
+  ) {
+    return false;
+  }
+  for (let index = 0; index < a.viewProj.length; index += 1) {
+    if (a.viewProj[index] !== b.viewProj[index]) return false;
+  }
+  return true;
+};
+
+/** Element-wise matrix equality, treating null as its own value. */
+export const sameMatrix = (
+  a: Mat16 | null,
+  b: Mat16 | null,
+): boolean => {
+  if (a === null || b === null) return a === null && b === null;
+  if (a.length !== b.length) return false;
+  for (let index = 0; index < a.length; index += 1) {
+    if (a[index] !== b[index]) return false;
+  }
+  return true;
+};

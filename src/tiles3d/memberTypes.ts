@@ -43,6 +43,11 @@ export type Tiles3dMemberStats = {
   readonly active: boolean;
   readonly disposed: boolean;
   readonly sourceState: "idle" | "loading" | "ready" | "failed" | "disposed";
+  /**
+   * The root does not fit the member's byte allowance, so nothing is drawn
+   * and no further tile work is outstanding. Clears when the allowance grows.
+   */
+  readonly irreducibleBudget: boolean;
   readonly revision: string;
   readonly capabilityKey: string;
   readonly devicePixelRatio: number;

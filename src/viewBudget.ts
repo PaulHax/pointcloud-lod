@@ -24,12 +24,18 @@ export const allocateViewQuality = <Key>(
     ? Math.min(MAX_VIEW_QUALITY_FRACTION, Math.max(0, viewFraction))
     : 0;
   let remaining = usableFraction * contenders.length;
+  // Importance is contractually [0, 1]. Clamping here rather than trusting the
+  // producers means one member reporting on the wrong scale can at worst take
+  // a full share, never crowd every other member down to the quality floor.
+  const importanceOf = ({ inputs }: ViewQualityContender<Key>): number =>
+    Number.isFinite(inputs.projectedImportance)
+      ? Math.min(1, Math.max(0, inputs.projectedImportance))
+      : 0;
   let open = contenders.filter(
-    ({ inputs }) =>
-      Number.isFinite(inputs.projectedImportance) &&
-      inputs.projectedImportance > 0 &&
-      Number.isFinite(inputs.qualityDemand) &&
-      inputs.qualityDemand > 0,
+    (contender) =>
+      importanceOf(contender) > 0 &&
+      Number.isFinite(contender.inputs.qualityDemand) &&
+      contender.inputs.qualityDemand > 0,
   );
   for (const contender of contenders) allocations.set(contender.key, 0);
 
@@ -37,14 +43,14 @@ export const allocateViewQuality = <Key>(
   // remainder, so the loop is bounded by the contender count.
   while (open.length > 0 && remaining > 0) {
     const importance = open.reduce(
-      (sum, contender) => sum + contender.inputs.projectedImportance,
+      (sum, contender) => sum + importanceOf(contender),
       0,
     );
     if (!(importance > 0)) break;
     const proposed = new Map(
       open.map((contender) => [
         contender,
-        (remaining * contender.inputs.projectedImportance) / importance,
+        (remaining * importanceOf(contender)) / importance,
       ]),
     );
     const capped = open.filter((contender) => {

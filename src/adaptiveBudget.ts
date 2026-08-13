@@ -84,6 +84,15 @@ export type AdaptiveQuality = {
 };
 
 export const ADAPTIVE_QUALITY_DEFAULTS = {
+  /**
+   * Floor an adaptive point budget may not be configured below.
+   *
+   * It lives here, in the vtk-free module the package root re-exports, so a
+   * host can read it without importing the renderer entry point. Hosts mirror
+   * this number in their own validators and check it against this export;
+   * leaving it somewhere unreachable is what silently unhooked that check.
+   */
+  minBudget: 200_000,
   initialFraction: 1,
   stationaryTargetMs: 33,
   interactionTargetMs: 16,

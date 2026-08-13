@@ -259,9 +259,9 @@ const pickBelowFocus = async (
       );
       if (result?.status !== "hit") continue;
       const depthRatio =
-        distanceBetween(result.pointOnRay, camera.position) / focalDepth;
+        distanceBetween(result.scenePoint, camera.position) / focalDepth;
       if (depthRatio >= 0.4 && depthRatio <= 2.5) {
-        return result.pointOnRay;
+        return result.scenePoint;
       }
     }
   }

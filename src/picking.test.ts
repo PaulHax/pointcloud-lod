@@ -89,9 +89,9 @@ describe("pickPointInTiles", () => {
     const result = hit(
       pickPointInTiles(VIEW, ...CENTER, [tile([[0.05, 0, 0.5]])]),
     );
-    expect(result.pointOnRay[0]).toBeCloseTo(0);
-    expect(result.pointOnRay[1]).toBeCloseTo(0);
-    expect(result.pointOnRay[2]).toBeCloseTo(0.5);
+    expect(result.scenePoint[0]).toBeCloseTo(0);
+    expect(result.scenePoint[1]).toBeCloseTo(0);
+    expect(result.scenePoint[2]).toBeCloseTo(0.5);
     expect(result.rayDepth).toBeCloseTo(1.5);
     expect(result.distancePx).toBeCloseTo(5, 4);
   });
@@ -119,7 +119,7 @@ describe("pickPointInTiles", () => {
       ]),
     ];
     const result = hit(pickPointInTiles(VIEW, ...CENTER, tiles));
-    expect(result.pointOnRay[2]).toBeCloseTo(-0.5);
+    expect(result.scenePoint[2]).toBeCloseTo(-0.5);
     expect(result.distancePx).toBeCloseTo(5, 4);
   });
 
@@ -161,7 +161,7 @@ describe("pickPointInTiles", () => {
     expect(at([0, 0, -200])).toEqual({ status: "miss" }); // beyond far
     expect(at([0, 0, 5])).toEqual({ status: "miss" }); // behind the camera
     const inFront = hit(at([0, 0, -10]));
-    expect(inFront.pointOnRay[2]).toBeCloseTo(-10);
+    expect(inFront.scenePoint[2]).toBeCloseTo(-10);
     expect(inFront.distancePx).toBeCloseTo(0);
   });
 
@@ -223,7 +223,7 @@ describe("pickPointInTiles", () => {
       bounds: { min: [2, -1, -6], max: [4, 1, 0.5] },
     });
     const result = hit(pickPointInTiles(view, 680, 200, [straddling]));
-    expect(result.pointOnRay[2]).toBeCloseTo(-2);
+    expect(result.scenePoint[2]).toBeCloseTo(-2);
     expect(result.distancePx).toBeCloseTo(0);
   });
 
@@ -273,7 +273,7 @@ describe("sweepPickPoints", () => {
       status: "miss",
     });
     const inFrontOfRay = sweepPickPoints(query(-5), [tile([[0, 0, 0.5]])]);
-    expect(hit(inFrontOfRay).pointOnRay[2]).toBeCloseTo(0.5);
+    expect(hit(inFrontOfRay).scenePoint[2]).toBeCloseTo(0.5);
   });
 });
 
@@ -293,7 +293,7 @@ describe("cursorRay and the sweep agree on the pick model", () => {
     );
     const depth = 1.5;
     for (const axis of [0, 1, 2] as const) {
-      expect(result.pointOnRay[axis]).toBeCloseTo(
+      expect(result.scenePoint[axis]).toBeCloseTo(
         ray.origin[axis] + ray.direction[axis] * depth,
       );
     }

@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import { allocateViewQuality } from "./viewBudget";
-import type { GovernorInputs } from "./streamedMember";
+import type { GovernorInputs, Importance } from "./streamedMember";
 
 const inputs = (
   projectedImportance: number,
   qualityDemand = 1,
 ): GovernorInputs => ({
-  projectedImportance,
+  projectedImportance: projectedImportance as Importance,
   qualityDemand,
   workPending: false,
   physicalTileOperations: 0,
@@ -31,13 +31,28 @@ describe("allocateViewQuality", () => {
   it("splits by importance and caps every member at one", () => {
     const allocation = allocateViewQuality(
       [
-        { key: "important", inputs: inputs(9) },
-        { key: "other", inputs: inputs(1) },
+        { key: "important", inputs: inputs(0.9) },
+        { key: "other", inputs: inputs(0.1) },
       ],
       0.75,
     );
     expect(allocation.get("important")).toBe(1);
     expect(allocation.get("other")).toBeCloseTo(0.5);
+  });
+
+  it("cannot let an out-of-contract importance starve the other members", () => {
+    // Importance is contractually [0, 1]. A member reporting on some other
+    // scale (a raw screen-space error in pixels, say) must at worst take a
+    // full share, never push everyone else down to the quality floor.
+    const allocation = allocateViewQuality(
+      [
+        { key: "misreporting", inputs: inputs(800) },
+        { key: "correct", inputs: inputs(1) },
+      ],
+      0.5,
+    );
+    expect(allocation.get("correct")).toBeCloseTo(0.5);
+    expect(allocation.get("misreporting")).toBeCloseTo(0.5);
   });
 
   it("water-fills share that a demand-capped member cannot spend", () => {

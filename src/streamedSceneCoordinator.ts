@@ -6,13 +6,15 @@ import {
   type SubmissionScheduler,
   type SubmissionSchedulerOptions,
 } from "./submissionScheduler";
-import type {
-  Allocation,
-  DecodeWorkerPool,
-  GovernorInputs,
-  StreamedMember,
-  StreamedMemberContext,
-  TextureCapabilities,
+import {
+  CULLED,
+  type Allocation,
+  type DecodeWorkerPool,
+  type GovernorInputs,
+  type Importance,
+  type StreamedMember,
+  type StreamedMemberContext,
+  type TextureCapabilities,
 } from "./streamedMember";
 import {
   createViewGovernor,
@@ -128,7 +130,7 @@ type MemberState = {
 };
 
 const EMPTY_INPUTS: GovernorInputs = {
-  projectedImportance: 0,
+  projectedImportance: CULLED,
   qualityDemand: 0,
   workPending: false,
   physicalTileOperations: 0,
@@ -143,7 +145,9 @@ const usableFraction = (value: number): number =>
   Math.min(1, usableNonNegative(value));
 
 const normalizeInputs = (inputs: GovernorInputs): GovernorInputs => ({
-  projectedImportance: usableNonNegative(inputs.projectedImportance),
+  // Importance is already a branded [0, 1] weight; this only defends against a
+  // non-finite value reaching the allocator.
+  projectedImportance: usableFraction(inputs.projectedImportance) as Importance,
   qualityDemand: usableFraction(inputs.qualityDemand),
   workPending: !!inputs.workPending,
   physicalTileOperations: Math.floor(
