@@ -285,13 +285,8 @@ Object.assign(window, {
       frameMs: host.lastFrameMs(),
       place: place.label,
     }),
+    view: () => host.cameraView(),
     lookAt: (distanceMeters: number) => host.lookAt([0, 0, 30], distanceMeters),
-    debug: () => ({
-      view: host.cameraView(),
-      clip: (host.camera as any).getClippingRange(),
-      bounds: (host.renderer as any).computeVisiblePropBounds(),
-      actors: (host.renderer as any).getActors().length,
-    }),
     setMemberActive: (id: "buildings" | "lidar", active: boolean) => {
       const toggle = id === "buildings" ? meshToggle : pointsToggle;
       toggle.checked = active;

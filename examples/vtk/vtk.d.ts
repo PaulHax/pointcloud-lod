@@ -43,16 +43,6 @@ declare module "@kitware/vtk.js/Interaction/Manipulators/CompositeCameraManipula
   export default manipulator;
 }
 
-declare module "@kitware/vtk.js/Interaction/Manipulators/MouseCameraTrackballRotateManipulator" {
-  const manipulator: { newInstance(initialValues?: object): any };
-  export default manipulator;
-}
-
-declare module "@kitware/vtk.js/Interaction/Manipulators/MouseCameraTrackballZoomManipulator" {
-  const manipulator: { newInstance(initialValues?: object): any };
-  export default manipulator;
-}
-
 declare module "@kitware/vtk.js/Rendering/OpenGL/Texture/compressedFormats" {
   export function getCompressedTextureCapabilities(
     gl: unknown,
