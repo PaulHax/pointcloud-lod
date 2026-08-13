@@ -89,9 +89,12 @@ describe("vtk mesh adapter", () => {
     expect(renderer.addActor).toHaveBeenCalledTimes(2);
     expect(admitted).toHaveBeenCalledOnce();
     expect(textureInstances).toHaveLength(1);
+    // Linear on both paths: the RGBA fallback cannot request an sRGB internal
+    // format, so asking for one here would make the same texture render
+    // darker on a compression-capable context than on a software one.
     expect(textureInstances[0]?.compressedData).toMatchObject({
       format: "astc-4x4",
-      srgb: true,
+      srgb: false,
     });
     expect(polyDataInstances[0]?.points).toBeInstanceOf(Float32Array);
     expect(polyDataInstances[0]?.polys).toEqual(new Uint32Array([3, 0, 1, 2]));
