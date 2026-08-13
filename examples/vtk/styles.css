@@ -24,13 +24,14 @@ body {
 }
 
 /* The panel is a column of the page, not an overlay: it takes its width out of
-   the row so the viewport centres on what is left. */
+   the row on the viewport's right side. */
 body {
   display: flex;
   align-items: stretch;
 }
 
 .panel {
+  order: 2;
   width: min(380px, 50vw);
   height: 100%;
   flex: 0 0 auto;
@@ -40,7 +41,7 @@ body {
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
-  border-right: 1px solid rgba(255, 255, 255, 0.12);
+  border-left: 1px solid rgba(255, 255, 255, 0.12);
   background: #0c141c;
 }
 
@@ -48,6 +49,7 @@ body {
   /* vtk.js absolutely positions its canvas container, so this has to be the
      containing block or the canvas escapes back to the whole window. */
   position: relative;
+  order: 1;
   height: 100%;
   min-width: 0;
   flex: 1 1 auto;
@@ -76,6 +78,12 @@ h1 {
   flex: none;
   align-items: center;
   gap: 8px;
+}
+
+.example-link {
+  color: #8dcdf4;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 button.reset-view {
@@ -375,6 +383,10 @@ button:hover {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0 10px;
+}
+
+.field-grid > .full-field {
+  grid-column: 1 / -1;
 }
 
 .range-output {

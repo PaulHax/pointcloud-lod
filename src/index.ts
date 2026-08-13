@@ -109,7 +109,7 @@ export type {
   StreamedMemberContext,
 } from "./streamedMember";
 
-export { sceneEnuPoint, type SceneEnuPoint } from "./frames";
+export { scenePoint, type ScenePoint } from "./frames";
 
 export { CULLED, importanceFromRootSseCssPx } from "./streamedMember";
 
@@ -221,12 +221,10 @@ export {
   DEFAULT_TILES3D_CACHE_BYTES,
   DEFAULT_TILES3D_MIN_CONCURRENCY,
   DEFAULT_TILES3D_MAX_CONCURRENCY,
-  DEFAULT_TILES3D_ROLE,
   DEFAULT_VERTICAL_EXAGGERATION,
   DEFAULT_VERTICAL_PIVOT_Z,
   type Tiles3dMemberConfig,
   type Tiles3dMemberStats,
-  type Tiles3dRole,
 } from "./tiles3d/memberTypes";
 
 export {

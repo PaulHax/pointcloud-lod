@@ -50,22 +50,24 @@ function accessor(document, name, type, array) {
     .setBuffer(document.getRoot().listBuffers()[0]);
 }
 
-function quadPrimitive(document, name, x0, x1, y0, y1, z, material) {
+function quadPrimitive(document, name, x0, x1, y0, y1, height, material) {
   const positions = new Float32Array([
     x0,
-    y0,
-    z,
+    height,
+    -y0,
     x1,
-    y0,
-    z,
+    height,
+    -y0,
     x1,
-    y1,
-    z,
+    height,
+    -y1,
     x0,
-    y1,
-    z,
+    height,
+    -y1,
   ]);
-  const normals = new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1]);
+  // glTF content is Y-up. The 3D Tiles decode transform maps these coordinates
+  // to the intended tile-local (x, y, height) horizontal plane with +Z normals.
+  const normals = new Float32Array([0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0]);
   const uvs = new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]);
   const indices = new Uint16Array([0, 1, 2, 0, 2, 3]);
 

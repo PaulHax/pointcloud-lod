@@ -27,7 +27,7 @@ import {
   type StreamedSceneCoordinator,
   type TextureCapabilities,
 } from "../../../src";
-import { WORLD_UP, installCameraControls } from "./cameraControls";
+import { WORLD_UP, installCameraControls } from "../../../src/vtk";
 import { createDecodeWorkers } from "./decodeAssets";
 
 export type SceneHost = {
@@ -45,11 +45,15 @@ export type SceneHost = {
   ): void;
   /** Notified after every painted frame, with the camera that was drawn. */
   onFrame(listener: (view: CameraView) => void): void;
+  /** Notified when a painted frame reaches the browser presentation clock. */
+  onPresentation(listener: (presentedAt: number) => void): void;
   /** Frame the camera on a scene-space sphere. */
   lookAt(
     center: readonly [number, number, number],
     distanceMeters: number,
   ): void;
+  /** Frame every currently visible prop; false while the scene is empty. */
+  frameVisible(): boolean;
   lastFrameMs(): number;
   paintCount(): number;
   devicePixelRatio(): number;
@@ -149,6 +153,7 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
   let presentationQueued = false;
   let frameSerial = 0;
   const frameListeners: ((view: CameraView) => void)[] = [];
+  const presentationListeners: ((presentedAt: number) => void)[] = [];
   const beforeFrameListeners: ((
     view: CameraView,
     devicePixelRatio: number,
@@ -235,6 +240,7 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
     presentationQueued = true;
     requestAnimationFrame((presentedAt) => {
       presentationQueued = false;
+      for (const listener of presentationListeners) listener(presentedAt);
       const interval =
         lastPresentedAt === null ? null : presentedAt - lastPresentedAt;
       lastPresentedAt = presentedAt;
@@ -296,6 +302,7 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
     cameraView,
     onBeforeFrame: (listener) => beforeFrameListeners.push(listener),
     onFrame: (listener) => frameListeners.push(listener),
+    onPresentation: (listener) => presentationListeners.push(listener),
     lookAt(center, distanceMeters) {
       const [x, y, z] = center;
       camera.setFocalPoint(x, y, z);
@@ -312,6 +319,45 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
       refreshClippingRange();
       style.setCenterOfRotation(x, y, z);
       scheduleRender();
+    },
+    frameVisible() {
+      if (renderer.getActors().length === 0) return false;
+      const bounds = renderer.computeVisiblePropBounds() as number[];
+      if (
+        bounds.length < 6 ||
+        !bounds.slice(0, 6).every(Number.isFinite) ||
+        bounds[1]! < bounds[0]! ||
+        bounds[3]! < bounds[2]! ||
+        bounds[5]! < bounds[4]!
+      ) {
+        return false;
+      }
+      const center: [number, number, number] = [
+        (bounds[0]! + bounds[1]!) / 2,
+        (bounds[2]! + bounds[3]!) / 2,
+        (bounds[4]! + bounds[5]!) / 2,
+      ];
+      const radius =
+        Math.hypot(
+          bounds[1]! - bounds[0]!,
+          bounds[3]! - bounds[2]!,
+          bounds[5]! - bounds[4]!,
+        ) / 2;
+      if (!(radius > 0)) return false;
+      const distance =
+        (radius / Math.tan((camera.getViewAngle() * Math.PI) / 360)) * 1.25;
+      const [x, y, z] = center;
+      camera.setFocalPoint(x, y, z);
+      camera.setPosition(
+        x + distance * 0.6,
+        y + distance * 0.7,
+        z + distance * 0.45,
+      );
+      camera.setViewUp(...WORLD_UP);
+      refreshClippingRange();
+      style.setCenterOfRotation(x, y, z);
+      scheduleRender();
+      return true;
     },
     lastFrameMs: () => lastFrameMs,
     paintCount: () => paints,

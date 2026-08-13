@@ -21,7 +21,7 @@ const compressed = {
   levels: [{ width: 4, height: 4, data: new Uint8Array(16) }],
   sampler: { magFilter: 9729, minFilter: 9987, wrapS: 10497, wrapT: 10497 },
   capabilityKey: "astc",
-};
+} satisfies DecodedTexture;
 
 const content = (texture: DecodedTexture = compressed): DecodedTileContent => ({
   origin: [10, 20, 30],
@@ -124,7 +124,12 @@ describe("vtk mesh adapter", () => {
       textures: [textureInstances[0]],
     });
     expect(textureInstances[0]).toMatchObject({
-      sampler: compressed.sampler,
+      sampler: {
+        magFilter: "linear",
+        minFilter: "linear-mipmap-linear",
+        wrapS: "repeat",
+        wrapT: "repeat",
+      },
       flipY: false,
     });
   });
@@ -394,12 +399,17 @@ describe("vtk mesh adapter", () => {
       minFilter: 9987,
       wrapS: 10497,
       wrapT: 33648,
-    };
+    } satisfies DecodedTexture["sampler"];
     adapter.submitTile("mixed", content({ ...compressed, sampler }));
     scheduler.prepareFrame();
     expect(onError).not.toHaveBeenCalled();
     expect(renderer.addActor).toHaveBeenCalledTimes(2);
-    expect(textureInstances[0]?.sampler).toEqual(sampler);
+    expect(textureInstances[0]?.sampler).toEqual({
+      magFilter: "nearest",
+      minFilter: "linear-mipmap-linear",
+      wrapS: "repeat",
+      wrapT: "mirrored-repeat",
+    });
     expect(textureInstances[0]?.flipY).toBe(false);
     adapter.dispose();
   });
@@ -415,7 +425,7 @@ describe("vtk mesh adapter", () => {
       scheduleRender: vi.fn(),
       submissions: scheduler,
     });
-    const texture = {
+    const texture: Extract<DecodedTexture, { kind: "rgba" }> = {
       kind: "rgba" as const,
       rgba: new Uint8Array([255, 255, 255, 0, 255, 255, 255, 255]),
       width: 2,
@@ -468,9 +478,12 @@ describe("vtk mesh adapter", () => {
     });
     expect(adapter.submitTile("nearest", nearest)).toBe("queued");
     scheduler.prepareFrame();
-    expect(textureInstances[0]?.sampler).toEqual(
-      nearest.primitives[0]?.material.baseColorTexture?.sampler,
-    );
+    expect(textureInstances[0]?.sampler).toEqual({
+      magFilter: "nearest",
+      minFilter: "nearest-mipmap-nearest",
+      wrapS: "clamp-to-edge",
+      wrapT: "clamp-to-edge",
+    });
     expect(textureInstances[0]?.flipY).toBe(false);
     adapter.dispose();
   });

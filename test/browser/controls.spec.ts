@@ -34,6 +34,54 @@ const relativeGap = (left: number, right: number): number =>
   Math.abs(left - right) /
   Math.max(Math.abs(left), Math.abs(right), Number.MIN_VALUE);
 
+const normalised = (vector: readonly number[]): number[] => {
+  const length = Math.hypot(...vector);
+  return vector.map((value) => value / length);
+};
+
+const projectPoint = (
+  camera: CameraReading,
+  point: readonly number[],
+  box: { x: number; y: number; width: number; height: number },
+): { x: number; y: number } => {
+  const forward = normalised(subtract(camera.focalPoint, camera.position));
+  const right = normalised(cross(forward, camera.viewUp));
+  const up = normalised(cross(right, forward));
+  const eyeToPoint = subtract(point, camera.position);
+  const depth = dot(eyeToPoint, forward);
+  const halfHeight = camera.parallelProjection
+    ? camera.parallelScale
+    : depth * Math.tan((camera.viewAngle * Math.PI) / 360);
+  const x = dot(eyeToPoint, right) / (halfHeight * (box.width / box.height));
+  const y = dot(eyeToPoint, up) / halfHeight;
+  return {
+    x: box.x + ((x + 1) * box.width) / 2,
+    y: box.y + ((1 - y) * box.height) / 2,
+  };
+};
+
+const focalPlanePoint = (
+  camera: CameraReading,
+  local: { x: number; y: number },
+  box: { width: number; height: number },
+): number[] => {
+  const forward = normalised(subtract(camera.focalPoint, camera.position));
+  const right = normalised(cross(forward, camera.viewUp));
+  const up = normalised(cross(right, forward));
+  const focalDepth = dot(subtract(camera.focalPoint, camera.position), forward);
+  const halfHeight = camera.parallelProjection
+    ? camera.parallelScale
+    : focalDepth * Math.tan((camera.viewAngle * Math.PI) / 360);
+  const horizontal = (2 * local.x) / box.width - 1;
+  const vertical = 1 - (2 * local.y) / box.height;
+  return camera.focalPoint.map(
+    (value, axis) =>
+      value +
+      right[axis]! * horizontal * halfHeight * (box.width / box.height) +
+      up[axis]! * vertical * halfHeight,
+  );
+};
+
 const wheelAtViewerCenter = async (
   session: ExampleSession,
   steps: number,
@@ -282,6 +330,33 @@ describe("example controls", () => {
 
       expect(after.position).not.toEqual(before.position);
       expect(after.focalPoint).not.toEqual(before.focalPoint);
+      expect(session.failures).toEqual([]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("keeps an off-centre focal-plane point under the cursor through a long pan", async () => {
+    const session = await openExample({ cloud: MULTIPAGE_CLOUD.urlPath });
+    try {
+      await session.setBudgetMode("fixed");
+      const box = await session.page.locator("#viewer").boundingBox();
+      if (box === null) throw new Error("the viewer has no box to pan in");
+      const local = { x: box.width * 0.25, y: box.height * 0.22 };
+      const start = { x: box.x + local.x, y: box.y + local.y };
+      const anchor = focalPlanePoint(await session.readCamera(), local, box);
+      const end = { x: start.x, y: box.y + box.height * 0.78 };
+      const stepCount = 16;
+      await session.drag(
+        Array.from({ length: stepCount }, () => ({
+          dx: (end.x - start.x) / stepCount,
+          dy: (end.y - start.y) / stepCount,
+        })),
+        { start },
+      );
+      const projected = projectPoint(await session.readCamera(), anchor, box);
+      expect(projected.x).toBeCloseTo(end.x, 0);
+      expect(projected.y).toBeCloseTo(end.y, 0);
       expect(session.failures).toEqual([]);
     } finally {
       await session.close();

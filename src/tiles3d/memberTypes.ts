@@ -10,22 +10,15 @@ export const DEFAULT_TILES3D_MIN_CONCURRENCY = 1;
 export const DEFAULT_TILES3D_MAX_CONCURRENCY = 4;
 export const DEFAULT_VERTICAL_EXAGGERATION = 1;
 export const DEFAULT_VERTICAL_PIVOT_Z = 0;
-export const DEFAULT_TILES3D_ROLE = "model" as const;
-
-export type Tiles3dRole = "model" | "terrain";
 
 export type Tiles3dMemberConfig = {
   readonly endpoint: string;
   readonly revision: string;
-  readonly ecefToScene: readonly number[];
-  /** Finite positive scale applied to scene-local ENU Z. */
+  readonly tilesetToScene: readonly number[];
+  /** Finite positive scale applied to the scene Z axis. */
   readonly verticalExaggeration?: number;
-  /** Finite scene-local ENU Z coordinate held fixed by exaggeration. */
+  /** Finite scene Z coordinate held fixed by exaggeration. */
   readonly verticalPivotZ?: number;
-  /** Durable scene semantics; rendering remains identical for both roles. */
-  readonly role?: Tiles3dRole;
-  /** Optional imagery association, valid only for terrain members. */
-  readonly textureAssetId?: string | null;
   readonly maximumScreenSpaceErrorPx?: number;
   readonly wasm?: DecodeWasmUrls;
   readonly cacheBytes?: number;
@@ -56,8 +49,6 @@ export type Tiles3dMemberStats = {
   readonly configGeneration: number;
   readonly verticalExaggeration: number;
   readonly verticalPivotZ: number;
-  readonly role: Tiles3dRole;
-  readonly textureAssetId: string | null;
   readonly allocation: Allocation;
   readonly maximumScreenSpaceErrorPx: number;
   readonly effectiveScreenSpaceErrorPx: number;

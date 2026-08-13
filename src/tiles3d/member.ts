@@ -29,7 +29,6 @@ import {
   DEFAULT_TILES3D_CACHE_BYTES,
   DEFAULT_TILES3D_MAX_CONCURRENCY,
   DEFAULT_TILES3D_MIN_CONCURRENCY,
-  DEFAULT_TILES3D_ROLE,
   DEFAULT_VERTICAL_EXAGGERATION,
   DEFAULT_VERTICAL_PIVOT_Z,
   type Tiles3dMemberConfig,
@@ -99,7 +98,7 @@ const validateConfig = (config: Tiles3dMemberConfig): Tiles3dMemberConfig => {
     throw new TypeError("tiles endpoint must be non-empty");
   if (typeof config.revision !== "string" || config.revision.length === 0)
     throw new TypeError("tiles revision must be non-empty");
-  finiteMatrix(config.ecefToScene, "ecefToScene");
+  finiteMatrix(config.tilesetToScene, "tilesetToScene");
   const maximum =
     config.maximumScreenSpaceErrorPx ?? DEFAULT_MAXIMUM_SCREEN_SPACE_ERROR_PX;
   if (!Number.isFinite(maximum) || maximum <= 0)
@@ -131,24 +130,6 @@ const validateConfig = (config: Tiles3dMemberConfig): Tiles3dMemberConfig => {
   if (!Number.isFinite(verticalPivotZ)) {
     throw new RangeError("verticalPivotZ must be finite");
   }
-  const role = config.role === undefined ? DEFAULT_TILES3D_ROLE : config.role;
-  if (role !== "model" && role !== "terrain") {
-    throw new TypeError('role must be "model" or "terrain"');
-  }
-  const rawTextureAssetId = config.textureAssetId;
-  let textureAssetId: string | undefined;
-  if (rawTextureAssetId !== undefined && rawTextureAssetId !== null) {
-    if (
-      typeof rawTextureAssetId !== "string" ||
-      rawTextureAssetId.trim().length === 0
-    ) {
-      throw new TypeError("textureAssetId must be a non-empty string");
-    }
-    if (role !== "terrain") {
-      throw new TypeError("textureAssetId is valid only for terrain role");
-    }
-    textureAssetId = rawTextureAssetId.trim();
-  }
   return {
     ...config,
     minConcurrency: minimumConcurrency,
@@ -156,8 +137,6 @@ const validateConfig = (config: Tiles3dMemberConfig): Tiles3dMemberConfig => {
     cacheBytes,
     verticalExaggeration,
     verticalPivotZ,
-    role,
-    ...(textureAssetId === undefined ? {} : { textureAssetId }),
   };
 };
 
@@ -258,7 +237,7 @@ export const createTiles3dMember = (
     );
 
   const exaggeratedEcefToScene = (): readonly number[] =>
-    multiplyTilesetMatrices(verticalExaggeration(), config.ecefToScene);
+    multiplyTilesetMatrices(verticalExaggeration(), config.tilesetToScene);
 
   const traversalModelMatrix = (): readonly number[] =>
     modelMatrix
@@ -267,7 +246,7 @@ export const createTiles3dMember = (
 
   /**
    * Anchor placement composed after each tile's scene-local origin. Decoded
-   * vertices stay in unexaggerated scene ENU, so exaggeration is a matrix the
+   * vertices stay in unexaggerated scene coordinates, so exaggeration is a matrix the
    * renderer applies rather than a property of the downloaded bytes.
    */
   const placementMatrix = (): readonly number[] =>
@@ -278,7 +257,7 @@ export const createTiles3dMember = (
   /**
    * The same placement without exaggeration — the frame a picked point must be
    * reported in, since anything the app stores (control points, registration
-   * pairs) is canonical scene ENU and must not move when the user changes a
+   * pairs) is canonical scene coordinates and must not move when the user changes a
    * display-only vertical scale.
    */
   const scenePlacementMatrix = (): readonly number[] | null => modelMatrix;
@@ -618,7 +597,7 @@ export const createTiles3dMember = (
           dependencyRootUrl: workerUrl(`${config.endpoint}/`),
           revision: decodeContext.revision,
           accumulatedTransform: [...tile.worldTransform] as any,
-          ecefToScene: [...config.ecefToScene] as any,
+          tilesetToScene: [...config.tilesetToScene] as any,
           textureCapabilities: context.textureCapabilities,
           ...(config.wasm ? { wasm: config.wasm } : {}),
         });
@@ -816,8 +795,8 @@ export const createTiles3dMember = (
       const sourceChanged =
         next.endpoint !== config.endpoint || next.revision !== config.revision;
       const decodeChanged =
-        next.ecefToScene.some(
-          (value, index) => value !== config.ecefToScene[index],
+        next.tilesetToScene.some(
+          (value, index) => value !== config.tilesetToScene[index],
         ) || !sameDecodeWasm(next.wasm, config.wasm);
       const placementChanged =
         next.verticalExaggeration !== config.verticalExaggeration ||
@@ -978,8 +957,6 @@ export const createTiles3dMember = (
         verticalExaggeration:
           config.verticalExaggeration ?? DEFAULT_VERTICAL_EXAGGERATION,
         verticalPivotZ: config.verticalPivotZ ?? DEFAULT_VERTICAL_PIVOT_Z,
-        role: config.role ?? DEFAULT_TILES3D_ROLE,
-        textureAssetId: config.textureAssetId ?? null,
         allocation,
         maximumScreenSpaceErrorPx: maximumSse(),
         effectiveScreenSpaceErrorPx: effectiveSse,

@@ -28,7 +28,7 @@ import {
   type Plane,
 } from "./camera";
 import { selectNodes } from "./budget";
-import { sceneEnuPoint } from "./frames";
+import { scenePoint } from "./frames";
 import { allocatePointPrefixes } from "./drawPlan";
 import { createLruCache } from "./lru";
 import {
@@ -2140,7 +2140,7 @@ export const createLodController = (
         ? {
             ...result,
             rayDepth: result.rayDepth * modelFrame.scale,
-            scenePoint: sceneEnuPoint(
+            scenePoint: scenePoint(
               ...transformPointBy(modelFrame.matrix, result.scenePoint),
             ),
           }

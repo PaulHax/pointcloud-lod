@@ -46,7 +46,7 @@ const decodeRequest = (): DecodeTileRequest => ({
   contentUrl: "https://fixture.invalid/tile.glb",
   revision: "r1",
   accumulatedTransform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
-  ecefToScene: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+  tilesetToScene: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
   textureCapabilities: { capabilityKey: "rgba", compressedFormats: [] },
 });
 

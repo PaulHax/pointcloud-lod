@@ -27,7 +27,7 @@ export type TilesetTraversalOptions = {
   readonly maximumScreenSpaceErrorPx: number;
   /** Normalized allocation; the threshold relaxes by `1 / max(q, 0.05)`. */
   readonly qualityFraction?: number;
-  /** Caller-owned anchor × ECEF-to-scene transform. */
+  /** Caller-owned anchor × tileset-to-scene transform. */
   readonly modelMatrix?: readonly number[];
   readonly readiness: (tileId: string) => TileReadiness;
 };
@@ -310,6 +310,7 @@ export const traverseTileset = (
     drawnTileIds: Object.freeze(result.drawn),
     culledTileIds: Object.freeze(culled),
     effectiveScreenSpaceErrorPx: effective,
-    rootScreenSpaceErrorPx: Number.isFinite(rootSse) && rootSse > 0 ? rootSse : 0,
+    rootScreenSpaceErrorPx:
+      Number.isFinite(rootSse) && rootSse > 0 ? rootSse : 0,
   });
 };

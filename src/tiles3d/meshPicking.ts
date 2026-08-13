@@ -12,7 +12,7 @@ import {
   type OcclusionResult,
 } from "../streamedMember";
 import type { Bounds } from "../octree";
-import { sceneEnuPoint } from "../frames";
+import { scenePoint as makeScenePoint } from "../frames";
 import type { DecodedPrimitive, SerializableSampler } from "./decode";
 
 export type PickAlphaTexture = {
@@ -48,7 +48,7 @@ export type SubmittedMeshTile = {
  *
  * `drawn` is what the renderer paints — it carries vertical exaggeration, so
  * it is the only frame in which a screen ray means anything. `scene` is the
- * canonical scene ENU the rest of the app reasons in: the same placement
+ * canonical scene coordinates the rest of the app reasons in: the same placement
  * without exaggeration. Picking happens in `drawn` and reports in `scene`;
  * collapsing the two is what let exaggerated z values reach saved control
  * points.
@@ -86,7 +86,7 @@ const finiteMatrix = (matrix: Mat16 | null): readonly number[] => {
   return Array.from(matrix);
 };
 
-/** Tile-local vertex lifted into the member's own unplaced ENU frame. */
+/** Tile-local vertex lifted into the member's unplaced coordinate frame. */
 const localPoint = (
   origin: readonly [number, number, number],
   positions: Float32Array,
@@ -299,7 +299,7 @@ export const pickSubmittedTriangles = (
   }
   let bestDepth = Number.POSITIVE_INFINITY;
   let nearestUnknownDepth = Number.POSITIVE_INFINITY;
-  // The winning triangle in the member's own ENU frame, plus where on it the
+  // The winning triangle in the member's unplaced frame, plus where on it the
   // ray landed. Kept so the hit can be reported in scene space even though it
   // had to be found in drawn space.
   let bestLocal: { a: Vec3; b: Vec3; c: Vec3; u: number; v: number } | null =
@@ -388,7 +388,7 @@ export const pickSubmittedTriangles = (
   return {
     status: "hit",
     rayDepth: bestDepth,
-    scenePoint: sceneEnuPoint(scenePoint[0], scenePoint[1], scenePoint[2]),
+    scenePoint: makeScenePoint(scenePoint[0], scenePoint[1], scenePoint[2]),
     distancePx: Math.hypot(projected.xCssPx - cssX, projected.yCssPx - cssY),
   };
 };

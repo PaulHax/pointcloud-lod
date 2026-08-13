@@ -41,18 +41,18 @@ type Field = readonly [label: string, value: string];
 
 const meshFields = (stats: Tiles3dMemberStats): Field[] => [
   ["source", stats.sourceState],
-  ["screen-space error", `${stats.effectiveScreenSpaceErrorPx.toFixed(1)} px`],
+  ["effective SSE", `${stats.effectiveScreenSpaceErrorPx.toFixed(1)} px`],
   ["selected tiles", count(stats.selectedTiles)],
   ["drawn tiles", count(stats.renderer.drawnTiles)],
   ["drawn triangles", count(stats.renderer.drawnTriangles)],
-  ["resident geometry", megabytes(stats.renderer.residentGeometryBytes)],
-  ["resident texture", megabytes(stats.renderer.residentTextureBytes)],
-  ["queued submission", megabytes(stats.submissions.queuedBytes)],
+  ["geometry", megabytes(stats.renderer.residentGeometryBytes)],
+  ["textures", megabytes(stats.renderer.residentTextureBytes)],
+  ["submit queue", megabytes(stats.submissions.queuedBytes)],
   [
     "decode queue",
     `${stats.queue?.active ?? 0} active · ${stats.queue?.queued ?? 0} queued`,
   ],
-  ["irreducible budget", stats.irreducibleBudget ? "yes — nothing fits" : "no"],
+  ["irreducible", stats.irreducibleBudget ? "yes — nothing fits" : "no"],
   [
     "errors",
     stats.errorCount === 0
@@ -72,71 +72,70 @@ const pointFields = (stats: PointCloudMemberStats): Field[] => [
 ];
 
 const fieldsHtml = (fields: readonly Field[]): string =>
-  fields
+  `<dl>${fields
     .map(
       ([label, value]) =>
-        `<div class="field"><span>${label}</span><b>${value}</b></div>`,
+        `<dt>${escape(label)}</dt><dd title="${escape(value)}">${escape(value)}</dd>`,
     )
-    .join("");
+    .join("")}</dl>`;
 
 const escape = (value: string): string =>
-  value.replace(/[<&>]/g, (character) =>
-    character === "<" ? "&lt;" : character === ">" ? "&gt;" : "&amp;",
-  );
+  value.replace(/[<&>"]/g, (character) => {
+    if (character === "<") return "&lt;";
+    if (character === ">") return "&gt;";
+    if (character === '"') return "&quot;";
+    return "&amp;";
+  });
 
 export const renderDiagnostics = (
   container: HTMLElement,
   input: DiagnosticsInput,
+  memberContainers: Readonly<Record<string, HTMLElement>>,
 ): void => {
   const { coordinator } = input;
   const memberById = new Map(
     coordinator.members.map((member) => [member.id, member]),
   );
 
-  const columns = input.rows
-    .map((row) => {
-      const shared = memberById.get(row.id);
-      const share: Field[] = shared
-        ? [
-            [
-              "share of view",
-              percent(shared.governorInputs.projectedImportance),
-            ],
-            ["quality allocated", percent(shared.allocation.qualityFraction)],
-            [
-              "memory allowance",
-              megabytes(shared.allocation.memoryBudgetBytes),
-            ],
-            [
-              "work pending",
-              shared.governorInputs.work.operations > 0 ? "yes" : "no",
-            ],
-          ]
-        : [];
-      const own = isMesh(row.stats)
-        ? meshFields(row.stats)
-        : pointFields(row.stats);
-      return `<section class="member"><h3>${escape(row.label)}</h3>${fieldsHtml(
-        [...share, ...own],
-      )}</section>`;
-    })
-    .join("");
+  for (const memberContainer of Object.values(memberContainers)) {
+    memberContainer.replaceChildren();
+  }
+  for (const row of input.rows) {
+    const shared = memberById.get(row.id);
+    const share: Field[] = shared
+      ? [
+          ["share of view", percent(shared.governorInputs.projectedImportance)],
+          ["quality share", percent(shared.allocation.qualityFraction)],
+          ["memory allowance", megabytes(shared.allocation.memoryBudgetBytes)],
+          [
+            "work pending",
+            shared.governorInputs.work.operations > 0 ? "yes" : "no",
+          ],
+        ]
+      : [];
+    const own = isMesh(row.stats)
+      ? meshFields(row.stats)
+      : pointFields(row.stats);
+    const memberContainer = memberContainers[row.id];
+    if (memberContainer) {
+      memberContainer.innerHTML = `<h3>Streaming</h3>${fieldsHtml([...share, ...own])}`;
+    }
+  }
 
   container.innerHTML = `
     <section class="view">
-      <h3>View</h3>
+      <h2>View</h2>
       ${fieldsHtml([
         ["frame", `${input.frameMs.toFixed(1)} ms`],
         ["regime", coordinator.governor.regime],
         ["view quality", percent(coordinator.viewQualityFraction)],
         ["submission queue", megabytes(coordinator.submissions.queuedBytes)],
         [
-          "admitted last frame",
+          "frame admission",
           megabytes(coordinator.submissions.lastFrameAdmittedBytes),
         ],
         ["texture format", input.textureFormat],
-        ["renderer", escape(input.rendererName)],
+        ["renderer", input.rendererName],
       ])}
-    </section>
-    ${columns}`;
+    </section>`;
 };

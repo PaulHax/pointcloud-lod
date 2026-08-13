@@ -85,9 +85,9 @@ export const multiplyMat4 = (
   );
 
 export const composeSceneTransform = (
-  ecefToScene: readonly number[],
+  tilesetToScene: readonly number[],
   accumulatedTilesTransform: readonly number[],
-): Mat4 => multiplyMat4(ecefToScene, accumulatedTilesTransform);
+): Mat4 => multiplyMat4(tilesetToScene, accumulatedTilesTransform);
 
 /** Standard 3D Tiles glTF Y-up content into the tile's Z-up coordinate system. */
 export const Y_UP_TO_Z_UP: Mat4 = [
@@ -95,7 +95,7 @@ export const Y_UP_TO_Z_UP: Mat4 = [
 ];
 
 /**
- * Scene-local ENU vertical exaggeration, in column-major convention.
+ * Scene-Z vertical exaggeration, in column-major convention.
  * The pivot is invariant: `z' = pivotZ + exaggeration * (z - pivotZ)`.
  */
 export const createVerticalExaggerationTransform = (
@@ -128,16 +128,16 @@ export const createVerticalExaggerationTransform = (
   ];
 };
 
-/** `T(p) * S(1,1,e) * T(-p) * ECEFToScene * accumulatedTile/local`. */
+/** `T(p) * S(1,1,e) * T(-p) * tilesetToScene * accumulatedTile/local`. */
 export const composeVerticalExaggeratedSceneTransform = (
   exaggeration: number,
   pivotZ: number,
-  ecefToScene: readonly number[],
+  tilesetToScene: readonly number[],
   accumulatedTilesTransform: readonly number[],
 ): Mat4 =>
   multiplyMat4(
     createVerticalExaggerationTransform(exaggeration, pivotZ),
-    composeSceneTransform(ecefToScene, accumulatedTilesTransform),
+    composeSceneTransform(tilesetToScene, accumulatedTilesTransform),
   );
 
 export const transformPoint = (

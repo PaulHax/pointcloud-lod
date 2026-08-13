@@ -183,6 +183,23 @@ interface GltfJson {
   extensionsRequired?: string[];
 }
 
+const GLTF_MAG_FILTERS = new Set([9728, 9729]);
+const GLTF_MIN_FILTERS = new Set([9728, 9729, 9984, 9985, 9986, 9987]);
+const GLTF_WRAP_MODES = new Set([33071, 33648, 10497]);
+
+const samplerValue = <T extends number>(
+  candidate: number | undefined,
+  fallback: T,
+  allowed: ReadonlySet<number>,
+  label: string,
+): T => {
+  const resolved = candidate ?? fallback;
+  if (!allowed.has(resolved)) {
+    throw new Error(`glTF sampler has an invalid ${label}: ${resolved}`);
+  }
+  return resolved as T;
+};
+
 interface ParsedGltf {
   json: GltfJson;
   buffers: GltfBuffer[];
@@ -299,6 +316,94 @@ const validUrl = (value: string, label: string): string => {
   }
 };
 
+interface DataUriDescriptor {
+  mediaType?: string;
+  payload: string;
+  base64: boolean;
+}
+
+const dataUriDescriptor = (value: string): DataUriDescriptor | null => {
+  if (!/^data:/iu.test(value)) return null;
+  if ([...value].some((character) => character.charCodeAt(0) < 0x20)) {
+    throw new Error("embedded glTF data URI contains a control character");
+  }
+  const comma = value.indexOf(",");
+  if (comma < 5) throw new Error("embedded glTF data URI has no payload");
+  const metadata = value.slice(5, comma);
+  const fields = metadata.split(";");
+  const mediaType = fields[0] || undefined;
+  if (
+    mediaType !== undefined &&
+    !/^[!#$&^_.+\-\w]+\/[!#$&^_.+\-\w]+$/u.test(mediaType)
+  ) {
+    throw new Error("embedded glTF data URI has an invalid media type");
+  }
+  const parameters = fields.slice(1);
+  const base64 = parameters.at(-1)?.toLowerCase() === "base64";
+  const regularParameters = base64 ? parameters.slice(0, -1) : parameters;
+  if (
+    regularParameters.some(
+      (parameter) =>
+        !/^[!#$&^_.+\-\w]+=[^;\s]*$/u.test(parameter) ||
+        parameter.toLowerCase() === "base64",
+    )
+  ) {
+    throw new Error("embedded glTF data URI has invalid parameters");
+  }
+  const payload = value.slice(comma + 1);
+  if (base64) {
+    if (
+      payload.length % 4 !== 0 ||
+      !/^(?:[A-Za-z\d+/]{4})*(?:[A-Za-z\d+/]{2}==|[A-Za-z\d+/]{3}=)?$/u.test(
+        payload,
+      )
+    ) {
+      throw new Error("embedded glTF data URI has invalid base64 data");
+    }
+  } else if (
+    /%(?![\dA-Fa-f]{2})/u.test(payload) ||
+    /[^\x20-\x7e]/u.test(payload) ||
+    /[#?]/u.test(payload)
+  ) {
+    throw new Error("embedded glTF data URI has invalid percent-encoded data");
+  }
+  return {
+    ...(mediaType ? { mediaType: mediaType.toLowerCase() } : {}),
+    payload,
+    base64,
+  };
+};
+
+const decodeDataUri = (
+  value: string,
+): { bytes: Uint8Array; mediaType?: string } | null => {
+  const descriptor = dataUriDescriptor(value);
+  if (!descriptor) return null;
+  let bytes: Uint8Array;
+  if (descriptor.base64) {
+    const decoded = atob(descriptor.payload);
+    bytes = Uint8Array.from(decoded, (character) => character.charCodeAt(0));
+  } else {
+    const output: number[] = [];
+    for (let index = 0; index < descriptor.payload.length; index += 1) {
+      const character = descriptor.payload[index]!;
+      if (character === "%") {
+        output.push(
+          Number.parseInt(descriptor.payload.slice(index + 1, index + 3), 16),
+        );
+        index += 2;
+      } else {
+        output.push(character.charCodeAt(0));
+      }
+    }
+    bytes = Uint8Array.from(output);
+  }
+  return {
+    bytes,
+    ...(descriptor.mediaType ? { mediaType: descriptor.mediaType } : {}),
+  };
+};
+
 const wasmModules = (
   wasm: DecodeWasmUrls | undefined,
 ): Record<string, unknown> => {
@@ -327,22 +432,73 @@ const wasmModules = (
 };
 
 const dependencyUrl = (request: DecodeTileRequest, value: string): string => {
-  if (
-    !request.dependencyRootUrl ||
-    !value ||
-    value.includes("\\") ||
-    /%(?:2e|2f|5c)/iu.test(value) ||
-    /^[a-z][a-z\d+.-]*:/iu.test(value) ||
-    value.startsWith("//") ||
-    value.startsWith("/")
-  ) {
+  if (!request.dependencyRootUrl || !value) {
     throw new Error(
       `external glTF dependency URI is not same-root relative: ${value}`,
     );
   }
+  const forms = [value];
+  for (;;) {
+    const current = forms.at(-1)!;
+    if (/%(?![\dA-Fa-f]{2})/u.test(current)) {
+      throw new Error(
+        `external glTF dependency URI contains a malformed percent escape: ${value}`,
+      );
+    }
+    const decoded = decodeURIComponent(current);
+    if (decoded.includes("\0")) {
+      throw new Error(
+        `external glTF dependency URI contains a NUL byte: ${value}`,
+      );
+    }
+    if (decoded === current) break;
+    forms.push(decoded);
+  }
+  for (const form of forms) {
+    let parsed: URL;
+    try {
+      parsed = new URL(form, "https://relative.invalid/");
+    } catch {
+      throw new Error(
+        `external glTF dependency URI is not same-root relative: ${value}`,
+      );
+    }
+    if (
+      /^[a-z][a-z\d+.-]*:/iu.test(form) ||
+      form.startsWith("//") ||
+      form.startsWith("/") ||
+      form.includes("\\") ||
+      parsed.search ||
+      parsed.hash
+    ) {
+      throw new Error(
+        `external glTF dependency URI is not same-root relative: ${value}`,
+      );
+    }
+  }
+  if (forms.some((form) => /%(?:2f|5c)/iu.test(form))) {
+    throw new Error(
+      `external glTF dependency URI contains an encoded path separator: ${value}`,
+    );
+  }
+  const canonical = forms.at(-1)!;
+  const parts = canonical.split("/");
+  if (parts.some((part) => part === "..")) {
+    throw new Error(
+      `external glTF dependency URI contains invalid path segments: ${value}`,
+    );
+  }
   const root = new URL(request.dependencyRootUrl);
   const base = new URL(request.contentUrl);
-  const resolved = new URL(value, base);
+  const normalized = parts
+    .filter((part) => part !== "" && part !== ".")
+    .join("/");
+  if (!normalized) {
+    throw new Error(
+      `external glTF dependency URI contains invalid path segments: ${value}`,
+    );
+  }
+  const resolved = new URL(normalized, base);
   const rootPath = root.pathname.endsWith("/")
     ? root.pathname
     : `${root.pathname}/`;
@@ -357,11 +513,29 @@ const dependencyUrl = (request: DecodeTileRequest, value: string): string => {
   return resolved.href;
 };
 
+const dependencyRequestForms = (
+  contentUrl: string,
+  value: string,
+): readonly string[] => {
+  const urls: string[] = [];
+  let current = value;
+  for (;;) {
+    urls.push(new URL(current, contentUrl).href);
+    const decoded = decodeURIComponent(current);
+    if (decoded === current) return urls;
+    current = decoded;
+  }
+};
+
 const dependencyAllowlist = (
   request: DecodeTileRequest,
   json: GltfJson,
-): ReadonlySet<string> => {
-  const urls = new Set<string>();
+): {
+  external: ReadonlyMap<string, string>;
+  embedded: ReadonlyMap<string, string>;
+} => {
+  const external = new Map<string, string>();
+  const embedded = new Map<string, string>();
   const candidates: string[] = [];
   const buffers = (json as GltfJson & { buffers?: { uri?: string }[] }).buffers;
   for (const buffer of buffers ?? []) {
@@ -371,9 +545,29 @@ const dependencyAllowlist = (
     if (image.uri) candidates.push(image.uri);
   }
   for (const candidate of candidates) {
-    urls.add(dependencyUrl(request, candidate));
+    if (dataUriDescriptor(candidate)) {
+      embedded.set(candidate, candidate);
+      embedded.set(new URL(candidate).href, candidate);
+      // loaders.gl 4 recognizes only a lower-case `data:` prefix before its
+      // URL resolver. URI schemes are case-insensitive, so retain the locally
+      // authorized bytes when it resolves an upper-case spelling against the
+      // content directory instead.
+      embedded.set(
+        `${new URL(".", request.contentUrl).href}${candidate}`,
+        candidate,
+      );
+      continue;
+    }
+    const canonical = dependencyUrl(request, candidate);
+    for (const requestUrl of dependencyRequestForms(
+      request.contentUrl,
+      candidate,
+    )) {
+      external.set(requestUrl, canonical);
+    }
+    external.set(canonical, canonical);
   }
-  return urls;
+  return { external, embedded };
 };
 
 const defaultRasterDecoder = async (
@@ -773,11 +967,27 @@ const applySceneRtc = (
           "VEC3",
           gltf,
         );
+        const material =
+          primitive.material === undefined
+            ? undefined
+            : requireIndex(gltf.json.materials, primitive.material, "material");
+        const textureInfo = material?.pbrMetallicRoughness?.baseColorTexture;
+        const texCoord = textureInfo?.texCoord ?? 0;
+        if (!Number.isInteger(texCoord) || texCoord < 0) {
+          throw new Error(
+            "glTF baseColorTexture texCoord must be a non-negative integer",
+          );
+        }
         const uvs = accessorFloats(
-          primitive.attributes.TEXCOORD_0,
+          primitive.attributes[`TEXCOORD_${texCoord}`],
           "VEC2",
           gltf,
         );
+        if (textureInfo && !uvs) {
+          throw new Error(
+            `glTF primitive has no TEXCOORD_${texCoord} attribute`,
+          );
+        }
         const indices = accessorIndices(primitive.indices, gltf);
         pending.push({
           rtc: flattenPrimitiveToRtc(
@@ -844,7 +1054,7 @@ const imageBytes = async (
   image: GltfImage,
   request: DecodeTileRequest,
   fetchDependency: (url: string) => Promise<ArrayBuffer>,
-): Promise<Uint8Array> => {
+): Promise<{ bytes: Uint8Array; mediaType?: string }> => {
   if (image.bufferView !== undefined) {
     const view = requireIndex(
       gltf.json.bufferViews,
@@ -856,11 +1066,19 @@ const imageBytes = async (
     if (start < 0 || start + view.byteLength > buffer.arrayBuffer.byteLength) {
       throw new Error("glTF image exceeds its buffer");
     }
-    return new Uint8Array(buffer.arrayBuffer, start, view.byteLength).slice();
+    return {
+      bytes: new Uint8Array(buffer.arrayBuffer, start, view.byteLength).slice(),
+      ...(image.mimeType ? { mediaType: image.mimeType } : {}),
+    };
   }
   if (image.uri) {
+    const embedded = decodeDataUri(image.uri);
+    if (embedded) return embedded;
     const url = dependencyUrl(request, image.uri);
-    return new Uint8Array(await fetchDependency(url));
+    return {
+      bytes: new Uint8Array(await fetchDependency(url)),
+      ...(image.mimeType ? { mediaType: image.mimeType } : {}),
+    };
   }
   throw new Error("glTF image has neither a bufferView nor a URI");
 };
@@ -874,10 +1092,20 @@ const samplerFor = (
       ? undefined
       : requireIndex(json.samplers, samplerIndex, "sampler");
   return {
-    magFilter: sampler?.magFilter ?? 9729,
-    minFilter: sampler?.minFilter ?? 9987,
-    wrapS: sampler?.wrapS ?? 10497,
-    wrapT: sampler?.wrapT ?? 10497,
+    magFilter: samplerValue(
+      sampler?.magFilter,
+      9729,
+      GLTF_MAG_FILTERS,
+      "magFilter",
+    ),
+    minFilter: samplerValue(
+      sampler?.minFilter,
+      9987,
+      GLTF_MIN_FILTERS,
+      "minFilter",
+    ),
+    wrapS: samplerValue(sampler?.wrapS, 10497, GLTF_WRAP_MODES, "wrapS"),
+    wrapT: samplerValue(sampler?.wrapT, 10497, GLTF_WRAP_MODES, "wrapT"),
   };
 };
 
@@ -903,14 +1131,16 @@ const decodeTexture = async (
 ): Promise<TextureResult> => {
   const texture = requireIndex(gltf.json.textures, textureIndex, "texture");
   const image = requireIndex(gltf.json.images, texture.source ?? -1, "image");
-  const bytes = await imageBytes(
+  const imageData = await imageBytes(
     gltf,
     image,
     request,
     options.fetchDependency ?? fetchOkBytes,
   );
+  const bytes = imageData.bytes;
   const sampler = samplerFor(gltf.json, texture.sampler);
-  if (image.mimeType === "image/ktx2") {
+  const mimeType = image.mimeType ?? imageData.mediaType;
+  if (mimeType === "image/ktx2") {
     const ktx = readKtx2(bytes);
     const descriptor = ktx.dataFormatDescriptor[0];
     if (!descriptor) throw new Error("KTX2 has no data format descriptor");
@@ -1018,7 +1248,7 @@ const decodeTexture = async (
 
   const decoded = await (options.decodeRasterImage ?? defaultRasterDecoder)(
     bytes,
-    image.mimeType ?? "application/octet-stream",
+    mimeType ?? "application/octet-stream",
   );
   if (
     !Number.isInteger(decoded.width) ||
@@ -1178,13 +1408,24 @@ export const decodeTileContent = async (
 
   const modules = { ...wasmModules(request.wasm), ...options.modules };
   const fetchDependency = async (value: string): Promise<Response> => {
-    const url = new URL(value, request.contentUrl).href;
-    if (!allowedDependencies.has(url)) {
+    const embeddedCandidate = allowedDependencies.embedded.get(value);
+    if (embeddedCandidate) {
+      const embedded = decodeDataUri(embeddedCandidate)!;
+      return new Response(copyArrayBuffer(embedded.bytes), { status: 200 });
+    }
+    if (decodeDataUri(value)) {
+      throw new Error(
+        "glTF parser requested an unauthorized embedded dependency",
+      );
+    }
+    const requestedUrl = new URL(value, request.contentUrl).href;
+    const canonicalUrl = allowedDependencies.external.get(requestedUrl);
+    if (!canonicalUrl) {
       throw new Error(
         `glTF parser requested an unauthorized dependency: ${value}`,
       );
     }
-    const data = await (options.fetchDependency ?? fetchOkBytes)(url);
+    const data = await (options.fetchDependency ?? fetchOkBytes)(canonicalUrl);
     return new Response(data, { status: 200 });
   };
   const parsed = (await parse(request.content.slice(0), GLTFLoader, {
@@ -1205,7 +1446,7 @@ export const decodeTileContent = async (
   })) as unknown as ParsedGltf;
 
   const sceneTransform = multiplyMat4(
-    composeSceneTransform(request.ecefToScene, request.accumulatedTransform),
+    composeSceneTransform(request.tilesetToScene, request.accumulatedTransform),
     Y_UP_TO_Z_UP,
   );
   const pending = applySceneRtc(parsed, sceneTransform);

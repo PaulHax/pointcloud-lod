@@ -212,6 +212,28 @@ const hasExactCpuAlphaSampler = (
   return (minFilter === 9728 || minFilter === 9729) && minFilter === magFilter;
 };
 
+const vtkSampler = (sampler: DecodedTexture["sampler"]) => ({
+  magFilter: sampler.magFilter === 9728 ? "nearest" : "linear",
+  minFilter: {
+    9728: "nearest",
+    9729: "linear",
+    9984: "nearest-mipmap-nearest",
+    9985: "linear-mipmap-nearest",
+    9986: "nearest-mipmap-linear",
+    9987: "linear-mipmap-linear",
+  }[sampler.minFilter],
+  wrapS: {
+    33071: "clamp-to-edge",
+    33648: "mirrored-repeat",
+    10497: "repeat",
+  }[sampler.wrapS],
+  wrapT: {
+    33071: "clamp-to-edge",
+    33648: "mirrored-repeat",
+    10497: "repeat",
+  }[sampler.wrapT],
+});
+
 const actualGeometryBytes = (content: DecodedTileContent): number => {
   let bytes = 0;
   for (const primitive of content.primitives) {
@@ -435,7 +457,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
   const createTexture = (decoded: DecodedTexture): any => {
     const texture = vtkTexture.newInstance();
     try {
-      texture.setSampler(decoded.sampler);
+      texture.setSampler(vtkSampler(decoded.sampler));
       texture.setFlipY(false);
       if (decoded.kind === "compressed") {
         texture.setCompressedData({
@@ -672,7 +694,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
       const reusable = pooled.get(id);
       if (reusable) {
         // Tile ids are content-currency keys within one adapter. Endpoint,
-        // revision, ECEF, and capability changes clear the whole adapter, so a
+        // revision, placement, and capability changes clear the whole adapter, so a
         // pooled id is reusable even when ContentQueue had to re-decode a new
         // JS payload object after eviction.
         try {

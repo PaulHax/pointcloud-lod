@@ -27,10 +27,10 @@ export interface DecodeWasmUrls {
 }
 
 export interface SerializableSampler {
-  magFilter: number;
-  minFilter: number;
-  wrapS: number;
-  wrapT: number;
+  magFilter: 9728 | 9729;
+  minFilter: 9728 | 9729 | 9984 | 9985 | 9986 | 9987;
+  wrapS: 33071 | 33648 | 10497;
+  wrapT: 33071 | 33648 | 10497;
 }
 
 export interface SerializableMaterial {
@@ -128,7 +128,7 @@ export interface DecodeTileRequest {
   dependencyRootUrl?: string;
   revision: string;
   accumulatedTransform: Mat4;
-  ecefToScene: Mat4;
+  tilesetToScene: Mat4;
   textureCapabilities: TextureCapabilities;
   wasm?: DecodeWasmUrls;
 }

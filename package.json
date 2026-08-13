@@ -1,8 +1,9 @@
 {
   "name": "pointcloud-lod",
   "version": "0.0.0-development",
-  "description": "Octree LOD point-cloud streaming for vtk.js",
+  "description": "Governed point-cloud and 3D Tiles streaming for vtk.js",
   "keywords": [
+    "3d-tiles",
     "copc",
     "lod",
     "octree",

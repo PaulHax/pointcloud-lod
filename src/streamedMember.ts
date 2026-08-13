@@ -1,6 +1,6 @@
 import type { CameraView, Mat16 } from "./camera";
 import type { MemoryPool } from "./memoryPool";
-import type { SceneEnuPoint } from "./frames";
+import type { ScenePoint } from "./frames";
 import type { SubmissionScheduler } from "./submissionScheduler";
 import type {
   DecodeWorkerPoolHandle,
@@ -102,11 +102,11 @@ export type MemberPickResult =
        */
       readonly rayDepth: number;
       /**
-       * The hit in canonical scene ENU — NOT `origin + direction * rayDepth`
+       * The hit in canonical scene coordinates — NOT `origin + direction * rayDepth`
        * whenever the member draws in a transformed frame (terrain vertical
-       * exaggeration). This is the value the app may store.
+       * exaggeration). This is the value the host may store.
        */
-      readonly scenePoint: SceneEnuPoint;
+      readonly scenePoint: ScenePoint;
       readonly distancePx: number;
     }
   | { readonly status: "miss" };
