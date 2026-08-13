@@ -17,10 +17,6 @@
 
 import "@kitware/vtk.js/Rendering/Profiles/Geometry";
 import vtkFullScreenRenderWindow from "@kitware/vtk.js/Rendering/Misc/FullScreenRenderWindow";
-import vtkInteractorStyleManipulator from "@kitware/vtk.js/Interaction/Style/InteractorStyleManipulator";
-import vtkMouseCameraTrackballPanManipulator from "@kitware/vtk.js/Interaction/Manipulators/MouseCameraTrackballPanManipulator";
-import vtkMouseCameraTrackballRotateManipulator from "@kitware/vtk.js/Interaction/Manipulators/MouseCameraTrackballRotateManipulator";
-import vtkMouseCameraTrackballZoomManipulator from "@kitware/vtk.js/Interaction/Manipulators/MouseCameraTrackballZoomManipulator";
 import { getCompressedTextureCapabilities } from "@kitware/vtk.js/Rendering/OpenGL/Texture/compressedFormats";
 
 import {
@@ -31,6 +27,7 @@ import {
   type StreamedSceneCoordinator,
   type TextureCapabilities,
 } from "../../../src";
+import { WORLD_UP, installCameraControls } from "./cameraControls";
 import { createDecodeWorkers } from "./decodeAssets";
 
 export type SceneHost = {
@@ -115,20 +112,25 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
   const interactor = renderWindow.getInteractor();
   const camera = renderer.getActiveCamera();
 
-  const style = vtkInteractorStyleManipulator.newInstance();
-  style.addMouseManipulator(
-    vtkMouseCameraTrackballRotateManipulator.newInstance({ button: 1 }),
-  );
-  style.addMouseManipulator(
-    vtkMouseCameraTrackballPanManipulator.newInstance({ button: 2 }),
-  );
-  style.addMouseManipulator(
-    vtkMouseCameraTrackballZoomManipulator.newInstance({
-      scrollEnabled: true,
-      button: 3,
-    }),
-  );
-  interactor.setInteractorStyle(style);
+  /**
+   * Half the diagonal of what is drawn, which is what bounds how close the eye
+   * may dolly. A streamed scene has nothing in it when the controls are
+   * installed and grows with every tile, so this is read per gesture.
+   */
+  const sceneRadius = (): number | null => {
+    if (renderer.getActors().length === 0) return null;
+    const b = renderer.computeVisiblePropBounds() as number[];
+    const radius = Math.hypot(b[1]! - b[0]!, b[3]! - b[2]!, b[5]! - b[4]!) / 2;
+    return Number.isFinite(radius) && radius > 0 ? radius : null;
+  };
+
+  const style = installCameraControls({
+    interactor,
+    renderer,
+    viewer: container,
+    canvas: () => openGlRenderWindow.getCanvas(),
+    sceneRadius,
+  });
 
   const { capabilities, rendererName } = probeTextureCapabilities(
     openGlRenderWindow.getContext?.() ?? null,
@@ -290,7 +292,7 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
         y + distanceMeters * 0.7,
         z + distanceMeters * 0.45,
       );
-      camera.setViewUp(0, 0, 1);
+      camera.setViewUp(...WORLD_UP);
       refreshClippingRange();
       style.setCenterOfRotation(x, y, z);
       scheduleRender();
