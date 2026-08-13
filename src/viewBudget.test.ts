@@ -9,7 +9,7 @@ const inputs = (
 ): GovernorInputs => ({
   projectedImportance: projectedImportance as Importance,
   qualityDemand,
-  workPending: false,
+  work: { operations: 0, progressSerial: 0 },
   physicalTileOperations: 0,
   physicalHierarchyOperations: 0,
   residentBytes: 0,

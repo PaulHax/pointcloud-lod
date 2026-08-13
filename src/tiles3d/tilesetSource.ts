@@ -159,10 +159,10 @@ const affineMatrix = (value: unknown, path: string): readonly number[] => {
   if (value === undefined) return IDENTITY;
   const matrix = finiteArray(value, 16, path);
   if (
-    matrix[3] !== 0 ||
-    matrix[7] !== 0 ||
-    matrix[11] !== 0 ||
-    matrix[15] !== 1
+    Math.abs(matrix[3]!) > 1e-12 ||
+    Math.abs(matrix[7]!) > 1e-12 ||
+    Math.abs(matrix[11]!) > 1e-12 ||
+    Math.abs(matrix[15]! - 1) > 1e-12
   ) {
     throw new TilesetValidationError(
       path,
@@ -355,6 +355,7 @@ const parseTile = (
   path: string,
   id: string,
   parentTransform: readonly number[],
+  inheritedRefine: "REPLACE" | undefined,
   context: ParseContext,
 ): TilesetTile => {
   const raw = objectAt(value, path);
@@ -367,7 +368,8 @@ const parseTile = (
   if ("contents" in raw) {
     throw new TilesetUnsupportedError("contents", `${path}.contents`);
   }
-  if (raw.refine !== "REPLACE") {
+  const refine = raw.refine ?? inheritedRefine;
+  if (refine !== "REPLACE") {
     throw new TilesetValidationError(`${path}.refine`, 'expected "REPLACE"');
   }
 
@@ -417,6 +419,7 @@ const parseTile = (
         `${path}.children[${index}]`,
         `${id}/${index}`,
         worldTransform,
+        refine,
         context,
       ),
     );
@@ -447,7 +450,14 @@ export const parseTileset = (
     tiles: [],
     tileById: new Map(),
   };
-  const root = parseTile(raw.root, "root", "root", IDENTITY, context);
+  const root = parseTile(
+    raw.root,
+    "root",
+    "root",
+    IDENTITY,
+    undefined,
+    context,
+  );
   return Object.freeze({
     endpoint,
     tilesetUrl: `${endpoint}/tileset.json`,

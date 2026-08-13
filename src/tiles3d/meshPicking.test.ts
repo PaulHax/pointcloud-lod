@@ -42,6 +42,50 @@ describe("submitted mesh picking", () => {
     });
   });
 
+  it("rejects MASK holes and treats nearer compressed alpha as unavailable", () => {
+    const masked: SubmittedMeshTile = {
+      ...tile("masked", 0),
+      primitives: [
+        {
+          ...tile("masked", 0).primitives[0]!,
+          uvs: new Float32Array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]),
+          alphaMask: {
+            kind: "known",
+            factorAlpha: 1,
+            cutoff: 0.5,
+            texture: {
+              width: 1,
+              height: 1,
+              alpha: new Uint8Array([0]),
+              sampler: {
+                magFilter: 9729,
+                minFilter: 9729,
+                wrapS: 33071,
+                wrapT: 33071,
+              },
+            },
+          },
+        },
+      ],
+    };
+    expect(pickSubmittedTriangles(view, 50, 50, [masked])).toEqual({
+      status: "miss",
+    });
+
+    const unknown: SubmittedMeshTile = {
+      ...tile("unknown", 0),
+      primitives: [
+        {
+          ...tile("unknown", 0).primitives[0]!,
+          alphaMask: { kind: "unknown" },
+        },
+      ],
+    };
+    expect(
+      pickSubmittedTriangles(view, 50, 50, [tile("behind", 1), unknown]),
+    ).toBeNull();
+  });
+
   it("uses indexed and unindexed triangles and applies the live anchor matrix", () => {
     const translated: SubmittedMeshTile = {
       ...tile("translated", 0),
@@ -81,7 +125,9 @@ describe("submitted mesh picking", () => {
       scenePoint: [0, 0, 3],
     });
     // ...but the source geometry really sits at z=1, and that is what is reported.
-    expect((composed as unknown as { scenePoint: number[] }).scenePoint[2]).toBeCloseTo(1);
+    expect(
+      (composed as unknown as { scenePoint: number[] }).scenePoint[2],
+    ).toBeCloseTo(1);
   });
 
   it("reports the unexaggerated point through the pick set's placement", () => {

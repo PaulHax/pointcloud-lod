@@ -8,6 +8,7 @@ import {
   composeSceneTransform,
   flattenPrimitiveToRtc,
   multiplyMat4,
+  Y_UP_TO_Z_UP,
   type Mat4,
   type RtcPrimitiveResult,
 } from "../rtc";
@@ -1203,9 +1204,9 @@ export const decodeTileContent = async (
     },
   })) as unknown as ParsedGltf;
 
-  const sceneTransform = composeSceneTransform(
-    request.ecefToScene,
-    request.accumulatedTransform,
+  const sceneTransform = multiplyMat4(
+    composeSceneTransform(request.ecefToScene, request.accumulatedTransform),
+    Y_UP_TO_Z_UP,
   );
   const pending = applySceneRtc(parsed, sceneTransform);
   const origin = commonOrigin(pending);

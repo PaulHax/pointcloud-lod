@@ -65,6 +65,8 @@ export type Tiles3dMemberStats = {
   readonly memoryConstrained: boolean;
   readonly selectedTiles: number;
   readonly requestedTiles: number;
+  /** Traversal passes, exposed so hosts can verify stationary frame idempotence. */
+  readonly selectionPasses: number;
   readonly errorCount: number;
   readonly lastError: string | null;
   readonly queue: {

@@ -80,16 +80,13 @@ describe("scene placement", () => {
     }
   });
 
-  it("rotates Y-up glTF content into the Z-up scene frame", () => {
-    // A point one metre above the ellipsoid at the origin, stated the way 3D
-    // Tiles glTF content states it: Y is up, and +Z runs south.
+  it("places ECEF tile coordinates into the Z-up scene frame", () => {
     const ecef = wgs84ToEcef(
       ROTTERDAM.longitude,
       ROTTERDAM.latitude,
       ROTTERDAM.napZeroHeight + 1,
     );
-    const yUp: [number, number, number] = [ecef[0], ecef[2], -ecef[1]];
-    const placed = transformPoint(contentToScene(ROTTERDAM), yUp);
+    const placed = transformPoint(contentToScene(ROTTERDAM), ecef);
     expect(placed[0]).toBeCloseTo(0, 6);
     expect(placed[1]).toBeCloseTo(0, 6);
     expect(placed[2]).toBeCloseTo(1, 6);

@@ -17,7 +17,11 @@ import type {
   DecodedTexture,
   DecodedTileContent,
 } from "./decode";
-import type { SubmittedMeshPrimitive, SubmittedMeshTile } from "./meshPicking";
+import type {
+  PickAlphaTexture,
+  SubmittedMeshPrimitive,
+  SubmittedMeshTile,
+} from "./meshPicking";
 
 export type MeshAdapterOptions = {
   readonly renderer: {
@@ -81,6 +85,14 @@ export type MeshAdapter = {
     onSubmitted?: () => void,
     replacementIds?: readonly string[],
   ): MeshSubmitOutcome;
+  submitTileGroup(
+    entries: readonly {
+      readonly id: string;
+      readonly content: DecodedTileContent;
+      readonly onSubmitted?: () => void;
+    }[],
+    replacementIds: readonly string[],
+  ): MeshSubmitOutcome;
   cancelTile(id: string): boolean;
   retireTile(id: string): boolean;
   setDrawnTiles(ids: readonly string[]): void;
@@ -126,6 +138,9 @@ type PendingTile = {
   remainingJobs: number;
   pendingBytes: number;
   cancelled: boolean;
+  ready: boolean;
+  finishBarrier?: () => void;
+  groupError?: (error: unknown) => void;
 };
 
 type VtkShaderReplacement = {
@@ -179,6 +194,24 @@ const report = (
   }
 };
 
+const rgbaAlphaIsUniform = (
+  texture: Extract<DecodedTexture, { kind: "rgba" }>,
+): boolean => {
+  const first = texture.rgba[3];
+  for (let index = 7; index < texture.rgba.length; index += 4) {
+    if (texture.rgba[index] !== first) return false;
+  }
+  return true;
+};
+
+const hasExactCpuAlphaSampler = (
+  texture: Extract<DecodedTexture, { kind: "rgba" }>,
+): boolean => {
+  if (rgbaAlphaIsUniform(texture)) return true;
+  const { magFilter, minFilter } = texture.sampler;
+  return (minFilter === 9728 || minFilter === 9729) && minFilter === magFilter;
+};
+
 const actualGeometryBytes = (content: DecodedTileContent): number => {
   let bytes = 0;
   for (const primitive of content.primitives) {
@@ -191,6 +224,20 @@ const actualGeometryBytes = (content: DecodedTileContent): number => {
       bytes += triangles * 9 * Float32Array.BYTES_PER_ELEMENT;
     if (primitive.uvs) bytes += triangles * 6 * Float32Array.BYTES_PER_ELEMENT;
     bytes += triangles * 4 * Uint32Array.BYTES_PER_ELEMENT;
+  }
+  const retainedAlpha = new Set<DecodedTexture>();
+  for (const primitive of content.primitives) {
+    const texture = primitive.material.baseColorTexture;
+    if (
+      primitive.material.raw.alphaMode === "MASK" &&
+      primitive.uvs &&
+      texture?.kind === "rgba" &&
+      !retainedAlpha.has(texture) &&
+      hasExactCpuAlphaSampler(texture)
+    ) {
+      retainedAlpha.add(texture);
+      bytes += texture.width * texture.height;
+    }
   }
   return bytes;
 };
@@ -341,6 +388,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
   let drawn = new Set<string>();
   let logicalGeometryUploadBytes = 0;
   let logicalTextureUploadBytes = 0;
+  const budgetPreapproved = new Set<string>();
 
   const tileMatrix = (origin: readonly [number, number, number]): number[] => {
     const result = Array.from(baseMatrix);
@@ -419,6 +467,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
     tile: TileResources,
     primitive: DecodedPrimitive,
     textures: Map<DecodedTexture, any>,
+    pickAlphaTextures: Map<DecodedTexture, PickAlphaTexture>,
   ): void => {
     let polyData: any;
     let mapper: any;
@@ -483,6 +532,23 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
       const submittedPrimitive: SubmittedMeshPrimitive = {
         positions: primitive.positions,
         ...(primitive.indices ? { indices: primitive.indices } : {}),
+        ...(primitive.uvs ? { uvs: primitive.uvs } : {}),
+        ...(authored.alphaMode !== "MASK"
+          ? {}
+          : decodedTexture &&
+              primitive.uvs &&
+              !pickAlphaTextures.has(decodedTexture)
+            ? { alphaMask: { kind: "unknown" as const } }
+            : {
+                alphaMask: {
+                  kind: "known" as const,
+                  factorAlpha: factor[3],
+                  cutoff: authored.alphaCutoff,
+                  ...(decodedTexture && primitive.uvs
+                    ? { texture: pickAlphaTextures.get(decodedTexture) }
+                    : {}),
+                },
+              }),
       };
       const resources = {
         actor,
@@ -597,7 +663,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
     options.scheduleRender();
   };
 
-  return {
+  const api: MeshAdapter = {
     submitTile(id, content, onSubmitted, replacementIds = []) {
       if (disposed || failed.has(id)) return "failed";
       if (pending.has(id) || submitted.has(id)) return "queued";
@@ -646,8 +712,9 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         0,
       );
       if (
+        !budgetPreapproved.has(id) &&
         reservedBytes() + geometryBytes + textureBytes - replacementBytes >
-        resourceCeilingBytes
+          resourceCeilingBytes
       ) {
         return "budget-blocked";
       }
@@ -700,17 +767,42 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         remainingJobs: 0,
         pendingBytes: geometryBytes + textureBytes,
         cancelled: false,
+        ready: false,
         ...(onSubmitted ? { onSubmitted } : {}),
       };
       pending.set(id, entry);
       for (const replacementId of normalizedReplacements)
         replacementClaims.set(replacementId, id);
       const textures = new Map<DecodedTexture, any>();
+      const pickAlphaTextures = new Map<DecodedTexture, PickAlphaTexture>();
       const decodedTextures: DecodedTexture[] = [];
       for (const primitive of content.primitives) {
         const texture = primitive.material.baseColorTexture;
         if (texture && !decodedTextures.includes(texture))
           decodedTextures.push(texture);
+        if (
+          primitive.material.raw.alphaMode === "MASK" &&
+          primitive.uvs &&
+          texture?.kind === "rgba" &&
+          !pickAlphaTextures.has(texture)
+        ) {
+          const alpha = new Uint8Array(texture.width * texture.height);
+          for (let pixel = 0; pixel < alpha.length; pixel += 1)
+            alpha[pixel] = texture.rgba[pixel * 4 + 3]!;
+          // A pick has one cursor sample, not the rasterizer's pixel
+          // derivatives, so it cannot know whether minification or
+          // magnification applies or which mip levels WebGL blends. Retain an
+          // exact CPU sampler only when both paths are the same non-mip base
+          // filter. A uniform alpha plane is exact under every sampler.
+          if (hasExactCpuAlphaSampler(texture)) {
+            pickAlphaTextures.set(texture, {
+              width: texture.width,
+              height: texture.height,
+              alpha,
+              sampler: texture.sampler,
+            });
+          }
+        }
       }
       const enqueue = (bytes: number, run: () => void): void => {
         entry.remainingJobs += 1;
@@ -721,9 +813,17 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
             run();
             entry.remainingJobs -= 1;
             entry.pendingBytes -= bytes;
-            if (entry.remainingJobs === 0) finish(entry);
+            if (entry.remainingJobs === 0) {
+              entry.ready = true;
+              if (entry.finishBarrier) entry.finishBarrier();
+              else finish(entry);
+            }
           },
           onError: (error) => {
+            if (entry.groupError) {
+              entry.groupError(error);
+              return;
+            }
             cancelPending(entry);
             failed.add(entry.id);
             report(options.onError, error);
@@ -771,6 +871,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
                 resources,
                 primitiveChunk(primitive, first, count),
                 textures,
+                pickAlphaTextures,
               ),
             );
           }
@@ -783,6 +884,97 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
       }
       if (entry.remainingJobs === 0) finish(entry);
       workRevision += 1;
+      return "queued";
+    },
+
+    submitTileGroup(entries, replacementIds) {
+      if (disposed || entries.length === 0) return "failed";
+      const ids = new Set(entries.map((entry) => entry.id));
+      if (
+        ids.size !== entries.length ||
+        entries.some(
+          (entry) =>
+            typeof entry.id !== "string" ||
+            entry.id.length === 0 ||
+            pending.has(entry.id) ||
+            submitted.has(entry.id) ||
+            failed.has(entry.id),
+        )
+      ) {
+        return "failed";
+      }
+      const normalizedReplacements = [...new Set(replacementIds)].filter(
+        (id) => submitted.has(id) && !replacementClaims.has(id),
+      );
+      const replacementBytes = normalizedReplacements.reduce((sum, id) => {
+        const tile = submitted.get(id)!;
+        return sum + tile.geometryBytes + tile.textureBytes;
+      }, 0);
+      const groupBytes = entries.reduce(
+        (sum, entry) =>
+          sum +
+          actualGeometryBytes(entry.content) +
+          actualTextureBytes(entry.content),
+        0,
+      );
+      trimPool(groupBytes);
+      if (
+        reservedBytes() + groupBytes - replacementBytes >
+        resourceCeilingBytes
+      ) {
+        return "budget-blocked";
+      }
+
+      for (const { id } of entries) budgetPreapproved.add(id);
+      const admitted: string[] = [];
+      try {
+        for (let index = 0; index < entries.length; index += 1) {
+          const entry = entries[index]!;
+          const outcome = api.submitTile(
+            entry.id,
+            entry.content,
+            entry.onSubmitted,
+            index === entries.length - 1 ? normalizedReplacements : [],
+          );
+          if (outcome !== "queued") {
+            for (const id of admitted) {
+              if (!api.cancelTile(id)) api.retireTile(id);
+            }
+            return outcome;
+          }
+          admitted.push(entry.id);
+        }
+        const groupEntries = admitted.map((id) => pending.get(id)!);
+        let groupFailed = false;
+        const cancelGroup = (error: unknown): void => {
+          if (groupFailed) return;
+          groupFailed = true;
+          for (const entry of groupEntries) cancelPending(entry);
+          for (const { id } of entries) failed.add(id);
+          report(options.onError, error);
+        };
+        const finishGroup = (): void => {
+          if (groupFailed || groupEntries.some((entry) => !entry.ready)) return;
+          // The replacement remains attached until every child resource is
+          // ready. Then the displayed frontier swaps synchronously: no paint
+          // can observe the gap, and replacement residency is released before
+          // any child becomes submitted.
+          for (const id of normalizedReplacements) {
+            const tile = submitted.get(id);
+            if (!tile) continue;
+            submitted.delete(id);
+            drawn.delete(id);
+            release(tile);
+          }
+          for (const entry of groupEntries) finish(entry);
+        };
+        for (const entry of groupEntries) {
+          entry.finishBarrier = finishGroup;
+          entry.groupError = cancelGroup;
+        }
+      } finally {
+        for (const { id } of entries) budgetPreapproved.delete(id);
+      }
       return "queued";
     },
 
@@ -995,4 +1187,5 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
       clearAll();
     },
   };
+  return api;
 };

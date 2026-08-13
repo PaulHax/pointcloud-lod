@@ -24,7 +24,7 @@ const makeMember = (overrides: Partial<GovernorInputs> = {}) => {
   const inputs: GovernorInputs = {
     projectedImportance: 1 as Importance,
     qualityDemand: 1,
-    workPending: false,
+    work: { operations: 0, progressSerial: 0 },
     physicalTileOperations: 0,
     physicalHierarchyOperations: 0,
     residentBytes: 0,
@@ -41,6 +41,7 @@ const makeMember = (overrides: Partial<GovernorInputs> = {}) => {
     beginInteraction: vi.fn<() => void>(),
     endInteraction: vi.fn<() => void>(),
     prepareFrame: vi.fn<() => void>(),
+    onStall: vi.fn<(error: Error) => void>(),
     governorInputs: () => inputs,
     applyAllocation: (allocation: Allocation) => allocations.push(allocation),
     pick: (): MemberPickResult => ({ status: "miss" }),
@@ -163,17 +164,24 @@ describe("createStreamedSceneCoordinator", () => {
       run: () => order.push("submission"),
     });
     registration.setCamera(VIEW);
+    registration.setCamera({ ...VIEW });
     registration.setModelMatrix(null);
+    registration.setModelMatrix(null);
+    registration.setDevicePixelRatio(2);
     registration.setDevicePixelRatio(2);
     registration.setConfig({ revision: "next" });
     coordinator.noteRenderedCameras(new Map([["renderer-a", VIEW]]));
     coordinator.beginInteraction();
     coordinator.endInteraction();
-    coordinator.prepareFrame();
+    coordinator.prepareFrame(1);
+    coordinator.prepareFrame(1);
     expect(order).toEqual(["member", "submission"]);
     expect(member.setCamera).toHaveBeenCalledWith(VIEW);
+    expect(member.setCamera).toHaveBeenCalledOnce();
     expect(member.setModelMatrix).toHaveBeenCalledWith(null);
+    expect(member.setModelMatrix).toHaveBeenCalledOnce();
     expect(member.setDevicePixelRatio).toHaveBeenCalledWith(2);
+    expect(member.setDevicePixelRatio).toHaveBeenCalledOnce();
     expect(member.setConfig).toHaveBeenCalledWith({ revision: "next" });
     expect(other.setCamera).not.toHaveBeenCalled();
     expect(other.setModelMatrix).not.toHaveBeenCalled();
@@ -202,13 +210,33 @@ describe("createStreamedSceneCoordinator", () => {
     coordinator.dispose();
   });
 
+  it("compares camera snapshots rather than aliases restated by the host", () => {
+    const coordinator = createStreamedSceneCoordinator({
+      scheduleRender: vi.fn(),
+      memory: createMemoryPool({ totalBytes: 300 }),
+    });
+    const member = makeMember();
+    const registration = coordinator.register(member);
+    const mutable = {
+      ...VIEW,
+      position: [...VIEW.position] as [number, number, number],
+      viewProj: Array.from(VIEW.viewProj) as Mat16,
+    };
+    registration.setCamera(mutable);
+    registration.setCamera(mutable);
+    mutable.position[0] = 1;
+    registration.setCamera(mutable);
+    expect(member.setCamera).toHaveBeenCalledTimes(2);
+    coordinator.dispose();
+  });
+
   it("propagates retry-aware member workPending through the coordinator context", () => {
     let workPending = true;
     const member = makeMember();
     member.governorInputs = () => ({
       projectedImportance: 1 as Importance,
       qualityDemand: 1,
-      workPending,
+      work: { operations: workPending ? 1 : 0, progressSerial: 0 },
       physicalTileOperations: 0,
       physicalHierarchyOperations: 0,
       residentBytes: 0,
@@ -230,13 +258,48 @@ describe("createStreamedSceneCoordinator", () => {
       memory: createMemoryPool({ totalBytes: 300 }),
     });
     coordinator.register(makeMember(), { qualityManaged: true });
-    coordinator.register(makeMember({ workPending: true }), {
-      qualityManaged: false,
-    });
+    coordinator.register(
+      makeMember({ work: { operations: 1, progressSerial: 0 } }),
+      { qualityManaged: false },
+    );
     expect(coordinator.stats().governor.activity).toMatchObject({
       workPending: true,
       measurementEligible: false,
     });
+  });
+
+  it("quarantines a member with unchanged progress without freezing the healthy view", () => {
+    let now = 0;
+    const hung = makeMember({
+      work: { operations: 1, progressSerial: 7 },
+      physicalTileOperations: 1,
+    });
+    const coordinator = createStreamedSceneCoordinator({
+      scheduleRender: vi.fn(),
+      memory: createMemoryPool({ totalBytes: 300 }),
+      stallWindowMs: 4_000,
+      now: () => now,
+    });
+    coordinator.register(makeMember(), {
+      id: "healthy",
+      qualityManaged: true,
+    });
+    coordinator.register(hung, { id: "hung", qualityManaged: false });
+    expect(coordinator.stats().governor.activity.measurementEligible).toBe(
+      false,
+    );
+
+    now = 4_001;
+    coordinator.context({}).onWorkChange?.();
+    expect(coordinator.stats()).toMatchObject({
+      stalledMembers: ["hung"],
+      governor: { activity: { measurementEligible: true, workPending: false } },
+    });
+    expect(hung.onStall).toHaveBeenCalledOnce();
+
+    coordinator.context({}).onWorkChange?.();
+    expect(hung.onStall).toHaveBeenCalledOnce();
+    coordinator.dispose();
   });
 
   it("shares one page pool across independent view coordinators", () => {

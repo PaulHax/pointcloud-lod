@@ -404,6 +404,53 @@ describe("vtk mesh adapter", () => {
     adapter.dispose();
   });
 
+  it("keeps MASK picking conservative when raster min/mag or mip sampling is unknowable", () => {
+    const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
+    const scheduler = createSubmissionScheduler({
+      scheduleRender: vi.fn(),
+      maxBytesPerFrame: 1024,
+    });
+    const adapter = createMeshAdapter({
+      renderer,
+      scheduleRender: vi.fn(),
+      submissions: scheduler,
+    });
+    const texture = {
+      kind: "rgba" as const,
+      rgba: new Uint8Array([255, 255, 255, 0, 255, 255, 255, 255]),
+      width: 2,
+      height: 1,
+      colorSpace: "srgb" as const,
+      sampler: {
+        magFilter: 9729,
+        minFilter: 9987,
+        wrapS: 33071,
+        wrapT: 33071,
+      },
+    };
+    const masked = alphaContent("MASK", 0.5, 1);
+    masked.primitives[0]!.material.baseColorTexture = texture;
+    expect(adapter.submitTile("mipped", masked)).toBe("queued");
+    scheduler.prepareFrame();
+    adapter.setDrawnTiles(["mipped"]);
+    expect(adapter.submittedTiles()[0]?.primitives[0]?.alphaMask).toEqual({
+      kind: "unknown",
+    });
+    // The alpha plane is discarded and therefore is not charged as residency.
+    expect(adapter.stats().residentGeometryBytes).toBe(112);
+
+    adapter.clearTiles();
+    texture.sampler = { ...texture.sampler, minFilter: 9729 };
+    expect(adapter.submitTile("base-linear", masked)).toBe("queued");
+    scheduler.prepareFrame();
+    adapter.setDrawnTiles(["base-linear"]);
+    expect(adapter.submittedTiles()[0]?.primitives[0]?.alphaMask?.kind).toBe(
+      "known",
+    );
+    expect(adapter.stats().residentGeometryBytes).toBe(114);
+    adapter.dispose();
+  });
+
   it("maps an exact nearest+clamp sampler without broadening either axis or filter", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
     const scheduler = createSubmissionScheduler({

@@ -1,6 +1,6 @@
 import type { CameraView, Mat16 } from "./camera";
 import type { MemoryPool } from "./memoryPool";
-import type { Vec3 } from "./octree";
+import type { SceneEnuPoint } from "./frames";
 import type { SubmissionScheduler } from "./submissionScheduler";
 import type {
   DecodeWorkerPoolHandle,
@@ -67,13 +67,19 @@ export const importanceFromRootSseCssPx = (
   return Math.min(1, rootSseCssPx / refinementCutoffCssPx) as Importance;
 };
 
+export type OutstandingWork = {
+  /** Logical queued or in-flight operations still needed for convergence. */
+  readonly operations: number;
+  /** Monotonic evidence that work completed, failed, was evicted, or admitted. */
+  readonly progressSerial: number;
+};
+
 export type GovernorInputs = {
   /** Normalized [0, 1] share-of-view weight. Zero means culled. */
   readonly projectedImportance: Importance;
   /** Fraction of full member quality useful to the current view. */
   readonly qualityDemand: number;
-  /** Required fetch, decode, retry, or submission work has not drained. */
-  readonly workPending: boolean;
+  readonly work: OutstandingWork;
   readonly physicalTileOperations: number;
   readonly physicalHierarchyOperations: number;
   readonly residentBytes: number;
@@ -100,7 +106,7 @@ export type MemberPickResult =
        * whenever the member draws in a transformed frame (terrain vertical
        * exaggeration). This is the value the app may store.
        */
-      readonly scenePoint: Vec3;
+      readonly scenePoint: SceneEnuPoint;
       readonly distancePx: number;
     }
   | { readonly status: "miss" };
@@ -129,6 +135,8 @@ export interface StreamedMember {
   beginInteraction(): void;
   endInteraction(): void;
   prepareFrame(): void;
+  /** Coordinator-detected lack of progress; implementations may surface it. */
+  onStall?(error: Error): void;
   governorInputs(): GovernorInputs;
   applyAllocation(allocation: Allocation): void;
   pick(view: CameraView, cssX: number, cssY: number): MemberPickResult | null;

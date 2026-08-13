@@ -39,6 +39,10 @@ export type SceneHost = {
   /** Coalesced repaint request; the only way anything here paints. */
   scheduleRender(): void;
   cameraView(): CameraView;
+  /** Notified immediately before member preparation for the frame. */
+  onBeforeFrame(
+    listener: (view: CameraView, devicePixelRatio: number) => void,
+  ): void;
   /** Notified after every painted frame, with the camera that was drawn. */
   onFrame(listener: (view: CameraView) => void): void;
   /** Frame the camera on a scene-space sphere. */
@@ -143,7 +147,12 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
   let paints = 0;
   let lastPresentedAt: number | null = null;
   let presentationQueued = false;
+  let frameSerial = 0;
   const frameListeners: ((view: CameraView) => void)[] = [];
+  const beforeFrameListeners: ((
+    view: CameraView,
+    devicePixelRatio: number,
+  ) => void)[] = [];
   const renderedCameras = new Map<unknown, CameraView>();
 
   /**
@@ -165,7 +174,10 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
       // A gesture's own animation loop is already painting, and it drains
       // admission itself; a second paint here would double the drain.
       if (interactor.isAnimating()) return;
-      coordinator.prepareFrame();
+      const view = cameraView();
+      for (const listener of beforeFrameListeners)
+        listener(view, currentDevicePixelRatio);
+      coordinator.prepareFrame(++frameSerial);
       refreshClippingRange();
       paintStartedAt = performance.now();
       interactor.render();
@@ -257,7 +269,10 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
   interactor.onStartAnimation(() => coordinator.beginInteraction());
   interactor.onAnimation(() => {
     // Fires before the gesture frame paints, which is where its drain belongs.
-    coordinator.prepareFrame();
+    const view = cameraView();
+    for (const listener of beforeFrameListeners)
+      listener(view, currentDevicePixelRatio);
+    coordinator.prepareFrame(++frameSerial);
     refreshClippingRange();
     paintStartedAt = performance.now();
   });
@@ -279,6 +294,7 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
     rendererName,
     scheduleRender,
     cameraView,
+    onBeforeFrame: (listener) => beforeFrameListeners.push(listener),
     onFrame: (listener) => frameListeners.push(listener),
     lookAt(center, distanceMeters) {
       const [x, y, z] = center;

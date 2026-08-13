@@ -108,7 +108,52 @@ const authoredAlphaGlb = async (): Promise<ArrayBuffer> => {
   ) as ArrayBuffer;
 };
 
+const transformedPointGlb = async (): Promise<ArrayBuffer> => {
+  const document = new Document();
+  const buffer = document.createBuffer("transform-buffer");
+  const positions = document
+    .createAccessor("positions")
+    .setType("VEC3")
+    .setArray(new Float32Array([1, 2, 3, 1, 2, 3, 1, 2, 3]))
+    .setBuffer(buffer);
+  const primitive = document
+    .createPrimitive()
+    .setAttribute("POSITION", positions);
+  const mesh = document.createMesh("mesh").addPrimitive(primitive);
+  const node = document
+    .createNode("translated")
+    .setTranslation([10, 20, 30])
+    .setMesh(mesh);
+  document.createScene("scene").addChild(node);
+  const bytes = await new NodeIO().writeBinary(document);
+  return bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
+};
+
 describe("decoded tile contract", () => {
+  it("applies glTF nodes, then mandatory Y-up correction, then tile and scene transforms", async () => {
+    const result = await decodeTileContent(
+      {
+        ...(await request("level-0-root.glb")),
+        content: await transformedPointGlb(),
+        accumulatedTransform: [
+          1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 100, 200, 300, 1,
+        ],
+        ecefToScene: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1000, 2000, 3000, 1],
+      },
+      testOptions,
+    );
+    const primitive = result.primitives[0]!;
+    const absolute = primitive.positions
+      .slice(0, 3)
+      .map((value, axis) => value + result.origin[axis]!);
+    // [1,2,3] -> node [11,22,33] -> Y-up correction [11,-33,22]
+    // -> tile [111,167,322] -> scene [1111,2167,3322].
+    expect([...absolute]).toEqual([1111, 2167, 3322]);
+  });
+
   it("chooses only the explicit native-format priority, never auto", () => {
     expect(
       capabilityTarget(
