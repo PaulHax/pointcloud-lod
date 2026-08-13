@@ -329,7 +329,9 @@ removed.
 
 ### vtk.js examples
 
-The runnable app in [`examples/vtk`](./examples/vtk/) contains two examples:
+The runnable app in [`examples/vtk`](./examples/vtk/) contains four examples.
+Two use `createLodController` directly, which is all a single point cloud
+needs:
 
 - **Simple** (`/simple/`) is the integration starting point: one worker-backed
   COPC source, one fixed-budget controller, one renderer adapter, and the
@@ -339,6 +341,27 @@ The runnable app in [`examples/vtk`](./examples/vtk/) contains two examples:
 - **Complete** (`/`) demonstrates adaptive quality, fixed/adaptive presentation,
   custom point-cloud camera interaction, local telemetry, and the diagnostic
   hooks exercised by the browser suite.
+
+Two more use the member API — `createStreamedSceneCoordinator` with
+`createTiles3dMember` and `createPointCloudMember` — which is what a scene of
+more than one streamed dataset needs, and are the reference for it:
+
+- **Mesh** (`/mesh/`) streams 3D Tiles: every building in the Netherlands at
+  LoD2.2, live from [3DBAG](https://docs.3dbag.nl/) with no key.
+- **Combined** (`/combined/`) puts AHN4 lidar and 3DBAG buildings in one scene
+  sharing one memory pool, one submission scheduler and one view governor. Its
+  panel shows each member's claimed share of the view beside the quality the
+  governor gave it back, which is the only place that negotiation is visible.
+
+Both meet in a local ENU frame whose Z is NAP: the mesh arrives in ECEF and is
+placed by `ecefToScene`, the lidar arrives in RD New (EPSG:28992) and is placed
+by a model matrix, and `examples/vtk/scene/places.ts` derives both from one
+origin. Public data is rarely shaped the way a strict reader wants, and
+`examples/vtk/scene/` carries what that costs at the host boundary: resolving
+3DBAG's external tilesets on the `fetchTileset` seam, rotating bounding volumes
+into the frame its Y-up glTF content uses, and repairing colliding meshopt
+fallback-buffer offsets on the way past `fetchContent`. Each is commented where
+it lives.
 
 Both load either a local `.copc.laz` file (read through `Blob.slice()` in a
 source worker) or a COPC URL (HTTP Range from that worker), frame it
@@ -390,8 +413,10 @@ Install a vtk.js build containing `vtkPointGaussianMapper` as described in
 npm run example
 ```
 
-Vite serves the complete example at the printed root URL and the simple example
-at `/simple/`.
+Vite serves the complete example at the printed root URL, and the others at
+`/simple/`, `/mesh/` and `/combined/`. The streamed-scene pages decode in a
+classic worker built by `npm run build`, so build the package before serving
+them.
 
 If that vtk.js build is outside this package's `node_modules`, point the example
 at its ESM package directory:
@@ -400,7 +425,9 @@ at its ESM package directory:
 VTK_JS_DIR=/path/to/vtk-js/dist/esm npm run example
 ```
 
-A `?url=` query parameter loads a cloud on startup in either example. On the
+A `?place=` query parameter opens the mesh and combined examples on a named
+place. A `?url=` query parameter loads a cloud on startup in either point-cloud
+example. On the
 complete example, add `&telemetry=1` to begin a local performance trace before
 that source opens.
 
