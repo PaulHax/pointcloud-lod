@@ -96,7 +96,13 @@ const buildingsConfig = (
   },
 });
 
-const loadPlace = (next: Place): void => {
+/**
+ * Reloads the member, because the streamed radius is baked into the resolved
+ * document and the revision that keys it. Only a change of place reframes:
+ * widening the radius from where you are standing should bring more buildings
+ * to the same view, not move you.
+ */
+const loadPlace = (next: Place, reframe: boolean): void => {
   place = next;
   loadRevision += 1;
   registration?.release();
@@ -114,7 +120,7 @@ const loadPlace = (next: Place): void => {
     qualityManaged: true,
   });
   registration.setCamera(host.cameraView());
-  host.lookAt([0, 0, 0], place.viewDistance);
+  if (reframe) host.lookAt([0, 0, 0], place.viewDistance);
 };
 
 /** One line of state, rather than whichever callback fired last. */
@@ -138,13 +144,13 @@ placeSelect.addEventListener("change", () => {
   const next = PLACES.find(
     (candidate) => candidate.label === placeSelect.value,
   );
-  if (next) loadPlace(next);
+  if (next) loadPlace(next, true);
 });
 
 radiusInput.addEventListener("input", () => {
   radiusValue.textContent = `${(radiusMeters() / 1000).toFixed(1)} km`;
 });
-radiusInput.addEventListener("change", () => loadPlace(place));
+radiusInput.addEventListener("change", () => loadPlace(place, false));
 
 sseInput.addEventListener("input", () => {
   sseValue.textContent = `${maximumSse()} px`;
@@ -188,7 +194,7 @@ const requested = PLACES.find((candidate) =>
 placeSelect.value = (requested ?? PLACES[0]!).label;
 radiusValue.textContent = `${(radiusMeters() / 1000).toFixed(1)} km`;
 sseValue.textContent = `${maximumSse()} px`;
-loadPlace(requested ?? PLACES[0]!);
+loadPlace(requested ?? PLACES[0]!, true);
 
 // Driving handles for browser checks: they move the camera and read the panel
 // the way a user would, rather than reaching past the page into the library.
@@ -207,7 +213,7 @@ Object.assign(window, {
       const next = PLACES.find((candidate) =>
         candidate.label.startsWith(label),
       );
-      if (next) loadPlace(next);
+      if (next) loadPlace(next, true);
     },
   },
 });
