@@ -1,0 +1,16 @@
+Orientation Test
+
+Copyright 2018 Analytical Graphics, Inc.
+
+Licensed under the Creative Commons Attribution 4.0 International License:
+https://creativecommons.org/licenses/by/4.0/
+
+Attribution: Mesh and textures by Ed Mackey. The fixture is redistributed from
+KhronosGroup/glTF-Sample-Assets, model `OrientationTest`, revision
+2bac6f8c57bf471df0d2a1e8a8ec023c7801dddf.
+
+Source:
+https://github.com/KhronosGroup/glTF-Sample-Assets/tree/2bac6f8c57bf471df0d2a1e8a8ec023c7801dddf/Models/OrientationTest
+
+The upstream model metadata describes this asset as a test of node translations,
+quaternion rotations, and matrix rotations. This checked-in GLB is unmodified.

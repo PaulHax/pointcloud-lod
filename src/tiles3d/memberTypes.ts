@@ -1,5 +1,6 @@
 import type { TilesetFetch } from "./tilesetSource";
 import type { ContentQueueFetch } from "./contentQueue";
+import type { SubtreeFetch } from "./subtreeStore";
 import type { DecodeWasmUrls } from "./decode";
 import type { Allocation } from "../streamedMember";
 import type { MeshAdapterStats } from "./meshAdapter";
@@ -8,6 +9,7 @@ export const DEFAULT_MAXIMUM_SCREEN_SPACE_ERROR_PX = 16;
 export const DEFAULT_TILES3D_CACHE_BYTES = 128 * 1024 * 1024;
 export const DEFAULT_TILES3D_MIN_CONCURRENCY = 1;
 export const DEFAULT_TILES3D_MAX_CONCURRENCY = 4;
+export const DEFAULT_TILES3D_SUBTREE_CACHE_BYTES = 8 * 1024 * 1024;
 export const DEFAULT_VERTICAL_EXAGGERATION = 1;
 export const DEFAULT_VERTICAL_PIVOT_Z = 0;
 
@@ -28,6 +30,7 @@ export type Tiles3dMemberConfig = {
   readonly retryBackoffMs?: (failedAttempt: number) => number;
   readonly fetchTileset?: TilesetFetch;
   readonly fetchContent?: ContentQueueFetch;
+  readonly fetchSubtree?: SubtreeFetch;
   readonly onError?: (error: unknown) => void;
 };
 
@@ -73,6 +76,26 @@ export type Tiles3dMemberStats = {
     readonly cacheMisses: number;
     readonly cacheEvictions: number;
     readonly cacheRevisits: number;
+    readonly entries: readonly {
+      readonly id: string;
+      readonly url: string;
+      readonly status: "queued" | "fetching" | "retrying" | "ready" | "failed";
+      readonly attempt: number;
+    }[];
+  } | null;
+  readonly subtrees: {
+    readonly selected: number;
+    readonly active: number;
+    readonly queued: number;
+    readonly retrying: number;
+    readonly ready: number;
+    readonly failed: number;
+    readonly cached: number;
+    readonly cachedBytes: number;
+    readonly workPending: boolean;
+    readonly cacheHits: number;
+    readonly cacheMisses: number;
+    readonly cacheEvictions: number;
   } | null;
   readonly decode: ReturnType<
     NonNullable<import("./decode").DecodeWorkerPoolHandle["stats"]>

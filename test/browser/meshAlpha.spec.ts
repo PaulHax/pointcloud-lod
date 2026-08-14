@@ -95,6 +95,13 @@ describe("vtk glTF alpha realization", () => {
         }
 
         const image = await page.locator("canvas").screenshot();
+        const stats = JSON.parse(
+          (await page.locator("html").getAttribute("data-stats")) ?? "null",
+        );
+        const adapterErrors = JSON.parse(
+          (await page.locator("html").getAttribute("data-adapter-errors")) ??
+            "null",
+        );
         const decoded = await sharp(image)
           .ensureAlpha()
           .raw()
@@ -111,6 +118,15 @@ describe("vtk glTF alpha realization", () => {
           72,
           24,
         );
+
+        expect(browserErrors).toEqual([]);
+        expect(adapterErrors).toEqual([]);
+        expect(stats).toMatchObject({
+          pendingTiles: 0,
+          submittedTiles: 2,
+          drawnTiles: 2,
+          drawnActors: 2,
+        });
 
         if (alphaMode === "MASK") {
           expect(left[2]).toBeGreaterThan(220);
@@ -129,4 +145,60 @@ describe("vtk glTF alpha realization", () => {
       }
     },
   );
+
+  it("renders KHR_materials_unlit under a light that leaves the equivalent lit primitive dark", async () => {
+    const page = await browser.newPage({ viewport: { width: 96, height: 48 } });
+    const browserErrors: string[] = [];
+    page.on("pageerror", (error) => browserErrors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") browserErrors.push(message.text());
+    });
+    try {
+      await page.goto(`${server.origin}/fixture/index.html?mode=UNLIT`);
+      await page
+        .locator("html[data-ready='true']")
+        .waitFor({ timeout: 10_000 });
+      const image = await page.locator("canvas").screenshot();
+      const stats = JSON.parse(
+        (await page.locator("html").getAttribute("data-stats")) ?? "null",
+      );
+      const adapterErrors = JSON.parse(
+        (await page.locator("html").getAttribute("data-adapter-errors")) ??
+          "null",
+      );
+      const decoded = await sharp(image)
+        .ensureAlpha()
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+      const left = patchMedian(
+        new Uint8Array(decoded.data),
+        decoded.info.width,
+        24,
+        24,
+      );
+      const right = patchMedian(
+        new Uint8Array(decoded.data),
+        decoded.info.width,
+        72,
+        24,
+      );
+
+      expect(browserErrors).toEqual([]);
+      expect(adapterErrors).toEqual([]);
+      expect(stats).toMatchObject({
+        pendingTiles: 0,
+        submittedTiles: 2,
+        drawnTiles: 2,
+        drawnActors: 3,
+      });
+      expect(left[0]).toBeGreaterThan(220);
+      expect(left[1]).toBeLessThan(30);
+      expect(left[2]).toBeLessThan(30);
+      expect(right[0]).toBeLessThan(30);
+      expect(right[1]).toBeLessThan(30);
+      expect(right[2]).toBeLessThan(30);
+    } finally {
+      await page.close();
+    }
+  });
 });

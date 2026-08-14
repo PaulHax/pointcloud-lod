@@ -5,6 +5,7 @@ import {
   type ContentQueueClock,
   type TileContentRequest,
 } from "./contentQueue";
+import { TileUnsupportedExtensionError } from "./decode";
 
 type Decoded = { readonly id: string; readonly bytes: number };
 
@@ -338,6 +339,33 @@ describe("content queue", () => {
     expect(onError.mock.calls[0]?.[1]).toMatchObject({
       name: "ContentQueueDecodeError",
       id: "invalid",
+    });
+  });
+
+  it("wraps typed tile decode failures without flattening their cause", async () => {
+    const onError = vi.fn();
+    const typed = new TileUnsupportedExtensionError(
+      "/tiles/meshopt.glb",
+      "EXT_meshopt_compression",
+    );
+    const { queue } = makeQueue({
+      decode: async () => {
+        throw typed;
+      },
+      maxAttempts: 1,
+      onError,
+    });
+    queue.setSelection([request("meshopt")]);
+    await flush();
+
+    const error = onError.mock.calls[0]?.[1];
+    expect(error).toMatchObject({ name: "ContentQueueDecodeError" });
+    expect(error.cause).toBe(typed);
+    expect(error.cause).toMatchObject({
+      name: "TileUnsupportedExtensionError",
+      tileUri: "/tiles/meshopt.glb",
+      stage: "profile",
+      extension: "EXT_meshopt_compression",
     });
   });
 

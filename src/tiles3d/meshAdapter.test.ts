@@ -39,6 +39,7 @@ const content = (texture: DecodedTexture = compressed): DecodedTileContent => ({
         alphaMode: "BLEND",
         alphaCutoff: 0.5,
         doubleSided: false,
+        unlit: false,
         metallicFactor: 1,
         roughnessFactor: 1,
         emissiveFactor: [0, 0, 0],
@@ -104,6 +105,7 @@ describe("vtk mesh adapter", () => {
     expect(actorInstances.every((actor) => actor.visibility)).toBe(true);
     expect(adapter.stats()).toMatchObject({
       submittedTiles: 1,
+      submittedTileIds: ["tile"],
       submittedPrimitives: 2,
       residentGeometryBytes: 224,
       logicalGeometryUploadBytes: 224,
@@ -113,6 +115,7 @@ describe("vtk mesh adapter", () => {
       pooledTextureBytes: 0,
       residentTextureBytes: 16,
       drawnTiles: 1,
+      drawnTileIds: ["tile"],
       drawnTextureBytes: 16,
       drawnTriangles: 2,
       textureRepresentation: "compressed",
@@ -171,6 +174,26 @@ describe("vtk mesh adapter", () => {
     expect(fragment?.indexOf("discard")).toBeLessThan(
       fragment?.indexOf("gl_FragData") ?? -1,
     );
+    adapter.dispose();
+  });
+
+  it("disables vtk lighting for KHR_materials_unlit primitives", () => {
+    const scheduler = createSubmissionScheduler({
+      scheduleRender: vi.fn(),
+      maxBytesPerFrame: 1024,
+    });
+    const adapter = createMeshAdapter({
+      renderer: { addActor: vi.fn(), removeActor: vi.fn() },
+      scheduleRender: vi.fn(),
+      submissions: scheduler,
+    });
+    const unlit = content();
+    unlit.primitives.splice(1);
+    unlit.primitives[0]!.material.raw.unlit = true;
+    adapter.submitTile("unlit", unlit);
+    scheduler.prepareFrame();
+
+    expect(actorInstances[0]?.lighting).toBe(false);
     adapter.dispose();
   });
 

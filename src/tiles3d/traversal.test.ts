@@ -1,9 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 
 import type { PerspectiveCameraView } from "../camera";
-import type { TilesetTile } from "./tilesetSource";
+import { parseTileset, type TilesetTile } from "./tilesetSource";
 import { createVerticalExaggerationTransform } from "./rtc";
 import { traverseTileset, type TileReadiness } from "./traversal";
+import { parseSubtree } from "./subtree";
+import type { SubtreeStoreSnapshot } from "./subtreeStore";
+import {
+  makeSubtreeFixture,
+  SUBTREE_METADATA_SCHEMA,
+} from "../../test/fixtures/subtreeFixture";
 
 const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] as const;
 const lookAway = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -10, 0, 0, 1] as const;
@@ -70,6 +77,51 @@ const tree = () => {
   return makeTile("root", 8, [left, right]);
 };
 
+const implicitRoot = (): TilesetTile => ({
+  ...makeTile("root", 16, []),
+  contentUri: undefined,
+  contentUrl: undefined,
+  implicitAddress: { level: 0, x: 0, y: 0 },
+  implicitTiling: {
+    subdivisionScheme: "QUADTREE",
+    subtreeLevels: 2,
+    availableLevels: 3,
+    subtreeUriTemplate: "subtrees/{level}/{x}/{y}.subtree",
+    subtreeUrlTemplate: "/tiles/subtrees/{level}/{x}/{y}.subtree",
+    contentUriTemplate: "content/{level}/{x}/{y}.glb",
+    contentUrlTemplate: "/tiles/content/{level}/{x}/{y}.glb",
+    metadataSchema: SUBTREE_METADATA_SCHEMA,
+  },
+});
+
+const subtreeSnapshot = (subtree: ReturnType<typeof parseSubtree>) =>
+  ({
+    revision: "r1",
+    configGeneration: 1,
+    selected: 1,
+    active: 0,
+    queued: 0,
+    retrying: 0,
+    ready: 1,
+    failed: 0,
+    cached: 1,
+    cachedBytes: subtree.byteLength,
+    cacheHits: 0,
+    cacheMisses: 1,
+    cacheEvictions: 0,
+    workPending: false,
+    disposed: false,
+    entries: [
+      {
+        id: "subtree/0/0/0",
+        url: "/tiles/subtrees/0/0/0.subtree",
+        status: "ready",
+        attempt: 1,
+      },
+    ],
+    subtreeById: new Map([["subtree/0/0/0", subtree]]),
+  }) satisfies SubtreeStoreSnapshot;
+
 const select = (
   root: TilesetTile,
   readiness: Record<string, TileReadiness> = {},
@@ -84,6 +136,228 @@ const select = (
   });
 
 describe("traverseTileset", () => {
+  it("traverses the checked-in producer fixture to its four quadrant contents", () => {
+    const directory = new URL(
+      "../../test/fixtures/tiles3d-implicit/",
+      import.meta.url,
+    );
+    const source = parseTileset(
+      JSON.parse(readFileSync(new URL("tileset.json", directory), "utf8")),
+      "/fixture",
+    );
+    const bytes = readFileSync(new URL("subtrees/0/0/0.subtree", directory));
+    const subtree = parseSubtree(
+      bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+      4,
+      source.root.implicitTiling!.metadataSchema,
+    );
+    const snapshot = {
+      ...subtreeSnapshot(subtree),
+      entries: [
+        {
+          id: "subtree/0/0/0",
+          url: "/fixture/subtrees/0/0/0.subtree",
+          status: "ready" as const,
+          attempt: 1,
+        },
+      ],
+    } satisfies SubtreeStoreSnapshot;
+    const result = select(
+      source.root,
+      {},
+      {
+        subtrees: snapshot,
+        // Degenerate planes deliberately disable culling here; this is a wire
+        // contract test, while ordinary traversal tests pin frustum behavior.
+        camera: view(
+          [0, 0, 0],
+          Array.from({ length: 16 }, () => 0),
+        ),
+      },
+    );
+
+    expect(result.neededSubtreeRequests).toEqual([]);
+    expect(result.desiredTileIds).toEqual([
+      "root/0",
+      "root/1",
+      "root/2",
+      "root/3",
+    ]);
+    expect(
+      result.desiredTileIds.map((id) => result.tileById.get(id)?.contentUri),
+    ).toEqual([
+      "content/1/0/0.glb",
+      "content/1/1/0.glb",
+      "content/1/0/1.glb",
+      "content/1/1/1.glb",
+    ]);
+  });
+  it("requests a visible unknown implicit root and does not pretend it is empty", () => {
+    const result = select(implicitRoot());
+    expect(result.desiredTileIds).toEqual([]);
+    expect(result.requestedTileIds).toEqual([]);
+    expect(result.neededSubtreeRequests).toEqual([
+      {
+        id: "subtree/0/0/0",
+        url: "/tiles/subtrees/0/0/0.subtree",
+      },
+    ]);
+  });
+
+  it("applies the tileset root transform while its subtree is unknown", () => {
+    const transform = matrix(-100);
+    const root: TilesetTile = {
+      ...implicitRoot(),
+      boundingVolume: {
+        center: [100, 0, 0],
+        halfAxes: [1, 0, 0, 0, 1, 0, 0, 0, 1],
+      },
+      transform,
+      worldTransform: transform,
+    };
+
+    const result = select(root);
+
+    expect(result.culledTileIds).toEqual([]);
+    expect(result.neededSubtreeRequests).toEqual([
+      {
+        id: "subtree/0/0/0",
+        url: "/tiles/subtrees/0/0/0.subtree",
+      },
+    ]);
+  });
+
+  it("does not fetch an implicit subtree outside the view frustum", () => {
+    const result = select(implicitRoot(), {}, { modelMatrix: matrix(100) });
+    expect(result.culledTileIds).toEqual(["root"]);
+    expect(result.neededSubtreeRequests).toEqual([]);
+  });
+
+  it("materializes known implicit content, halves error, and uses metadata bounds", () => {
+    const boxes = new Map(
+      Array.from(
+        { length: 5 },
+        (_value, index) =>
+          [index, [0, 0, 0, 1 + index / 10, 0, 0, 0, 1, 0, 0, 0, 1]] as const,
+      ),
+    );
+    const subtree = parseSubtree(
+      makeSubtreeFixture({ boxes }),
+      2,
+      SUBTREE_METADATA_SCHEMA,
+    );
+    const result = select(
+      implicitRoot(),
+      {},
+      {
+        subtrees: subtreeSnapshot(subtree),
+        camera: view([0, 0, 2]),
+      },
+    );
+
+    expect(result.desiredTileIds).toEqual([
+      "root/0",
+      "root/1",
+      "root/2",
+      "root/3",
+    ]);
+    expect(result.neededSubtreeRequests).toEqual([]);
+    expect(result.tileById.get("root/3")).toMatchObject({
+      geometricError: 8,
+      contentUri: "content/1/1/1.glb",
+      boundingVolume: { halfAxes: [1.4, 0, 0, 0, 1, 0, 0, 0, 1] },
+    });
+  });
+
+  it("holds the nearest submitted parent at an unknown child-subtree boundary", () => {
+    const childSubtrees = Array.from({ length: 16 }, () => false);
+    childSubtrees[0] = true;
+    const subtree = parseSubtree(
+      makeSubtreeFixture({ childSubtreeAvailability: childSubtrees }),
+      2,
+      SUBTREE_METADATA_SCHEMA,
+    );
+    const result = select(
+      implicitRoot(),
+      {
+        root: "submitted",
+        "root/0": "submitted",
+        "root/1": "submitted",
+        "root/2": "submitted",
+        "root/3": "submitted",
+      },
+      { subtrees: subtreeSnapshot(subtree), camera: view([0, 0, 2]) },
+    );
+
+    expect(result.neededSubtreeRequests).toContainEqual({
+      id: "subtree/2/0/0",
+      url: "/tiles/subtrees/2/0/0.subtree",
+    });
+    expect(result.drawnTileIds).toContain("root/0");
+  });
+
+  it("keeps a submitted fallback across a contentless ancestor and loaded child-subtree boundary", () => {
+    const childSubtrees = Array.from({ length: 16 }, () => false);
+    childSubtrees[0] = true;
+    const rootSubtree = parseSubtree(
+      makeSubtreeFixture({
+        contentAvailability: [true, false, true, true, true],
+        childSubtreeAvailability: childSubtrees,
+      }),
+      2,
+      SUBTREE_METADATA_SCHEMA,
+    );
+    const childSubtree = parseSubtree(
+      makeSubtreeFixture({
+        tileAvailability: [true, false, false, false, false],
+        contentAvailability: [true, false, false, false, false],
+      }),
+      2,
+      SUBTREE_METADATA_SCHEMA,
+    );
+    const snapshot = {
+      ...subtreeSnapshot(rootSubtree),
+      selected: 2,
+      ready: 2,
+      cached: 2,
+      cachedBytes: rootSubtree.byteLength + childSubtree.byteLength,
+      entries: [
+        {
+          id: "subtree/0/0/0",
+          url: "/tiles/subtrees/0/0/0.subtree",
+          status: "ready" as const,
+          attempt: 1,
+        },
+        {
+          id: "subtree/2/0/0",
+          url: "/tiles/subtrees/2/0/0.subtree",
+          status: "ready" as const,
+          attempt: 1,
+        },
+      ],
+      subtreeById: new Map([
+        ["subtree/0/0/0", rootSubtree],
+        ["subtree/2/0/0", childSubtree],
+      ]),
+    } satisfies SubtreeStoreSnapshot;
+    const result = select(
+      implicitRoot(),
+      { root: "submitted" },
+      {
+        subtrees: snapshot,
+        camera: view(
+          [0, 0, 2],
+          Array.from({ length: 16 }, () => 0),
+        ),
+      },
+    );
+
+    expect(result.neededSubtreeRequests).toEqual([]);
+    expect(result.desiredTileIds).toContain("root/0/0");
+    expect(result.desiredTileIds).not.toContain("root/0");
+    expect(result.requestedTileIds).toContain("root/0/0");
+    expect(result.drawnTileIds).toEqual(["root"]);
+  });
   it("pins near/far camera selection and stable document order", () => {
     expect(
       select(tree(), {}, { camera: view([0, 0, 120]) }).desiredTileIds,

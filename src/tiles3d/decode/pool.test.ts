@@ -39,6 +39,19 @@ class FakeWorker implements DecodeWorkerLike {
   respond(value: unknown): void {
     this.onmessage?.({ data: value } as MessageEvent);
   }
+
+  fail(index: number, error: unknown): void {
+    const request = this.messages[index] as {
+      jobId: number;
+      generation: number;
+    };
+    this.respond({
+      kind: "error",
+      jobId: request.jobId,
+      generation: request.generation,
+      error,
+    });
+  }
 }
 
 const decodeRequest = (): DecodeTileRequest => ({
@@ -177,6 +190,27 @@ describe("DecodeWorkerPool", () => {
       byteEstimate: { geometry: 0, textures: 0 },
     });
     await expect(next.promise).resolves.toMatchObject({ primitives: [] });
+  });
+
+  it("rehydrates named tile/profile failures from the worker protocol", async () => {
+    const worker = new FakeWorker();
+    const pool = new DecodeWorkerPool({ size: 1, workerFactory: () => worker });
+    const active = pool.decode(decodeRequest());
+    worker.fail(0, {
+      name: "TileUnsupportedExtensionError",
+      message: "unsupported meshopt",
+      tileUri: "https://fixture.invalid/tile.glb",
+      stage: "profile",
+      reason: "unsupported required glTF extension EXT_meshopt_compression",
+      extension: "EXT_meshopt_compression",
+    });
+
+    await expect(active.promise).rejects.toMatchObject({
+      name: "TileUnsupportedExtensionError",
+      tileUri: "https://fixture.invalid/tile.glb",
+      stage: "profile",
+      extension: "EXT_meshopt_compression",
+    });
   });
 
   it("aggregates runtime cost and retains bounded per-target transcode samples", async () => {

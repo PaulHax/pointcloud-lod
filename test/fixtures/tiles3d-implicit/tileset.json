@@ -1,0 +1,44 @@
+{
+  "asset": { "version": "1.1" },
+  "schema": {
+    "id": "terrane",
+    "classes": {
+      "tile": {
+        "properties": {
+          "tileBoundingBox": {
+            "semantic": "TILE_BOUNDING_BOX",
+            "type": "SCALAR",
+            "componentType": "FLOAT64",
+            "array": true,
+            "count": 12,
+            "required": true
+          }
+        }
+      }
+    }
+  },
+  "geometricError": 2346072.100815429,
+  "root": {
+    "boundingVolume": {
+      "box": [
+        0.0, -15359.274099204224, -437212.74373280304, 2497023.032104147, 0.0,
+        0.0, 0.0, 2342999.1442103055, 0.0, 0.0, 0.0, 493168.18223385
+      ]
+    },
+    "geometricError": 2346072.100815429,
+    "refine": "REPLACE",
+    "transform": [
+      0.9238795325112867, 0.38268343236508984, 0.0, 0.0, 0.13714147698163484,
+      -0.3310888136929404, 0.9335804264972017, 0.0, 0.3572657620008136,
+      -0.8625158479939224, -0.35836794954530027, 0.0, 2279713.023369914,
+      -5503714.099338218, -2271438.0233637, 1.0
+    ],
+    "content": { "uri": "content/{level}/{x}/{y}.glb" },
+    "implicitTiling": {
+      "subdivisionScheme": "QUADTREE",
+      "subtreeLevels": 4,
+      "availableLevels": 2,
+      "subtrees": { "uri": "subtrees/{level}/{x}/{y}.subtree" }
+    }
+  }
+}

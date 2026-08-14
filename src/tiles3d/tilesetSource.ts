@@ -1,5 +1,5 @@
 /**
- * Strict, renderer-neutral reader for the explicit 3D Tiles 1.1 profile used
+ * Strict, renderer-neutral reader for the explicit/implicit 3D Tiles 1.1 profile used
  * by the streamed-scene mesh member.
  */
 
@@ -47,6 +47,28 @@ export type TilesetTile = {
   /** Omitted for a standards-defined contentless hierarchy tile. */
   readonly contentUrl?: string;
   readonly children: readonly TilesetTile[];
+  /** Present only on the document root of an implicit quadtree. */
+  readonly implicitTiling?: TilesetImplicitTiling;
+  /** Present on lazily materialized implicit tiles. */
+  readonly implicitAddress?: ImplicitTileAddress;
+};
+
+export type ImplicitTileAddress = {
+  readonly level: number;
+  readonly x: number;
+  readonly y: number;
+};
+
+export type TilesetImplicitTiling = {
+  readonly subdivisionScheme: "QUADTREE";
+  readonly subtreeLevels: number;
+  readonly availableLevels: number;
+  readonly subtreeUriTemplate: string;
+  readonly subtreeUrlTemplate: string;
+  readonly contentUriTemplate: string;
+  readonly contentUrlTemplate: string;
+  /** Tileset-level schema used by subtree property tables. */
+  readonly metadataSchema: Readonly<Record<string, unknown>>;
 };
 
 export type TilesetSource = {
@@ -130,6 +152,20 @@ const finiteAtLeastZero = (value: unknown, path: string): number => {
     throw new TilesetValidationError(path, "expected a finite number >= 0");
   }
   return value;
+};
+
+const integerAtLeast = (
+  value: unknown,
+  minimum: number,
+  path: string,
+): number => {
+  if (!Number.isSafeInteger(value) || (value as number) < minimum) {
+    throw new TilesetValidationError(
+      path,
+      `expected a safe integer >= ${minimum}`,
+    );
+  }
+  return value as number;
 };
 
 const finiteArray = (
@@ -344,8 +380,70 @@ const contentUri = (value: unknown, path: string): string => {
   return content.uri;
 };
 
+const implicitTemplate = (
+  endpoint: string,
+  value: unknown,
+  path: string,
+  extension: ".subtree" | ".glb" | ".gltf",
+): { readonly uri: string; readonly url: string } => {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new TilesetValidationError(path, "expected a non-empty string");
+  }
+  const placeholders = value.match(/\{[^}]*\}/gu) ?? [];
+  for (const name of ["level", "x", "y"] as const) {
+    if (
+      placeholders.filter((candidate) => candidate === `{${name}}`).length !== 1
+    ) {
+      throw new TilesetValidationError(
+        path,
+        `expected exactly one {${name}} placeholder`,
+      );
+    }
+  }
+  if (
+    placeholders.length !== 3 ||
+    value.replace(/\{(?:level|x|y)\}/gu, "").includes("{") ||
+    value.replace(/\{(?:level|x|y)\}/gu, "").includes("}")
+  ) {
+    throw new TilesetValidationError(path, "unsupported template placeholder");
+  }
+  const substituted = substituteImplicitTemplate(value, {
+    level: 0,
+    x: 0,
+    y: 0,
+  });
+  if (!substituted.toLowerCase().endsWith(extension)) {
+    throw new TilesetValidationError(path, `expected a ${extension} path`);
+  }
+  try {
+    resolveTilesetContentUri(endpoint, substituted);
+  } catch (error) {
+    throw new TilesetValidationError(
+      path,
+      "template must be a relative same-root path",
+      {
+        cause: error,
+      },
+    );
+  }
+  return Object.freeze({
+    uri: value,
+    url: `${normalizeEndpoint(endpoint)}/${value}`,
+  });
+};
+
+export const substituteImplicitTemplate = (
+  template: string,
+  address: ImplicitTileAddress,
+): string =>
+  template
+    .replace("{level}", String(address.level))
+    .replace("{x}", String(address.x))
+    .replace("{y}", String(address.y));
+
 type ParseContext = {
   readonly endpoint: string;
+  readonly metadataSchema?: Readonly<Record<string, unknown>>;
   readonly tiles: TilesetTile[];
   readonly tileById: Map<string, TilesetTile>;
 };
@@ -360,10 +458,130 @@ const parseTile = (
 ): TilesetTile => {
   const raw = objectAt(value, path);
   if ("implicitTiling" in raw) {
-    throw new TilesetUnsupportedError(
-      "implicitTiling",
-      `${path}.implicitTiling`,
+    if (id !== "root") {
+      throw new TilesetValidationError(
+        `${path}.implicitTiling`,
+        "implicit tiling is only allowed on the root",
+      );
+    }
+    if ("contents" in raw) {
+      throw new TilesetUnsupportedError("contents", `${path}.contents`);
+    }
+    const refine = raw.refine ?? inheritedRefine;
+    if (refine !== "REPLACE") {
+      throw new TilesetValidationError(`${path}.refine`, 'expected "REPLACE"');
+    }
+    if (raw.children !== undefined) {
+      throw new TilesetValidationError(
+        `${path}.children`,
+        "explicit children are not allowed on an implicit root",
+      );
+    }
+    if (raw.content === undefined) {
+      throw new TilesetValidationError(
+        `${path}.content`,
+        "implicit roots require one content URI template",
+      );
+    }
+    const content = objectAt(raw.content, `${path}.content`);
+    if ("url" in content) {
+      throw new TilesetUnsupportedError("content.url", `${path}.content.url`);
+    }
+    const contentPath = `${path}.content.uri`;
+    const contentValue = content.uri;
+    const contentExtension =
+      typeof contentValue === "string" &&
+      contentValue.toLowerCase().endsWith(".gltf")
+        ? ".gltf"
+        : ".glb";
+    const contentTemplate = implicitTemplate(
+      context.endpoint,
+      contentValue,
+      contentPath,
+      contentExtension,
     );
+    const implicit = objectAt(raw.implicitTiling, `${path}.implicitTiling`);
+    if (implicit.subdivisionScheme !== "QUADTREE") {
+      throw new TilesetUnsupportedError(
+        `implicitTiling.${String(implicit.subdivisionScheme)}`,
+        `${path}.implicitTiling.subdivisionScheme`,
+      );
+    }
+    const subtreeLevels = integerAtLeast(
+      implicit.subtreeLevels,
+      1,
+      `${path}.implicitTiling.subtreeLevels`,
+    );
+    if (subtreeLevels !== 4) {
+      throw new TilesetValidationError(
+        `${path}.implicitTiling.subtreeLevels`,
+        "expected 4 for the supported producer profile",
+      );
+    }
+    const availableLevels = integerAtLeast(
+      implicit.availableLevels,
+      1,
+      `${path}.implicitTiling.availableLevels`,
+    );
+    // Tile IDs use 32-bit bitwise quadrant extraction. Levels 0..30 keep
+    // coordinates nonnegative and exactly representable throughout traversal.
+    if (availableLevels > 31) {
+      throw new TilesetValidationError(
+        `${path}.implicitTiling.availableLevels`,
+        "expected at most 31 for the supported producer profile",
+      );
+    }
+    const subtrees = objectAt(
+      implicit.subtrees,
+      `${path}.implicitTiling.subtrees`,
+    );
+    if ("url" in subtrees) {
+      throw new TilesetUnsupportedError(
+        "implicitTiling.subtrees.url",
+        `${path}.implicitTiling.subtrees.url`,
+      );
+    }
+    const subtreeTemplate = implicitTemplate(
+      context.endpoint,
+      subtrees.uri,
+      `${path}.implicitTiling.subtrees.uri`,
+      ".subtree",
+    );
+    const transform = affineMatrix(raw.transform, `${path}.transform`);
+    const worldTransform = multiplyTilesetMatrices(parentTransform, transform);
+    const descriptor: TilesetImplicitTiling = Object.freeze({
+      subdivisionScheme: "QUADTREE",
+      subtreeLevels,
+      availableLevels,
+      subtreeUriTemplate: subtreeTemplate.uri,
+      subtreeUrlTemplate: subtreeTemplate.url,
+      contentUriTemplate: contentTemplate.uri,
+      contentUrlTemplate: contentTemplate.url,
+      metadataSchema:
+        context.metadataSchema ??
+        (() => {
+          throw new TilesetValidationError(
+            "schema",
+            "implicit tilesets require an inline metadata schema",
+          );
+        })(),
+    });
+    const parsed: TilesetTile = Object.freeze({
+      id,
+      geometricError: finiteAtLeastZero(
+        raw.geometricError,
+        `${path}.geometricError`,
+      ),
+      boundingVolume: boundingBox(raw.boundingVolume, `${path}.boundingVolume`),
+      transform,
+      worldTransform,
+      children: Object.freeze([]),
+      implicitTiling: descriptor,
+      implicitAddress: Object.freeze({ level: 0, x: 0, y: 0 }),
+    });
+    context.tiles.push(parsed);
+    context.tileById.set(id, parsed);
+    return parsed;
   }
   if ("contents" in raw) {
     throw new TilesetUnsupportedError("contents", `${path}.contents`);
@@ -447,6 +665,9 @@ export const parseTileset = (
   }
   const context: ParseContext = {
     endpoint,
+    ...(raw.schema === undefined
+      ? {}
+      : { metadataSchema: objectAt(raw.schema, "schema") }),
     tiles: [],
     tileById: new Map(),
   };

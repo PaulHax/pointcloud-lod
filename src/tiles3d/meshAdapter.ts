@@ -40,6 +40,8 @@ export type MeshAdapterStats = {
   readonly pendingJobs: number;
   readonly pendingBytes: number;
   readonly submittedTiles: number;
+  /** Current submitted tile ids, bounded by the member residency allowance. */
+  readonly submittedTileIds: readonly string[];
   readonly submittedPrimitives: number;
   /** Exact VTK actors currently submitted after primitive chunking. */
   readonly submittedActors: number;
@@ -64,6 +66,8 @@ export type MeshAdapterStats = {
   readonly residentBytes: number;
   readonly resourceCeilingBytes: number;
   readonly drawnTiles: number;
+  /** Current drawn tile ids, used by public refinement diagnostics. */
+  readonly drawnTileIds: readonly string[];
   readonly drawnPrimitives: number;
   /** Exact visible VTK actor count after primitive chunking. */
   readonly drawnActors: number;
@@ -528,6 +532,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
       actor.setMapper(mapper);
       const factor = primitive.material.baseColorFactor;
       const authored = primitive.material.raw;
+      actor.getProperty().setLighting(!authored.unlit);
       actor.getProperty().setColor(factor[0], factor[1], factor[2]);
       actor
         .getProperty()
@@ -1134,6 +1139,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
           0,
         ),
         submittedTiles: submittedResources.length,
+        submittedTileIds: [...submitted.keys()],
         submittedPrimitives: submittedResources.reduce(
           (sum, tile) => sum + tile.primitiveCount,
           0,
@@ -1169,6 +1175,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         ),
         resourceCeilingBytes,
         drawnTiles: drawnResources.length,
+        drawnTileIds: [...drawn],
         drawnPrimitives: drawnResources.reduce(
           (sum, tile) => sum + tile.primitiveCount,
           0,

@@ -2,6 +2,8 @@
 
 import { integerAtLeast } from "../numeric";
 
+const MAX_EVICTION_HISTORY = 4_096;
+
 export type TileContentRequest = {
   readonly id: string;
   readonly url: string;
@@ -306,6 +308,11 @@ export const createContentQueue = <T>(
     decodedBytes -= entry.bytes;
     cacheEvictions += 1;
     previouslyEvicted.add(id);
+    while (previouslyEvicted.size > MAX_EVICTION_HISTORY) {
+      const oldest = previouslyEvicted.values().next();
+      if (oldest.done) break;
+      previouslyEvicted.delete(oldest.value);
+    }
     safeCall(() => options.onEvict?.(entry.request, entry.content));
     return true;
   };
@@ -602,6 +609,7 @@ export const createContentQueue = <T>(
         for (const id of active.keys()) cancelActive(id);
         for (const id of retries.keys()) cancelRetry(id);
         clearCache();
+        previouslyEvicted.clear();
         revision = nextRevision;
         configGeneration = nextGeneration;
         for (const entry of selected.values()) {
@@ -633,6 +641,7 @@ export const createContentQueue = <T>(
       for (const id of retries.keys()) cancelRetry(id);
       selected.clear();
       clearCache();
+      previouslyEvicted.clear();
       emit();
     },
   };

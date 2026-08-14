@@ -1,10 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 
 import type { CameraView } from "../camera";
 import { createMemoryPool } from "../memoryPool";
 import { createSubmissionScheduler } from "../submissionScheduler";
 import type { StreamedMemberContext } from "../streamedMember";
-import type { DecodeTileRequest, DecodedTileContent } from "./decode";
+import {
+  TileUnsupportedExtensionError,
+  type DecodeTileRequest,
+  type DecodedTileContent,
+} from "./decode";
 import { createTiles3dMember } from "./member";
 import type { Tiles3dMemberConfig, Tiles3dMemberStats } from "./memberTypes";
 import { actorInstances, resetStubs } from "../../test/stubs/vtkStub";
@@ -62,6 +67,7 @@ const decoded = (z = 0): DecodedTileContent => ({
           alphaMode: "OPAQUE",
           alphaCutoff: 0.5,
           doubleSided: false,
+          unlit: false,
           metallicFactor: 1,
           roughnessFactor: 1,
           emissiveFactor: [0, 0, 0],
@@ -144,6 +150,74 @@ const harness = (withChildren = false, schedulerBytes = 1024) => {
 
 describe("createTiles3dMember", () => {
   beforeEach(resetStubs);
+
+  it("drives implicit subtree arrival into full quadrant content selection", async () => {
+    const h = harness();
+    const directory = new URL(
+      "../../test/fixtures/tiles3d-implicit/",
+      import.meta.url,
+    );
+    const manifest = JSON.parse(
+      readFileSync(new URL("tileset.json", directory), "utf8"),
+    );
+    // The checked-in wire fixture's ECEF placement is independent of this
+    // lifecycle test; keep its producer metadata boxes but render in identity.
+    manifest.root.transform = identity;
+    const subtreeBytes = readFileSync(
+      new URL("subtrees/0/0/0.subtree", directory),
+    );
+    const subtreeFetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      arrayBuffer: async () =>
+        subtreeBytes.buffer.slice(
+          subtreeBytes.byteOffset,
+          subtreeBytes.byteOffset + subtreeBytes.byteLength,
+        ),
+    }));
+    const member = createTiles3dMember(h.context, {
+      ...h.config,
+      fetchTileset: async () => ({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => manifest,
+      }),
+      fetchSubtree: subtreeFetch,
+    });
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    member.setCamera({
+      ...view,
+      viewProj: Array.from({ length: 16 }, () => 0),
+      position: [0, 0, 0],
+    });
+    await settle();
+
+    expect(subtreeFetch).toHaveBeenCalledOnce();
+    expect(h.contentRequests).toEqual([
+      "/tiles/content/0/0/0.glb",
+      "/tiles/content/1/0/0.glb",
+      "/tiles/content/1/1/0.glb",
+      "/tiles/content/1/0/1.glb",
+      "/tiles/content/1/1/1.glb",
+    ]);
+    expect(member.stats()).toMatchObject({
+      selectedTiles: 4,
+      requestedTiles: 5,
+      subtrees: { cached: 1, failed: 0, workPending: false },
+      queue: { ready: 5, workPending: false },
+    });
+    expect(member.governorInputs()).toMatchObject({
+      physicalHierarchyOperations: 0,
+      work: { operations: expect.any(Number) },
+    });
+    member.dispose();
+  });
 
   it("weighs itself by how far its root sits above its own error cutoff", async () => {
     // The governor can only read importance as a relative weight, so it has to
@@ -494,6 +568,46 @@ describe("createTiles3dMember", () => {
       sseMultiplier: 4,
       effectiveScreenSpaceErrorPx: 16,
       errorCount: 1,
+    });
+    member.dispose();
+  });
+
+  it("surfaces typed decode failures through queue and member telemetry", async () => {
+    const h = harness();
+    const onError = vi.fn();
+    h.context.workers.decode = () => ({
+      promise: Promise.reject(
+        new TileUnsupportedExtensionError(
+          "/tiles/root.glb",
+          "EXT_meshopt_compression",
+        ),
+      ),
+      cancel: vi.fn(),
+    });
+    const member = createTiles3dMember(h.context, {
+      ...h.config,
+      maxAttempts: 1,
+      onError,
+    });
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    await settle();
+
+    const error = onError.mock.calls[0]?.[0];
+    expect(error).toMatchObject({ name: "ContentQueueDecodeError" });
+    expect(error.cause).toMatchObject({
+      name: "TileUnsupportedExtensionError",
+      stage: "profile",
+      extension: "EXT_meshopt_compression",
+    });
+    expect(member.stats()).toMatchObject({
+      errorCount: 1,
+      lastError: expect.stringContaining("unsupported required glTF extension"),
+      queue: { failed: 1, workPending: false },
     });
     member.dispose();
   });

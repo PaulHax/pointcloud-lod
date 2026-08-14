@@ -41,6 +41,40 @@ const documentWithRootTransform = (transform: number[]) => {
   return value;
 };
 
+const implicitDocument = () => ({
+  asset: { version: "1.1" },
+  schema: {
+    classes: {
+      tile: {
+        properties: {
+          tileBoundingBox: {
+            semantic: "TILE_BOUNDING_BOX",
+            type: "SCALAR",
+            componentType: "FLOAT64",
+            array: true,
+            count: 12,
+            required: true,
+          },
+        },
+      },
+    },
+  },
+  geometricError: 16,
+  root: {
+    boundingVolume: { box },
+    geometricError: 16,
+    refine: "REPLACE",
+    transform: identity,
+    content: { uri: "content/{level}/{x}/{y}.glb" },
+    implicitTiling: {
+      subdivisionScheme: "QUADTREE",
+      subtreeLevels: 4,
+      availableLevels: 12,
+      subtrees: { uri: "subtrees/{level}/{x}/{y}.subtree" },
+    },
+  },
+});
+
 const response = (body: unknown, status = 200) => ({
   ok: status >= 200 && status < 300,
   status,
@@ -137,6 +171,99 @@ describe("loadTileset", () => {
       ["root/1", "/tiles/content/east.gltf"],
     ]);
   });
+
+  it("parses an implicit quadtree root and retains strict URI templates", async () => {
+    const source = await loadTileset({
+      endpoint: "/tiles/revision",
+      fetch: vi.fn().mockResolvedValue(response(implicitDocument())),
+    });
+
+    expect(source.tiles).toEqual([source.root]);
+    expect(source.root.contentUrl).toBeUndefined();
+    expect(source.root).toMatchObject({
+      id: "root",
+      implicitAddress: { level: 0, x: 0, y: 0 },
+      implicitTiling: {
+        subdivisionScheme: "QUADTREE",
+        subtreeLevels: 4,
+        availableLevels: 12,
+        subtreeUrlTemplate: "/tiles/revision/subtrees/{level}/{x}/{y}.subtree",
+        contentUrlTemplate: "/tiles/revision/content/{level}/{x}/{y}.glb",
+      },
+    });
+  });
+
+  it("rejects implicit depths beyond the supported 32-bit address profile", async () => {
+    const body = implicitDocument();
+    body.root.implicitTiling.availableLevels = 32;
+
+    await expect(
+      loadTileset({
+        endpoint: "/tiles/revision",
+        fetch: vi.fn().mockResolvedValue(response(body)),
+      }),
+    ).rejects.toMatchObject({
+      name: "TilesetValidationError",
+      path: "root.implicitTiling.availableLevels",
+    });
+  });
+
+  it.each([
+    [
+      "octree",
+      (body: any) => {
+        body.root.implicitTiling.subdivisionScheme = "OCTREE";
+      },
+      "TilesetUnsupportedError",
+      "implicitTiling.OCTREE",
+    ],
+    [
+      "missing y placeholder",
+      (body: any) => {
+        body.root.content.uri = "content/{level}/{x}/0.glb";
+      },
+      "TilesetValidationError",
+      undefined,
+    ],
+    [
+      "duplicate x placeholder",
+      (body: any) => {
+        body.root.implicitTiling.subtrees.uri =
+          "subtrees/{level}/{x}/{x}/{y}.subtree";
+      },
+      "TilesetValidationError",
+      undefined,
+    ],
+    [
+      "absolute template",
+      (body: any) => {
+        body.root.content.uri = "https://bad.test/{level}/{x}/{y}.glb";
+      },
+      "TilesetValidationError",
+      undefined,
+    ],
+    [
+      "unsupported subtree depth",
+      (body: any) => {
+        body.root.implicitTiling.subtreeLevels = 5;
+      },
+      "TilesetValidationError",
+      undefined,
+    ],
+  ])(
+    "rejects malformed implicit profile: %s",
+    async (_name, mutate, name, feature) => {
+      const body = implicitDocument();
+      mutate(body);
+      const expected = feature ? { name, feature } : { name };
+      await expect(
+        loadTileset({
+          endpoint: "/tiles",
+          fetch: vi.fn().mockResolvedValue(response(body)),
+        }),
+      ).rejects.toMatchObject(expected);
+    },
+  );
 
   it("reports transport, status, and malformed JSON as typed fetch errors", async () => {
     await expect(
@@ -256,7 +383,6 @@ describe("loadTileset", () => {
   });
 
   it.each([
-    ["implicit tiling", { ...tile(), implicitTiling: {} }, "implicitTiling"],
     [
       "multiple contents",
       { ...tile(), contents: [{ uri: "a.glb" }] },
