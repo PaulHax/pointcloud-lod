@@ -15,6 +15,7 @@ export type StubActor = {
     setPointSize: (size: number) => void;
     setColor: (...color: number[]) => void;
     setOpacity: (opacity: number) => void;
+    setLighting: (lighting: boolean) => void;
   };
   addTexture: (texture: unknown) => void;
   delete: () => void;
@@ -29,6 +30,7 @@ export type StubActor = {
   opacity: number;
   forceOpaque: boolean;
   forceTranslucent: boolean;
+  lighting: boolean;
 };
 
 export const actorInstances: StubActor[] = [];
@@ -45,6 +47,7 @@ export const makeActor = (): StubActor => {
     opacity: 1,
     forceOpaque: false,
     forceTranslucent: false,
+    lighting: true,
     setMapper(mapper) {
       actor.mapper = mapper;
     },
@@ -70,6 +73,9 @@ export const makeActor = (): StubActor => {
         },
         setOpacity(opacity: number) {
           actor.opacity = opacity;
+        },
+        setLighting(lighting: boolean) {
+          actor.lighting = lighting;
         },
       };
     },

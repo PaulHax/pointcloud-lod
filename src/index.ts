@@ -253,6 +253,8 @@ export {
   DecodeWorkerError,
   DecodeWorkerPool,
   DecodeWorkerPoolDisposedError,
+  TileDecodeError,
+  TileUnsupportedExtensionError,
   type BasisTargetTimingStats,
   type CompressedTextureLevel,
   type CompressedTextureFormat,
@@ -273,6 +275,7 @@ export {
   type SerializableMaterial,
   type SerializableSampler,
   type TextureCapabilities,
+  type TileDecodeStage,
 } from "./tiles3d/decode";
 
 export {

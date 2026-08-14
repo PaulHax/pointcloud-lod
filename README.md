@@ -8,8 +8,8 @@ notice.
 
 ## What it is
 
-A standalone library that streams large point clouds and explicit 3D Tiles 1.1
-trees into vtk.js scenes. A shared scene coordinator governs frame time, memory,
+A standalone library that streams large point clouds and explicit or implicit
+3D Tiles 1.1 trees into vtk.js scenes. A shared scene coordinator governs frame time, memory,
 submission work, interaction, and cross-member quality while each format owns
 its traversal and renderer adapter. Only content relevant to the current camera
 is fetched, decoded, and submitted. Decoded CPU payloads, renderer/GPU
@@ -363,6 +363,49 @@ origin. Public data is rarely shaped the way a strict reader wants, and
 into the frame its Y-up glTF content uses, and repairing colliding meshopt
 fallback-buffer offsets on the way past `fetchContent`. Each is commented where
 it lives.
+
+### Supported 3D Tiles profile
+
+The mesh member deliberately accepts a narrow, typed 3D Tiles 1.1 profile:
+
+- `REPLACE` refinement, affine transforms, oriented `box` bounding volumes,
+  and one glTF/GLB content per tile;
+- explicit trees, including contentless structural ancestors;
+- implicit `QUADTREE` roots with four subtree levels, relative same-root URI
+  templates containing exactly one `{level}`, `{x}`, and `{y}` placeholder;
+- binary subtree version 1 with inline availability bitstreams and one
+  tileset-schema property table supplying a required 12-component
+  `TILE_BOUNDING_BOX` for every available tile. Metadata bounds override
+  subdivision-derived bounds; missing or malformed bounds are errors;
+- glTF required extensions `KHR_draco_mesh_compression`, `KHR_texture_basisu`,
+  `KHR_materials_unlit`, and `KHR_mesh_quantization`. Other required extensions
+  fail as `TileUnsupportedExtensionError` with tile URI and decode stage.
+
+Implicit subtrees have a bounded revision-scoped cache independent of decoded
+mesh residency. Unknown visible boundaries request their subtree and hold the
+nearest submitted `REPLACE` ancestor; an unknown subtree is never interpreted
+as empty availability. Camera changes cancel fetches for culled boundaries,
+and configuration generations retire old hierarchy and content work together.
+
+Unsupported `OCTREE`, ADD refinement, regions/spheres, multiple contents,
+external subtree buffers or schemas, unsafe/absolute template paths, legacy
+content containers, and malformed metadata produce named
+`TilesetUnsupportedError` or `TilesetValidationError` values rather than a
+partially interpreted scene.
+
+### Streamed-scene coordinate semantics
+
+`ScenePoint` is a branded tuple in canonical, unexaggerated scene coordinates;
+plain numeric tuples do not satisfy it. Mesh vertices are decoded and cached in
+that canonical frame. Registration placement and display-only vertical
+exaggeration are renderer matrices, so changing exaggeration does not invalidate
+decoded content or move data that the host has stored.
+
+Picking tests only the member's exact drawn tile set. The ray and returned
+`rayDepth` use the displayed frame, including exaggeration, while the returned
+`scenePoint` is reconstructed in the canonical unexaggerated frame. Occlusion
+uses that same displayed-frame depth and exact draw set, so hidden, culled, or
+submitted-but-not-drawn geometry cannot pick or occlude.
 
 Both load either a local `.copc.laz` file (read through `Blob.slice()` in a
 source worker) or a COPC URL (HTTP Range from that worker), frame it

@@ -1,6 +1,7 @@
 export { buildDecodeCacheKey } from "./cacheKey";
 export { capabilityTarget } from "./capabilities";
 export { buildTransferList } from "./transfer";
+export { TileDecodeError, TileUnsupportedExtensionError } from "./types";
 export {
   DecodeWorkerError,
   DecodeWorkerPool,
@@ -27,4 +28,5 @@ export type {
   SerializableMaterial,
   SerializableSampler,
   TextureCapabilities,
+  TileDecodeStage,
 } from "./types";

@@ -1,0 +1,155 @@
+{
+  "valid": [
+    {
+      "name": "minimal identity source",
+      "document": {
+        "kind": "tiles3d",
+        "sourceAssetId": "mesh-1",
+        "revision": "rev-1",
+        "endpoint": "/tiles/mesh-1/rev-1",
+        "tiles3d": {
+          "tilesetToScene": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+        }
+      }
+    },
+    {
+      "name": "configured affine source",
+      "document": {
+        "kind": "tiles3d",
+        "sourceAssetId": "terrain-7",
+        "revision": "sha256-1234",
+        "endpoint": "/tiles/terrain-7/sha256-1234",
+        "tiles3d": {
+          "tilesetToScene": [
+            0, 2, 0, 0, -3, 0, 0, 0, 0, 0, 4, 0, 10, -20, 30, 1
+          ],
+          "maximumScreenSpaceErrorPx": 12.5,
+          "verticalExaggeration": 2.5,
+          "verticalPivotZ": -105.25
+        }
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "empty revision",
+      "reason": "revision",
+      "document": {
+        "kind": "tiles3d",
+        "sourceAssetId": "mesh-1",
+        "revision": "",
+        "endpoint": "/tiles/mesh-1/rev-1",
+        "tiles3d": {
+          "tilesetToScene": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+        }
+      }
+    },
+    {
+      "name": "endpoint has trailing slash",
+      "reason": "endpoint",
+      "document": {
+        "kind": "tiles3d",
+        "sourceAssetId": "mesh-1",
+        "revision": "rev-1",
+        "endpoint": "/tiles/mesh-1/rev-1/",
+        "tiles3d": {
+          "tilesetToScene": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+        }
+      }
+    },
+    {
+      "name": "matrix has fifteen entries",
+      "reason": "tilesetToScene",
+      "document": {
+        "kind": "tiles3d",
+        "sourceAssetId": "mesh-1",
+        "revision": "rev-1",
+        "endpoint": "/tiles/mesh-1/rev-1",
+        "tiles3d": {
+          "tilesetToScene": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0]
+        }
+      }
+    },
+    {
+      "name": "matrix contains a non-number",
+      "reason": "tilesetToScene",
+      "document": {
+        "kind": "tiles3d",
+        "sourceAssetId": "mesh-1",
+        "revision": "rev-1",
+        "endpoint": "/tiles/mesh-1/rev-1",
+        "tiles3d": {
+          "tilesetToScene": ["1", 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+        }
+      }
+    },
+    {
+      "name": "matrix is not affine",
+      "reason": "affine",
+      "document": {
+        "kind": "tiles3d",
+        "sourceAssetId": "mesh-1",
+        "revision": "rev-1",
+        "endpoint": "/tiles/mesh-1/rev-1",
+        "tiles3d": {
+          "tilesetToScene": [1, 0, 0, 0.001, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+        }
+      }
+    },
+    {
+      "name": "linear transform is singular",
+      "reason": "invertible",
+      "document": {
+        "kind": "tiles3d",
+        "sourceAssetId": "mesh-1",
+        "revision": "rev-1",
+        "endpoint": "/tiles/mesh-1/rev-1",
+        "tiles3d": {
+          "tilesetToScene": [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+        }
+      }
+    },
+    {
+      "name": "screen-space error is zero",
+      "reason": "maximumScreenSpaceErrorPx",
+      "document": {
+        "kind": "tiles3d",
+        "sourceAssetId": "mesh-1",
+        "revision": "rev-1",
+        "endpoint": "/tiles/mesh-1/rev-1",
+        "tiles3d": {
+          "tilesetToScene": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+          "maximumScreenSpaceErrorPx": 0
+        }
+      }
+    },
+    {
+      "name": "vertical exaggeration is not numeric",
+      "reason": "verticalExaggeration",
+      "document": {
+        "kind": "tiles3d",
+        "sourceAssetId": "mesh-1",
+        "revision": "rev-1",
+        "endpoint": "/tiles/mesh-1/rev-1",
+        "tiles3d": {
+          "tilesetToScene": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+          "verticalExaggeration": "2"
+        }
+      }
+    },
+    {
+      "name": "vertical pivot is not numeric",
+      "reason": "verticalPivotZ",
+      "document": {
+        "kind": "tiles3d",
+        "sourceAssetId": "mesh-1",
+        "revision": "rev-1",
+        "endpoint": "/tiles/mesh-1/rev-1",
+        "tiles3d": {
+          "tilesetToScene": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+          "verticalPivotZ": false
+        }
+      }
+    }
+  ]
+}

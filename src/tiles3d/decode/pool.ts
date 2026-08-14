@@ -4,6 +4,11 @@ import type {
   DecodedTileContent,
   DecodeWorkerPoolHandle,
 } from "./types";
+import {
+  TileDecodeError,
+  TileUnsupportedExtensionError,
+  type TileDecodeStage,
+} from "./types";
 
 interface DecodeWorkerRequestMessage {
   kind: "decode";
@@ -23,7 +28,14 @@ interface DecodeWorkerErrorMessage {
   kind: "error";
   jobId: number;
   generation: number;
-  error: string;
+  error: {
+    readonly name: string;
+    readonly message: string;
+    readonly tileUri?: string;
+    readonly stage?: TileDecodeStage;
+    readonly reason?: string;
+    readonly extension?: string;
+  };
 }
 
 type DecodeWorkerResponseMessage =
@@ -323,14 +335,30 @@ export class DecodeWorkerPool implements DecodeWorkerPoolHandle {
         active.resolve(message.result);
       } else {
         this.#failedJobs += 1;
-        this.#reject(
-          active,
-          new DecodeWorkerError(
-            typeof message.error === "string"
-              ? message.error
-              : "decode worker returned an invalid error",
-          ),
-        );
+        const payload = message.error;
+        const decodeError =
+          payload?.name === "TileUnsupportedExtensionError" &&
+          typeof payload.tileUri === "string" &&
+          typeof payload.extension === "string"
+            ? new TileUnsupportedExtensionError(
+                payload.tileUri,
+                payload.extension,
+              )
+            : payload?.name === "TileDecodeError" &&
+                typeof payload.tileUri === "string" &&
+                (payload.stage === "profile" || payload.stage === "decode") &&
+                typeof payload.reason === "string"
+              ? new TileDecodeError(
+                  payload.tileUri,
+                  payload.stage,
+                  payload.reason,
+                )
+              : new DecodeWorkerError(
+                  typeof payload?.message === "string"
+                    ? payload.message
+                    : "decode worker returned an invalid error",
+                );
+        this.#reject(active, decodeError);
       }
     }
     this.#dispatch();

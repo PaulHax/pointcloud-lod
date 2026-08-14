@@ -40,6 +40,8 @@ export interface SerializableMaterial {
   alphaMode: "OPAQUE" | "MASK" | "BLEND";
   alphaCutoff: number;
   doubleSided: boolean;
+  /** KHR_materials_unlit: base color is authored radiance, not a light input. */
+  unlit: boolean;
   metallicFactor: number;
   roughnessFactor: number;
   emissiveFactor: [number, number, number];
@@ -49,6 +51,46 @@ export interface SerializableMaterial {
     orientation: string;
     sourceColorSpace: "srgb" | "linear";
   };
+}
+
+export type TileDecodeStage = "profile" | "decode";
+
+/** Renderer-neutral typed failure carrying the tile and decode stage. */
+export class TileDecodeError extends Error {
+  readonly tileUri: string;
+  readonly stage: TileDecodeStage;
+  readonly reason: string;
+
+  constructor(
+    tileUri: string,
+    stage: TileDecodeStage,
+    reason: string,
+    options?: ErrorOptions,
+  ) {
+    super(
+      `failed to decode 3D tile ${tileUri} at ${stage}: ${reason}`,
+      options,
+    );
+    this.name = "TileDecodeError";
+    this.tileUri = tileUri;
+    this.stage = stage;
+    this.reason = reason;
+  }
+}
+
+/** A required glTF extension has no decoder implementation. */
+export class TileUnsupportedExtensionError extends TileDecodeError {
+  readonly extension: string;
+
+  constructor(tileUri: string, extension: string) {
+    super(
+      tileUri,
+      "profile",
+      `unsupported required glTF extension ${extension}`,
+    );
+    this.name = "TileUnsupportedExtensionError";
+    this.extension = extension;
+  }
 }
 
 export interface CompressedTextureLevel {

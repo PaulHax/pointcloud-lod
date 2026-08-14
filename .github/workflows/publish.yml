@@ -17,6 +17,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      terrane_producer_ref:
+        description: Immutable TeleSculptor Web commit to compare against the checked fixture
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -50,6 +55,37 @@ jobs:
       - run: npm run format:check
       - run: npm run typecheck
       - run: npm test
+      - uses: actions/setup-python@v5
+        if: inputs.terrane_producer_ref != ''
+        with:
+          python-version: "3.10"
+      - name: Generate the fixture from the current terrain producer
+        if: inputs.terrane_producer_ref != ''
+        env:
+          TERRANE_PRODUCER_REF: ${{ inputs.terrane_producer_ref }}
+        run: |
+          if [[ ! "$TERRANE_PRODUCER_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::terrane_producer_ref must be a full commit SHA"
+            exit 1
+          fi
+          git init "$RUNNER_TEMP/telesculptor-web"
+          git -C "$RUNNER_TEMP/telesculptor-web" remote add origin \
+            https://kwgitlab.kitware.com/computer-vision/telesculptor-web.git
+          git -C "$RUNNER_TEMP/telesculptor-web" fetch --depth 1 origin "$TERRANE_PRODUCER_REF"
+          git -C "$RUNNER_TEMP/telesculptor-web" checkout --detach FETCH_HEAD
+          resolved_ref=$(git -C "$RUNNER_TEMP/telesculptor-web" rev-parse HEAD)
+          test "$resolved_ref" = "$TERRANE_PRODUCER_REF"
+          echo "Comparing fixture against producer $resolved_ref"
+          python -m pip install --only-binary=:all: \
+            numpy==1.26.4 pillow==12.1.1 pyproj==3.7.1
+          PYTHONPATH="$RUNNER_TEMP/telesculptor-web/app" \
+            python "$RUNNER_TEMP/telesculptor-web/tests/tools/generate_terrane_fixture.py" \
+            "$RUNNER_TEMP/terrane-fixture"
+          node test/fixtures/compareTerraneFixture.mjs "$RUNNER_TEMP/terrane-fixture"
+      - name: Install Chromium for independent 3D Tiles conformance
+        run: npx playwright install --with-deps chromium
+      - name: Prove implicit refinement and quadrant identity in CesiumJS
+        run: npx vitest run --config vitest.browser.config.ts test/browser/cesiumImplicit.spec.ts
       - run: npm run build
 
   # The adapter's mapper exists in no released vtk.js, so the only proof that

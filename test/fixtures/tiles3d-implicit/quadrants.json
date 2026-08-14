@@ -1,0 +1,60 @@
+{
+  "quadrants": [
+    {
+      "name": "southwest",
+      "address": {
+        "level": 1,
+        "x": 0,
+        "y": 0
+      },
+      "sampleWgs84": {
+        "longitude": -77.75,
+        "latitude": -30.47152276671909
+      },
+      "sampleHeight": 140.0,
+      "expectedRgb": [230, 60, 60]
+    },
+    {
+      "name": "southeast",
+      "address": {
+        "level": 1,
+        "x": 1,
+        "y": 0
+      },
+      "sampleWgs84": {
+        "longitude": -57.25,
+        "latitude": -30.47152276671909
+      },
+      "sampleHeight": 140.0,
+      "expectedRgb": [60, 180, 80]
+    },
+    {
+      "name": "northwest",
+      "address": {
+        "level": 1,
+        "x": 0,
+        "y": 1
+      },
+      "sampleWgs84": {
+        "longitude": -77.75,
+        "latitude": -11.971522766719088
+      },
+      "sampleHeight": 140.0,
+      "expectedRgb": [70, 100, 230]
+    },
+    {
+      "name": "northeast",
+      "address": {
+        "level": 1,
+        "x": 1,
+        "y": 1
+      },
+      "sampleWgs84": {
+        "longitude": -57.25,
+        "latitude": -11.971522766719088
+      },
+      "sampleHeight": 140.0,
+      "expectedRgb": [235, 190, 50]
+    }
+  ]
+}

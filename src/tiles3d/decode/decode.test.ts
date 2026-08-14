@@ -16,6 +16,7 @@ import {
   buildDecodeCacheKey,
   buildTransferList,
   capabilityTarget,
+  TileUnsupportedExtensionError,
   type DecodeTileRequest,
   type TextureCapabilities,
 } from ".";
@@ -57,6 +58,23 @@ const request = async (
   tilesetToScene: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
   textureCapabilities,
 });
+
+const checkedInRequest = async (name: string): Promise<DecodeTileRequest> => {
+  const bytes = await readFile(
+    new URL(`../../../test/fixtures/tiles3d-decode/${name}`, import.meta.url),
+  );
+  return {
+    content: bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength,
+    ),
+    contentUrl: `https://fixture.invalid/content/${name}`,
+    revision: "checked-in-fixture",
+    accumulatedTransform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+    tilesetToScene: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+    textureCapabilities: capabilities("rgba", []),
+  };
+};
 
 const raster = async (): Promise<{
   rgba: Uint8Array;
@@ -198,6 +216,69 @@ const embeddedGltf = ({
 };
 
 describe("decoded tile contract", () => {
+  it("rejects a meshopt-required asset with a named tile/profile error", async () => {
+    await expect(
+      decodeTileContent(await checkedInRequest("meshopt-required.gltf")),
+    ).rejects.toMatchObject({
+      name: "TileUnsupportedExtensionError",
+      tileUri: "https://fixture.invalid/content/meshopt-required.gltf",
+      stage: "profile",
+      extension: "EXT_meshopt_compression",
+    });
+    await expect(
+      decodeTileContent(await checkedInRequest("meshopt-required.gltf")),
+    ).rejects.toBeInstanceOf(TileUnsupportedExtensionError);
+  });
+
+  it("pins Y-up conversion and rejects indices outside POSITION", async () => {
+    const result = await decodeTileContent(
+      await checkedInRequest("y-up-triangle.gltf"),
+    );
+    const positions = result.primitives[0]!.positions;
+    const absolute = Array.from({ length: 3 }, (_value, vertex) => [
+      positions[vertex * 3]! + result.origin[0],
+      positions[vertex * 3 + 1]! + result.origin[1],
+      positions[vertex * 3 + 2]! + result.origin[2],
+    ]);
+    expect(absolute).toEqual([
+      [0, 0, 0],
+      [0, 0, 1],
+      [0, -1, 0],
+    ]);
+
+    await expect(
+      decodeTileContent(await checkedInRequest("invalid-index.gltf")),
+    ).rejects.toMatchObject({
+      name: "TileDecodeError",
+      stage: "decode",
+      reason: expect.stringMatching(/index exceeds.*3-vertex/),
+    });
+  });
+
+  it("decodes the license-recorded Khronos orientation asset in the Y-up profile", async () => {
+    const result = await decodeTileContent(
+      await checkedInRequest("orientation-test.glb"),
+      testOptions,
+    );
+    expect(result.primitives.length).toBeGreaterThan(10);
+    expect(
+      result.primitives.every(
+        (primitive) =>
+          primitive.indices !== undefined && primitive.indices.length > 0,
+      ),
+    ).toBe(true);
+    expect(result.origin.every(Number.isFinite)).toBe(true);
+  });
+
+  it("accepts required unlit and carries it into renderer-neutral material", async () => {
+    const result = await decodeTileContent(
+      await checkedInRequest("unlit-triangle.gltf"),
+    );
+    expect(result.primitives[0]?.material.raw).toMatchObject({
+      name: "orthomosaic",
+      unlit: true,
+    });
+  });
   it("rejects glTF sampler enums before they reach a renderer backend", async () => {
     const embedded = embeddedGltf({ sampler: { magFilter: 7 } });
     await expect(

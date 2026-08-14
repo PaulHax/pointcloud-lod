@@ -1,4 +1,4 @@
-/** Pure camera-driven traversal for explicit REPLACE 3D Tiles hierarchies. */
+/** Pure camera-driven traversal for explicit and implicit REPLACE hierarchies. */
 
 import {
   frustumPlanes,
@@ -9,9 +9,14 @@ import {
 } from "../camera";
 import {
   multiplyTilesetMatrices,
+  substituteImplicitTemplate,
+  type ImplicitTileAddress,
   type TilesetBox,
+  type TilesetImplicitTiling,
   type TilesetTile,
 } from "./tilesetSource";
+import { quadtreeMortonIndex, subtreeTileIndex } from "./subtree";
+import type { SubtreeRequest, SubtreeStoreSnapshot } from "./subtreeStore";
 
 export type TileReadiness =
   | "unloaded"
@@ -30,6 +35,8 @@ export type TilesetTraversalOptions = {
   /** Caller-owned anchor × tileset-to-scene transform. */
   readonly modelMatrix?: readonly number[];
   readonly readiness: (tileId: string) => TileReadiness;
+  /** Immutable hierarchy state sampled at the beginning of this pass. */
+  readonly subtrees?: SubtreeStoreSnapshot | null;
 };
 
 export type TilesetTraversalResult = {
@@ -49,6 +56,10 @@ export type TilesetTraversalResult = {
    * when the root is culled or carries no content.
    */
   readonly rootScreenSpaceErrorPx: number;
+  /** Visible unknown boundaries. The member owns fetching and retry policy. */
+  readonly neededSubtreeRequests: readonly SubtreeRequest[];
+  /** Explicit source tiles plus implicit tiles materialized for this pass. */
+  readonly tileById: ReadonlyMap<string, TilesetTile>;
 };
 
 type Vec3 = readonly [number, number, number];
@@ -167,6 +178,194 @@ type VisitResult = {
   readonly drawn: string[];
 };
 
+type MaterializedHierarchy = {
+  readonly root: TilesetTile;
+  readonly tileById: ReadonlyMap<string, TilesetTile>;
+  readonly unknownRequestByTileId: ReadonlyMap<string, SubtreeRequest>;
+};
+
+const implicitTileId = (address: ImplicitTileAddress): string => {
+  if (address.level === 0) return "root";
+  const parts = ["root"];
+  for (let bit = address.level - 1; bit >= 0; bit -= 1) {
+    parts.push(String(((address.x >> bit) & 1) + 2 * ((address.y >> bit) & 1)));
+  }
+  return parts.join("/");
+};
+
+const childAddress = (
+  parent: ImplicitTileAddress,
+  quadrant: number,
+): ImplicitTileAddress =>
+  Object.freeze({
+    level: parent.level + 1,
+    x: parent.x * 2 + (quadrant & 1),
+    y: parent.y * 2 + ((quadrant >> 1) & 1),
+  });
+
+const implicitRequest = (
+  descriptor: TilesetImplicitTiling,
+  address: ImplicitTileAddress,
+): SubtreeRequest =>
+  Object.freeze({
+    id: `subtree/${address.level}/${address.x}/${address.y}`,
+    url: substituteImplicitTemplate(descriptor.subtreeUrlTemplate, address),
+  });
+
+const implicitContent = (
+  descriptor: TilesetImplicitTiling,
+  address: ImplicitTileAddress,
+): { readonly contentUri: string; readonly contentUrl: string } =>
+  Object.freeze({
+    contentUri: substituteImplicitTemplate(
+      descriptor.contentUriTemplate,
+      address,
+    ),
+    contentUrl: substituteImplicitTemplate(
+      descriptor.contentUrlTemplate,
+      address,
+    ),
+  });
+
+const explicitHierarchy = (root: TilesetTile): MaterializedHierarchy => {
+  const tileById = new Map<string, TilesetTile>();
+  const collect = (tile: TilesetTile): void => {
+    tileById.set(tile.id, tile);
+    for (const child of tile.children) collect(child);
+  };
+  collect(root);
+  return {
+    root,
+    tileById,
+    unknownRequestByTileId: new Map(),
+  };
+};
+
+const implicitHierarchy = (
+  documentRoot: TilesetTile,
+  snapshot: SubtreeStoreSnapshot | null | undefined,
+): MaterializedHierarchy => {
+  const descriptor = documentRoot.implicitTiling!;
+  const tileById = new Map<string, TilesetTile>();
+  const unknownRequestByTileId = new Map<string, SubtreeRequest>();
+  const entryById = new Map(
+    snapshot?.entries.map((entry) => [entry.id, entry]) ?? [],
+  );
+
+  const proxy = (
+    address: ImplicitTileAddress,
+    boundingVolume: TilesetBox,
+  ): TilesetTile => {
+    const id = implicitTileId(address);
+    unknownRequestByTileId.set(id, implicitRequest(descriptor, address));
+    const tile = Object.freeze({
+      id,
+      geometricError: documentRoot.geometricError / 2 ** address.level,
+      boundingVolume,
+      transform: address.level === 0 ? documentRoot.transform : IDENTITY,
+      worldTransform: documentRoot.worldTransform,
+      children: Object.freeze([]),
+      implicitAddress: address,
+    });
+    tileById.set(id, tile);
+    return tile;
+  };
+
+  const buildSubtree = (
+    subtreeRoot: ImplicitTileAddress,
+    fallbackBounds: TilesetBox,
+  ): TilesetTile => {
+    const request = implicitRequest(descriptor, subtreeRoot);
+    const parsed = snapshot?.subtreeById.get(request.id);
+    if (!parsed) return proxy(subtreeRoot, fallbackBounds);
+
+    const buildTile = (
+      localLevel: number,
+      localX: number,
+      localY: number,
+      address: ImplicitTileAddress,
+    ): TilesetTile => {
+      const tileIndex = subtreeTileIndex(localLevel, localX, localY);
+      const bounds = parsed.tileBoundingBoxes[tileIndex];
+      if (!bounds) {
+        // parseSubtree enforces metadata for every available tile. This guard
+        // keeps custom test parsers from materializing an under-bounded tile.
+        throw new Error(
+          `available implicit tile ${tileIndex} has no metadata bounds`,
+        );
+      }
+      const children: TilesetTile[] = [];
+      if (address.level + 1 < descriptor.availableLevels) {
+        if (localLevel + 1 < descriptor.subtreeLevels) {
+          for (let quadrant = 0; quadrant < 4; quadrant += 1) {
+            const childLocalX = localX * 2 + (quadrant & 1);
+            const childLocalY = localY * 2 + ((quadrant >> 1) & 1);
+            const childIndex = subtreeTileIndex(
+              localLevel + 1,
+              childLocalX,
+              childLocalY,
+            );
+            if (!parsed.tileAvailability.isAvailable(childIndex)) continue;
+            children.push(
+              buildTile(
+                localLevel + 1,
+                childLocalX,
+                childLocalY,
+                childAddress(address, quadrant),
+              ),
+            );
+          }
+        } else {
+          for (let quadrant = 0; quadrant < 4; quadrant += 1) {
+            const childLocalX = localX * 2 + (quadrant & 1);
+            const childLocalY = localY * 2 + ((quadrant >> 1) & 1);
+            const childIndex = quadtreeMortonIndex(
+              descriptor.subtreeLevels,
+              childLocalX,
+              childLocalY,
+            );
+            if (!parsed.childSubtreeAvailability.isAvailable(childIndex))
+              continue;
+            const nextAddress = childAddress(address, quadrant);
+            children.push(buildSubtree(nextAddress, bounds));
+          }
+        }
+      }
+      const content = parsed.contentAvailability.isAvailable(tileIndex)
+        ? implicitContent(descriptor, address)
+        : undefined;
+      const id = implicitTileId(address);
+      const tile: TilesetTile = Object.freeze({
+        id,
+        geometricError: documentRoot.geometricError / 2 ** address.level,
+        boundingVolume: bounds,
+        transform: address.level === 0 ? documentRoot.transform : IDENTITY,
+        worldTransform: documentRoot.worldTransform,
+        ...content,
+        children: Object.freeze(children),
+        implicitAddress: address,
+        ...(address.level === 0 ? { implicitTiling: descriptor } : {}),
+      });
+      tileById.set(id, tile);
+      return tile;
+    };
+
+    // A failed selected entry remains an unknown boundary and is deliberately
+    // not converted to empty availability.
+    if (entryById.get(request.id)?.status === "failed") {
+      return proxy(subtreeRoot, fallbackBounds);
+    }
+    return buildTile(0, 0, 0, subtreeRoot);
+  };
+
+  const rootAddress = Object.freeze({ level: 0, x: 0, y: 0 });
+  return {
+    root: buildSubtree(rootAddress, documentRoot.boundingVolume),
+    tileById,
+    unknownRequestByTileId,
+  };
+};
+
 const hasContent = (tile: TilesetTile): boolean =>
   tile.contentUrl !== undefined;
 
@@ -186,6 +385,10 @@ export const traverseTileset = (
   const effective = options.maximumScreenSpaceErrorPx / Math.max(quality, 0.05);
   const planes = frustumPlanes(options.camera.viewProj);
   const culled: string[] = [];
+  const hierarchy = options.root.implicitTiling
+    ? implicitHierarchy(options.root, options.subtrees)
+    : explicitHierarchy(options.root);
+  const neededSubtrees = new Map<string, SubtreeRequest>();
 
   const hasSubmittedDescendant = (tile: TilesetTile): boolean =>
     tile.children.some(
@@ -211,6 +414,19 @@ export const traverseTileset = (
         desired: [],
         requested: [],
         drawn: [],
+      };
+    }
+
+    const unknownRequest = hierarchy.unknownRequestByTileId.get(tile.id);
+    if (unknownRequest) {
+      neededSubtrees.set(unknownRequest.id, unknownRequest);
+      const submitted = options.readiness(tile.id) === "submitted";
+      return {
+        visible: true,
+        coverageSubmitted: submitted,
+        desired: [],
+        requested: submitted ? [tile.id] : [],
+        drawn: submitted ? [tile.id] : [],
       };
     }
 
@@ -291,16 +507,16 @@ export const traverseTileset = (
   };
 
   const rootParent = options.modelMatrix ?? IDENTITY;
-  const result = visit(options.root, rootParent);
+  const result = visit(hierarchy.root, rootParent);
   const rootAccumulated = multiplyTilesetMatrices(
     rootParent,
-    options.root.transform,
+    hierarchy.root.transform,
   );
   const rootSse = result.visible
     ? screenSpaceError(
-        options.root,
+        hierarchy.root,
         rootAccumulated,
-        worldBox(options.root.boundingVolume, rootAccumulated),
+        worldBox(hierarchy.root.boundingVolume, rootAccumulated),
         options.camera,
       )
     : 0;
@@ -312,5 +528,7 @@ export const traverseTileset = (
     effectiveScreenSpaceErrorPx: effective,
     rootScreenSpaceErrorPx:
       Number.isFinite(rootSse) && rootSse > 0 ? rootSse : 0,
+    neededSubtreeRequests: Object.freeze([...neededSubtrees.values()]),
+    tileById: hierarchy.tileById,
   });
 };

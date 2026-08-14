@@ -5,7 +5,12 @@ import { createSubmissionScheduler } from "../../src/submissionScheduler";
 import { createMeshAdapter } from "../../src/tiles3d/meshAdapter";
 
 const mode = new URLSearchParams(window.location.search).get("mode");
-if (mode !== "MASK" && mode !== "OPAQUE" && mode !== "BLEND") {
+if (
+  mode !== "MASK" &&
+  mode !== "OPAQUE" &&
+  mode !== "BLEND" &&
+  mode !== "UNLIT"
+) {
   throw new Error(`unsupported alpha mode ${mode}`);
 }
 
@@ -20,10 +25,12 @@ const scheduler = createSubmissionScheduler({
   maxTimeMsPerFrame: 100,
   now: () => 0,
 });
+const adapterErrors = [];
 const adapter = createMeshAdapter({
   renderer,
   scheduleRender: () => {},
   submissions: scheduler,
+  onError: (error) => adapterErrors.push(String(error)),
 });
 const sampler = {
   magFilter: 9728,
@@ -31,9 +38,43 @@ const sampler = {
   wrapS: 33071,
   wrapT: 33071,
 };
-const primitive = (z, color, alphaMode, texture) => ({
-  positions: new Float32Array([-2, -1, z, 2, -1, z, 2, 1, z, -2, 1, z]),
-  normals: new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1]),
+const primitive = (
+  z,
+  color,
+  alphaMode,
+  texture,
+  unlit = false,
+  xRange = [-2, 2],
+  normalZ = 1,
+) => ({
+  positions: new Float32Array([
+    xRange[0],
+    -1,
+    z,
+    xRange[1],
+    -1,
+    z,
+    xRange[1],
+    1,
+    z,
+    xRange[0],
+    1,
+    z,
+  ]),
+  normals: new Float32Array([
+    0,
+    0,
+    normalZ,
+    0,
+    0,
+    normalZ,
+    0,
+    0,
+    normalZ,
+    0,
+    0,
+    normalZ,
+  ]),
   uvs: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]),
   indices: new Uint16Array([0, 1, 2, 0, 2, 3]),
   material: {
@@ -45,6 +86,7 @@ const primitive = (z, color, alphaMode, texture) => ({
       alphaMode,
       alphaCutoff: 0.5,
       doubleSided: false,
+      unlit,
       metallicFactor: 0,
       roughnessFactor: 1,
       emissiveFactor: [0, 0, 0],
@@ -68,8 +110,14 @@ const texture = {
 };
 const foreground = {
   origin: [0, 0, 0],
-  primitives: [primitive(0, [1, 1, 1, 1], mode, texture)],
-  byteEstimate: { geometry: 0, textures: 8 },
+  primitives:
+    mode === "UNLIT"
+      ? [
+          primitive(0, [1, 0, 0, 1], "OPAQUE", undefined, true, [-2, 0], -1),
+          primitive(0, [1, 0, 0, 1], "OPAQUE", undefined, false, [0, 2], -1),
+        ]
+      : [primitive(0, [1, 1, 1, 1], mode, texture)],
+  byteEstimate: { geometry: 0, textures: mode === "UNLIT" ? 0 : 8 },
 };
 adapter.submitTile("background", background);
 adapter.submitTile("foreground", foreground);
@@ -83,4 +131,6 @@ camera.setViewUp(0, 1, 0);
 camera.setParallelScale(1);
 renderer.resetCameraClippingRange();
 renderWindow.render();
+document.documentElement.dataset.stats = JSON.stringify(adapter.stats());
+document.documentElement.dataset.adapterErrors = JSON.stringify(adapterErrors);
 document.documentElement.dataset.ready = "true";

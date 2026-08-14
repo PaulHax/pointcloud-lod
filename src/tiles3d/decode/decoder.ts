@@ -25,6 +25,7 @@ import type {
   SerializableMaterial,
   SerializableSampler,
 } from "./types";
+import { TileDecodeError, TileUnsupportedExtensionError } from "./types";
 
 interface BasisMetadata {
   width: number;
@@ -124,7 +125,38 @@ interface GltfMaterial {
   alphaMode?: string;
   alphaCutoff?: number;
   doubleSided?: boolean;
+  extensions?: {
+    KHR_materials_unlit?: Record<string, never>;
+  };
 }
+
+const REQUIRED_EXTENSION_ALLOWLIST = new Set([
+  "KHR_draco_mesh_compression",
+  "KHR_texture_basisu",
+  "KHR_materials_unlit",
+  "KHR_mesh_quantization",
+]);
+
+const validateRequiredExtensions = (json: GltfJson, tileUri: string): void => {
+  if (json.extensionsRequired === undefined) return;
+  if (
+    !Array.isArray(json.extensionsRequired) ||
+    json.extensionsRequired.some(
+      (extension) => typeof extension !== "string" || extension.length === 0,
+    )
+  ) {
+    throw new TileDecodeError(
+      tileUri,
+      "profile",
+      "extensionsRequired must contain non-empty strings",
+    );
+  }
+  for (const extension of json.extensionsRequired) {
+    if (!REQUIRED_EXTENSION_ALLOWLIST.has(extension)) {
+      throw new TileUnsupportedExtensionError(tileUri, extension);
+    }
+  }
+};
 
 interface GltfPrimitive {
   attributes: Record<string, number | ExpandedAccessor>;
@@ -989,6 +1021,16 @@ const applySceneRtc = (
           );
         }
         const indices = accessorIndices(primitive.indices, gltf);
+        const vertexCount = positions.length / 3;
+        if (
+          indices?.some(
+            (index) => !Number.isSafeInteger(index) || index >= vertexCount,
+          )
+        ) {
+          throw new Error(
+            `glTF primitive index exceeds its ${vertexCount}-vertex POSITION accessor`,
+          );
+        }
         pending.push({
           rtc: flattenPrimitiveToRtc(
             {
@@ -1316,6 +1358,7 @@ const materialFor = async (
         : "OPAQUE",
     alphaCutoff: material?.alphaCutoff ?? 0.5,
     doubleSided: material?.doubleSided ?? false,
+    unlit: material?.extensions?.KHR_materials_unlit !== undefined,
     metallicFactor: pbr?.metallicFactor ?? 1,
     roughnessFactor: pbr?.roughnessFactor ?? 1,
     emissiveFactor: [
@@ -1380,7 +1423,7 @@ const actualBytes = (
   };
 };
 
-export const decodeTileContent = async (
+const decodeTileContentInner = async (
   request: DecodeTileRequest,
   options: DecodeTileOptions = {},
 ): Promise<DecodedTileContent> => {
@@ -1394,6 +1437,7 @@ export const decodeTileContent = async (
     basisTarget: null,
   };
   const originalJson = contentJson(request.content);
+  validateRequiredExtensions(originalJson, request.contentUrl);
   const allowedDependencies = dependencyAllowlist(request, originalJson);
   const needsDraco = hasExtension(originalJson, "KHR_draco_mesh_compression");
   const needsBasis = hasExtension(originalJson, "KHR_texture_basisu");
@@ -1444,6 +1488,24 @@ export const decodeTileContent = async (
       decompressMeshes: true,
     },
   })) as unknown as ParsedGltf;
+  // loaders.gl normalizes material objects and currently drops the empty
+  // KHR_materials_unlit marker. Material indices remain stable, so restore
+  // that renderer-significant authored flag from the validated source JSON.
+  for (
+    let index = 0;
+    index < (originalJson.materials?.length ?? 0);
+    index += 1
+  ) {
+    if (
+      originalJson.materials?.[index]?.extensions?.KHR_materials_unlit !==
+      undefined
+    ) {
+      const material = parsed.json.materials?.[index];
+      if (material) {
+        material.extensions = { KHR_materials_unlit: {} };
+      }
+    }
+  }
 
   const sceneTransform = multiplyMat4(
     composeSceneTransform(request.tilesetToScene, request.accumulatedTransform),
@@ -1479,6 +1541,21 @@ export const decodeTileContent = async (
       ...diagnostics,
     },
   };
+};
+
+export const decodeTileContent = async (
+  request: DecodeTileRequest,
+  options: DecodeTileOptions = {},
+): Promise<DecodedTileContent> => {
+  try {
+    return await decodeTileContentInner(request, options);
+  } catch (error) {
+    if (error instanceof TileDecodeError) throw error;
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new TileDecodeError(request.contentUrl, "decode", reason, {
+      cause: error,
+    });
+  }
 };
 
 // Keep this exported for focused URI-policy tests without exposing a fetch

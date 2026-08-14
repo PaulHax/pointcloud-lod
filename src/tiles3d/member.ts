@@ -1,4 +1,4 @@
-/** StreamedMember implementation for the constrained explicit 3D Tiles profile. */
+/** StreamedMember implementation for the constrained 3D Tiles profile. */
 
 import {
   sameCameraView,
@@ -6,7 +6,6 @@ import {
   type CameraView,
   type Mat16,
 } from "../camera";
-import { integerAtLeast } from "../numeric";
 import {
   CULLED,
   importanceFromRootSseCssPx,
@@ -29,17 +28,28 @@ import {
   DEFAULT_TILES3D_CACHE_BYTES,
   DEFAULT_TILES3D_MAX_CONCURRENCY,
   DEFAULT_TILES3D_MIN_CONCURRENCY,
+  DEFAULT_TILES3D_SUBTREE_CACHE_BYTES,
   DEFAULT_VERTICAL_EXAGGERATION,
   DEFAULT_VERTICAL_PIVOT_Z,
   type Tiles3dMemberConfig,
   type Tiles3dMemberStats,
 } from "./memberTypes";
+import {
+  finiteAffineMatrix,
+  validateTiles3dMemberConfig,
+} from "./memberConfig";
 import { createVerticalExaggerationTransform } from "./rtc";
 import {
   loadTileset,
   multiplyTilesetMatrices,
   type TilesetSource,
+  type TilesetTile,
 } from "./tilesetSource";
+import {
+  createSubtreeStore,
+  type SubtreeStore,
+  type SubtreeStoreSnapshot,
+} from "./subtreeStore";
 import { traverseTileset, type TilesetTraversalResult } from "./traversal";
 
 const errorMessage = (error: unknown): string => {
@@ -68,78 +78,6 @@ const sameDecodeWasm = (
     left?.basis?.encoderUrl === right?.basis?.encoderUrl &&
     left?.basis?.wasmUrl === right?.basis?.wasmUrl);
 
-const finiteMatrix = (
-  matrix: readonly number[],
-  label: string,
-): readonly number[] => {
-  if (matrix.length !== 16 || matrix.some((value) => !Number.isFinite(value))) {
-    throw new TypeError(`${label} must contain 16 finite numbers`);
-  }
-  if (
-    Math.abs(matrix[3]!) > 1e-12 ||
-    Math.abs(matrix[7]!) > 1e-12 ||
-    Math.abs(matrix[11]!) > 1e-12 ||
-    Math.abs(matrix[15]! - 1) > 1e-12
-  ) {
-    throw new TypeError(`${label} must be an affine column-major matrix`);
-  }
-  const determinant =
-    matrix[0]! * (matrix[5]! * matrix[10]! - matrix[9]! * matrix[6]!) -
-    matrix[4]! * (matrix[1]! * matrix[10]! - matrix[9]! * matrix[2]!) +
-    matrix[8]! * (matrix[1]! * matrix[6]! - matrix[5]! * matrix[2]!);
-  if (!Number.isFinite(determinant) || Math.abs(determinant) <= 1e-12) {
-    throw new TypeError(`${label} must be invertible`);
-  }
-  return [...matrix];
-};
-
-const validateConfig = (config: Tiles3dMemberConfig): Tiles3dMemberConfig => {
-  if (typeof config.endpoint !== "string" || config.endpoint.length === 0)
-    throw new TypeError("tiles endpoint must be non-empty");
-  if (typeof config.revision !== "string" || config.revision.length === 0)
-    throw new TypeError("tiles revision must be non-empty");
-  finiteMatrix(config.tilesetToScene, "tilesetToScene");
-  const maximum =
-    config.maximumScreenSpaceErrorPx ?? DEFAULT_MAXIMUM_SCREEN_SPACE_ERROR_PX;
-  if (!Number.isFinite(maximum) || maximum <= 0)
-    throw new RangeError("maximumScreenSpaceErrorPx must be finite and > 0");
-  const minimumConcurrency = integerAtLeast(
-    "minConcurrency",
-    config.minConcurrency ?? DEFAULT_TILES3D_MIN_CONCURRENCY,
-    1,
-  );
-  const maximumConcurrency = integerAtLeast(
-    "maxConcurrency",
-    config.maxConcurrency ?? DEFAULT_TILES3D_MAX_CONCURRENCY,
-    minimumConcurrency,
-  );
-  const cacheBytes = config.cacheBytes ?? DEFAULT_TILES3D_CACHE_BYTES;
-  if (!Number.isFinite(cacheBytes) || cacheBytes < 0)
-    throw new RangeError("cacheBytes must be finite and >= 0");
-  const verticalExaggeration =
-    config.verticalExaggeration === undefined
-      ? DEFAULT_VERTICAL_EXAGGERATION
-      : config.verticalExaggeration;
-  if (!Number.isFinite(verticalExaggeration) || verticalExaggeration <= 0) {
-    throw new RangeError("verticalExaggeration must be finite and > 0");
-  }
-  const verticalPivotZ =
-    config.verticalPivotZ === undefined
-      ? DEFAULT_VERTICAL_PIVOT_Z
-      : config.verticalPivotZ;
-  if (!Number.isFinite(verticalPivotZ)) {
-    throw new RangeError("verticalPivotZ must be finite");
-  }
-  return {
-    ...config,
-    minConcurrency: minimumConcurrency,
-    maxConcurrency: maximumConcurrency,
-    cacheBytes,
-    verticalExaggeration,
-    verticalPivotZ,
-  };
-};
-
 const decodedBytes = (content: DecodedTileContent): number =>
   content.byteEstimate.geometry + content.byteEstimate.textures;
 
@@ -158,11 +96,11 @@ const safeCallback = (
 };
 
 const contentRequests = (
-  tileset: TilesetSource,
+  tileById: ReadonlyMap<string, TilesetTile>,
   ids: readonly string[],
 ): { readonly id: string; readonly url: string }[] =>
   ids.flatMap((id) => {
-    const url = tileset.tileById.get(id)?.contentUrl;
+    const url = tileById.get(id)?.contentUrl;
     return url === undefined ? [] : [{ id, url }];
   });
 
@@ -170,7 +108,7 @@ export const createTiles3dMember = (
   context: StreamedMemberContext,
   initialConfig: Tiles3dMemberConfig,
 ): StreamedMember => {
-  let config = validateConfig(initialConfig);
+  let config = validateTiles3dMemberConfig(initialConfig);
   let active = true;
   let disposed = false;
   let sourceState: Tiles3dMemberStats["sourceState"] = "idle";
@@ -195,6 +133,9 @@ export const createTiles3dMember = (
   // Traversal asks readiness for every tile it visits, so the snapshot is
   // indexed on arrival instead of scanned per tile.
   let queueEntryById = new Map<string, ContentQueueEntrySnapshot>();
+  let subtreeStore: SubtreeStore | null = null;
+  let subtreeSnapshot: SubtreeStoreSnapshot | null = null;
+  let materializedTileById = new Map<string, TilesetTile>();
   let traversal: TilesetTraversalResult | null = null;
   let errorCount = 0;
   let lastError: string | null = null;
@@ -291,6 +232,25 @@ export const createTiles3dMember = (
     queueEntryById = new Map(
       snapshot ? snapshot.entries.map((entry) => [entry.id, entry]) : [],
     );
+  };
+
+  const select = (
+    maximumScreenSpaceErrorPx: number,
+    qualityFraction: number,
+  ): TilesetTraversalResult => {
+    const result = traverseTileset({
+      root: source!.root,
+      camera: camera!,
+      maximumScreenSpaceErrorPx,
+      qualityFraction,
+      modelMatrix: traversalModelMatrix(),
+      readiness,
+      subtrees: subtreeSnapshot,
+    });
+    // This hierarchy is derived from the bounded subtree snapshot. Replacing
+    // the map keeps camera exploration from retaining every historical tile.
+    materializedTileById = new Map(result.tileById);
+    return result;
   };
 
   /** Submitted descendants a newly admitted tile replaces under REPLACE. */
@@ -407,14 +367,9 @@ export const createTiles3dMember = (
   const unconstrainedDesiredSignature = (): string | null => {
     if (!source || !camera) return null;
     selectionPasses += 1;
-    return traverseTileset({
-      root: source.root,
-      camera,
-      maximumScreenSpaceErrorPx: maximumSse(),
-      qualityFraction: allocation.qualityFraction,
-      modelMatrix: traversalModelMatrix(),
-      readiness,
-    }).desiredTileIds.join("\n");
+    return select(maximumSse(), allocation.qualityFraction).desiredTileIds.join(
+      "\n",
+    );
   };
 
   const retryIfDesiredSelectionChanged = (): void => {
@@ -470,14 +425,7 @@ export const createTiles3dMember = (
       pickSet.replaceDrawn([]);
       return;
     }
-    traversal = traverseTileset({
-      root: source.root,
-      camera,
-      maximumScreenSpaceErrorPx: traversalMaximumSse(),
-      qualityFraction: traversalQualityFraction(),
-      modelMatrix: traversalModelMatrix(),
-      readiness,
-    });
+    traversal = select(traversalMaximumSse(), traversalQualityFraction());
     selectionPasses += 1;
     adapter.setDrawnTiles(traversal.drawnTileIds);
     pickSet.replaceDrawn(adapter.submittedTiles());
@@ -494,23 +442,18 @@ export const createTiles3dMember = (
     try {
       if (!active || !source || !camera || !queue) {
         queue?.setSelection([]);
+        subtreeStore?.setSelection([]);
         for (const id of requested) adapter.cancelTile(id);
         requested.clear();
         updateDrawSet();
         return;
       }
       selectionPasses += 1;
-      const next = traverseTileset({
-        root: source.root,
-        camera,
-        maximumScreenSpaceErrorPx: traversalMaximumSse(),
-        qualityFraction: traversalQualityFraction(),
-        modelMatrix: traversalModelMatrix(),
-        readiness,
-      });
+      const next = select(traversalMaximumSse(), traversalQualityFraction());
       traversal = next;
+      subtreeStore?.setSelection(next.neededSubtreeRequests);
       const nextContentRequests = contentRequests(
-        source,
+        next.tileById,
         next.requestedTileIds,
       );
       const nextRequested = new Set(
@@ -589,7 +532,7 @@ export const createTiles3dMember = (
         ? {}
         : { retryBackoffMs: config.retryBackoffMs }),
       decode: async (bytes, request, decodeContext) => {
-        const tile = tileset.tileById.get(request.id);
+        const tile = materializedTileById.get(request.id);
         if (!tile) throw new Error(`unknown 3D tile ${request.id}`);
         const job = context.workers.decode({
           content: bytes,
@@ -673,6 +616,47 @@ export const createTiles3dMember = (
     });
   };
 
+  const createHierarchyStore = (tileset: TilesetSource): void => {
+    subtreeStore?.dispose();
+    subtreeStore = null;
+    subtreeSnapshot = null;
+    const implicit = tileset.root.implicitTiling;
+    if (!implicit) return;
+    subtreeStore = createSubtreeStore({
+      revision: config.revision,
+      configGeneration,
+      subtreeLevels: implicit.subtreeLevels,
+      metadataSchema: implicit.metadataSchema,
+      maxConcurrency: concurrency(),
+      maxBytes: DEFAULT_TILES3D_SUBTREE_CACHE_BYTES,
+      ...(config.fetchSubtree ? { fetch: config.fetchSubtree } : {}),
+      ...(config.maxAttempts === undefined
+        ? {}
+        : { maxAttempts: config.maxAttempts }),
+      ...(config.retryBackoffMs === undefined
+        ? {}
+        : { retryBackoffMs: config.retryBackoffMs }),
+      onSubtree: () => {
+        workProgressSerial += 1;
+        if (disposed || !active) return;
+        subtreeSnapshot = subtreeStore?.snapshot() ?? null;
+        refreshSelection();
+        context.scheduleRender();
+      },
+      onError: (_request, error) => {
+        workProgressSerial += 1;
+        report(error);
+        refreshSelection();
+      },
+      onStateChange: (snapshot) => {
+        workProgressSerial += 1;
+        subtreeSnapshot = snapshot;
+        context.onWorkChange?.();
+      },
+    });
+    subtreeSnapshot = subtreeStore.snapshot();
+  };
+
   const beginLoad = (): void => {
     if (disposed || !active) return;
     const generation = ++loadGeneration;
@@ -681,6 +665,7 @@ export const createTiles3dMember = (
     loadController = controller;
     sourceState = "loading";
     source = null;
+    materializedTileById.clear();
     traversal = null;
     setQueueSnapshot(null);
     context.onWorkChange?.();
@@ -697,9 +682,11 @@ export const createTiles3dMember = (
         )
           return;
         source = loaded;
+        materializedTileById = new Map(loaded.tileById);
         workProgressSerial += 1;
         sourceState = "ready";
         createQueue(loaded);
+        createHierarchyStore(loaded);
         refreshSelection();
         context.scheduleRender();
       },
@@ -739,7 +726,7 @@ export const createTiles3dMember = (
         modelMatrix =
           matrix === null
             ? null
-            : finiteMatrix(Array.from(matrix), "model matrix");
+            : finiteAffineMatrix(Array.from(matrix), "model matrix");
       } catch (error) {
         report(error);
         return;
@@ -764,6 +751,7 @@ export const createTiles3dMember = (
         loadController?.abort();
         loadGeneration += 1;
         queue?.setSelection([]);
+        subtreeStore?.setSelection([]);
         for (const id of requested) adapter.cancelTile(id);
         adapter.clearTiles();
         pickSet.replaceDrawn([]);
@@ -787,7 +775,7 @@ export const createTiles3dMember = (
       if (disposed) return;
       let next: Tiles3dMemberConfig;
       try {
-        next = validateConfig(kindConfig as Tiles3dMemberConfig);
+        next = validateTiles3dMemberConfig(kindConfig as Tiles3dMemberConfig);
       } catch (error) {
         report(error);
         return;
@@ -808,9 +796,13 @@ export const createTiles3dMember = (
         queue?.dispose();
         queue = null;
         setQueueSnapshot(null);
+        subtreeStore?.dispose();
+        subtreeStore = null;
+        subtreeSnapshot = null;
         adapter.clearTiles();
         pickSet.replaceDrawn([]);
         source = null;
+        materializedTileById.clear();
         sourceState = "idle";
         traversal = null;
         requested.clear();
@@ -826,6 +818,7 @@ export const createTiles3dMember = (
           maxConcurrency: concurrency(),
           maxDecodedBytes: config.cacheBytes ?? DEFAULT_TILES3D_CACHE_BYTES,
         });
+        subtreeStore?.configure({ maxConcurrency: concurrency() });
         retryIfDesiredSelectionChanged();
         refreshSelection();
       }
@@ -858,19 +851,26 @@ export const createTiles3dMember = (
             active &&
             (sourceState === "loading" ||
               !!queueSnapshot?.workPending ||
+              !!subtreeSnapshot?.workPending ||
               renderer.pendingJobs > 0 ||
               (traversal?.requestedTileIds.some((id) => {
                 const state = readiness(id);
                 return state !== "submitted" && state !== "failed";
               }) ??
                 false))
-              ? Math.max(1, (queueSnapshot?.active ?? 0) + renderer.pendingJobs)
+              ? Math.max(
+                  1,
+                  (queueSnapshot?.active ?? 0) +
+                    (subtreeSnapshot?.active ?? 0) +
+                    renderer.pendingJobs,
+                )
               : 0,
           progressSerial: workProgressSerial + renderer.workRevision,
         },
         physicalTileOperations: active ? (queueSnapshot?.active ?? 0) : 0,
-        physicalHierarchyOperations:
-          active && sourceState === "loading" ? 1 : 0,
+        physicalHierarchyOperations: active
+          ? (sourceState === "loading" ? 1 : 0) + (subtreeSnapshot?.active ?? 0)
+          : 0,
         residentBytes: renderer.residentBytes,
       };
     },
@@ -907,6 +907,7 @@ export const createTiles3dMember = (
         maxConcurrency: concurrency(),
         maxDecodedBytes: config.cacheBytes ?? DEFAULT_TILES3D_CACHE_BYTES,
       });
+      subtreeStore?.configure({ maxConcurrency: concurrency() });
       refreshSelection();
       // An oversize decoded value is deliberately not cached by ContentQueue.
       // If it was blocked by the previous GPU allowance, deselect/reselect it
@@ -920,7 +921,7 @@ export const createTiles3dMember = (
       if (queue && uncachedBlocked.size > 0) {
         queue.setSelection(
           contentRequests(
-            source!,
+            materializedTileById,
             [...requested].filter((id) => !uncachedBlocked.has(id)),
           ),
         );
@@ -968,6 +969,7 @@ export const createTiles3dMember = (
         errorCount,
         lastError,
         queue: queueSnapshot,
+        subtrees: subtreeSnapshot,
         decode: context.workers.stats?.() ?? null,
         renderer: adapter.stats(),
         submissions: {
@@ -995,6 +997,9 @@ export const createTiles3dMember = (
       loadController?.abort();
       queue?.dispose();
       queue = null;
+      subtreeStore?.dispose();
+      subtreeStore = null;
+      subtreeSnapshot = null;
       requested.clear();
       decoded.clear();
       admissionBlocked.clear();
@@ -1002,6 +1007,7 @@ export const createTiles3dMember = (
       adapter.dispose();
       pickSet.dispose();
       source = null;
+      materializedTileById.clear();
       camera = null;
     },
   };
