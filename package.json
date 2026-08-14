@@ -27,6 +27,7 @@
     "dist",
     "src",
     "!src/**/*.test.ts",
+    "test/fixtures/tiles3d-source-contract.json",
     "vtkjs-fork.env"
   ],
   "type": "module",
