@@ -244,6 +244,7 @@ export const createTiles3dMember = (
       maximumScreenSpaceErrorPx,
       qualityFraction,
       modelMatrix: traversalModelMatrix(),
+      geometricErrorScale: config.geometricErrorScale,
       readiness,
       subtrees: subtreeSnapshot,
     });
@@ -788,7 +789,8 @@ export const createTiles3dMember = (
         ) || !sameDecodeWasm(next.wasm, config.wasm);
       const placementChanged =
         next.verticalExaggeration !== config.verticalExaggeration ||
-        next.verticalPivotZ !== config.verticalPivotZ;
+        next.verticalPivotZ !== config.verticalPivotZ ||
+        next.geometricErrorScale !== config.geometricErrorScale;
       config = next;
       if (placementChanged) applyPlacement();
       if (sourceChanged || decodeChanged) {
@@ -958,6 +960,7 @@ export const createTiles3dMember = (
         verticalExaggeration:
           config.verticalExaggeration ?? DEFAULT_VERTICAL_EXAGGERATION,
         verticalPivotZ: config.verticalPivotZ ?? DEFAULT_VERTICAL_PIVOT_Z,
+        geometricErrorScale: config.geometricErrorScale ?? "maximum",
         allocation,
         maximumScreenSpaceErrorPx: maximumSse(),
         effectiveScreenSpaceErrorPx: effectiveSse,

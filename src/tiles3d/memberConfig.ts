@@ -93,6 +93,15 @@ export const validateTiles3dMemberConfig = (
   if (!Number.isFinite(verticalPivotZ)) {
     throw new RangeError("verticalPivotZ must be finite");
   }
+  const geometricErrorScale = config.geometricErrorScale ?? "maximum";
+  if (
+    geometricErrorScale !== "maximum" &&
+    geometricErrorScale !== "horizontal"
+  ) {
+    throw new RangeError(
+      "geometricErrorScale must be 'maximum' or 'horizontal'",
+    );
+  }
   return {
     ...config,
     minConcurrency: minimumConcurrency,
@@ -100,5 +109,6 @@ export const validateTiles3dMemberConfig = (
     cacheBytes,
     verticalExaggeration,
     verticalPivotZ,
+    geometricErrorScale,
   };
 };
