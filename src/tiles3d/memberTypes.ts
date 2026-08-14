@@ -13,6 +13,8 @@ export const DEFAULT_TILES3D_SUBTREE_CACHE_BYTES = 8 * 1024 * 1024;
 export const DEFAULT_VERTICAL_EXAGGERATION = 1;
 export const DEFAULT_VERTICAL_PIVOT_Z = 0;
 
+export type GeometricErrorScale = "maximum" | "horizontal";
+
 export type Tiles3dMemberConfig = {
   readonly endpoint: string;
   readonly revision: string;
@@ -21,6 +23,8 @@ export type Tiles3dMemberConfig = {
   readonly verticalExaggeration?: number;
   /** Finite scene Z coordinate held fixed by exaggeration. */
   readonly verticalPivotZ?: number;
+  /** Scale convention for tile geometric error; terrain error is horizontal. */
+  readonly geometricErrorScale?: GeometricErrorScale;
   readonly maximumScreenSpaceErrorPx?: number;
   readonly wasm?: DecodeWasmUrls;
   readonly cacheBytes?: number;
@@ -52,6 +56,7 @@ export type Tiles3dMemberStats = {
   readonly configGeneration: number;
   readonly verticalExaggeration: number;
   readonly verticalPivotZ: number;
+  readonly geometricErrorScale: GeometricErrorScale;
   readonly allocation: Allocation;
   readonly maximumScreenSpaceErrorPx: number;
   readonly effectiveScreenSpaceErrorPx: number;

@@ -554,6 +554,44 @@ describe("traverseTileset", () => {
         },
       ).desiredTileIds,
     ).toEqual(["root/0", "root/1"]);
+    expect(
+      select(
+        tree(),
+        {},
+        {
+          camera: orthographic,
+          modelMatrix: createVerticalExaggerationTransform(8, 0),
+          geometricErrorScale: "horizontal",
+        },
+      ).desiredTileIds,
+    ).toEqual(["root"]);
+
+    const errorHalvingChain = makeTile("level-0", 8, [
+      makeTile("level-1", 4, [
+        makeTile("level-2", 2, [makeTile("level-3", 1)]),
+      ]),
+    ]);
+    expect(
+      select(
+        errorHalvingChain,
+        {},
+        {
+          camera: orthographic,
+          modelMatrix: createVerticalExaggerationTransform(8, 0),
+        },
+      ).desiredTileIds,
+    ).toEqual(["level-3"]);
+    expect(
+      select(
+        errorHalvingChain,
+        {},
+        {
+          camera: orthographic,
+          modelMatrix: createVerticalExaggerationTransform(8, 0),
+          geometricErrorScale: "horizontal",
+        },
+      ).desiredTileIds,
+    ).toEqual(["level-0"]);
   });
 
   it("refines while the camera is inside a volume", () => {

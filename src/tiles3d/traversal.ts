@@ -17,6 +17,7 @@ import {
 } from "./tilesetSource";
 import { quadtreeMortonIndex, subtreeTileIndex } from "./subtree";
 import type { SubtreeRequest, SubtreeStoreSnapshot } from "./subtreeStore";
+import type { GeometricErrorScale } from "./memberTypes";
 
 export type TileReadiness =
   | "unloaded"
@@ -34,6 +35,8 @@ export type TilesetTraversalOptions = {
   readonly qualityFraction?: number;
   /** Caller-owned anchor × tileset-to-scene transform. */
   readonly modelMatrix?: readonly number[];
+  /** Maximum-axis 3D Tiles convention, or local XY for terrain-derived error. */
+  readonly geometricErrorScale?: GeometricErrorScale;
   readonly readiness: (tileId: string) => TileReadiness;
   /** Immutable hierarchy state sampled at the beginning of this pass. */
   readonly subtrees?: SubtreeStoreSnapshot | null;
@@ -149,13 +152,24 @@ const maximumScale = (matrix: readonly number[]): number =>
     Math.hypot(matrix[8]!, matrix[9]!, matrix[10]!),
   );
 
+const horizontalScale = (matrix: readonly number[]): number =>
+  Math.max(
+    Math.hypot(matrix[0]!, matrix[1]!, matrix[2]!),
+    Math.hypot(matrix[4]!, matrix[5]!, matrix[6]!),
+  );
+
 const screenSpaceError = (
   tile: TilesetTile,
   matrix: readonly number[],
   box: WorldBox,
   camera: CameraView,
+  errorScale: GeometricErrorScale,
 ): number => {
-  const error = tile.geometricError * maximumScale(matrix);
+  const scale =
+    errorScale === "horizontal"
+      ? horizontalScale(matrix)
+      : maximumScale(matrix);
+  const error = tile.geometricError * scale;
   return camera.projection === "orthographic"
     ? orthographicScreenSpaceError(
         error,
@@ -382,6 +396,12 @@ export const traverseTileset = (
   if (!Number.isFinite(quality) || quality < 0 || quality > 1) {
     throw new RangeError("qualityFraction must be finite and in [0, 1]");
   }
+  const errorScale = options.geometricErrorScale ?? "maximum";
+  if (errorScale !== "maximum" && errorScale !== "horizontal") {
+    throw new RangeError(
+      "geometricErrorScale must be 'maximum' or 'horizontal'",
+    );
+  }
   const effective = options.maximumScreenSpaceErrorPx / Math.max(quality, 0.05);
   const planes = frustumPlanes(options.camera.viewProj);
   const culled: string[] = [];
@@ -436,8 +456,13 @@ export const traverseTileset = (
     const refine =
       tile.children.length > 0 &&
       (!contentful ||
-        screenSpaceError(tile, accumulated, bounds, options.camera) >
-          effective);
+        screenSpaceError(
+          tile,
+          accumulated,
+          bounds,
+          options.camera,
+          errorScale,
+        ) > effective);
     const childResults = refine
       ? tile.children.map((child) => visit(child, accumulated))
       : [];
@@ -518,6 +543,7 @@ export const traverseTileset = (
         rootAccumulated,
         worldBox(hierarchy.root.boundingVolume, rootAccumulated),
         options.camera,
+        errorScale,
       )
     : 0;
   return Object.freeze({
