@@ -218,6 +218,7 @@ export const createStreamedSceneCoordinator = (
   let stallTimer: ReturnType<typeof setTimeout> | null = null;
   let lastPreparedFrameSerial = -1;
   let refreshing = false;
+  let refreshPending = false;
   let viewQualityFraction = 1;
   let globalQualityTargets: AdaptiveQualityTargets | undefined;
   let appliedTargetState: MemberState | null = null;
@@ -278,99 +279,126 @@ export const createStreamedSceneCoordinator = (
     return false;
   };
 
+  /**
+   * Passes one `refresh` will make before leaving the rest to the next one.
+   *
+   * Applying an allocation calls back into the member, which reports the work
+   * that allocation created, which is another refresh — so a refresh has to
+   * re-run until the allocations stop changing, and two members sharing one
+   * quality budget can trade it back and forth without ever settling. The cap
+   * bounds that. Nothing is lost by stopping: every frame refreshes again, and
+   * the work state a dropped pass would have written is recomputed from the
+   * members rather than accumulated.
+   */
+  const MAX_REFRESH_PASSES = 8;
+
+  const refreshOnce = (): void => {
+    for (const state of members) {
+      state.inputs = state.active
+        ? normalizeInputs(state.member.governorInputs())
+        : EMPTY_INPUTS;
+    }
+    if (stallTimer !== null) clearTimeout(stallTimer);
+    stallTimer = null;
+    const checkedAt = now();
+    let nextStallDelay = Number.POSITIVE_INFINITY;
+    for (const state of members) {
+      const operations =
+        state.inputs.work.operations +
+        state.inputs.physicalTileOperations +
+        state.inputs.physicalHierarchyOperations;
+      if (!state.active || operations === 0) {
+        state.lastProgressSerial = state.inputs.work.progressSerial;
+        state.lastProgressAt = checkedAt;
+        state.stalled = false;
+        state.stallReported = false;
+        continue;
+      }
+      if (state.inputs.work.progressSerial !== state.lastProgressSerial) {
+        state.lastProgressSerial = state.inputs.work.progressSerial;
+        state.lastProgressAt = checkedAt;
+        state.stalled = false;
+        state.stallReported = false;
+      }
+      const remaining = stallWindowMs - (checkedAt - state.lastProgressAt);
+      if (remaining <= 0) {
+        state.stalled = true;
+        if (!state.stallReported) {
+          state.stallReported = true;
+          state.member.onStall?.(
+            new Error(
+              `streamed member ${state.id ?? "<unnamed>"} made no progress for ${stallWindowMs} ms`,
+            ),
+          );
+        }
+      } else {
+        nextStallDelay = Math.min(nextStallDelay, remaining);
+      }
+    }
+    if (Number.isFinite(nextStallDelay)) {
+      stallTimer = setTimeout(refresh, Math.max(1, Math.ceil(nextStallDelay)));
+    }
+    // Insertion order is the conflict rule. A hidden managed member yields
+    // to the first active one and regains precedence if it is shown again.
+    const adaptive = adaptiveStates();
+    // Only adaptive point members supply a target bag. A tiles member is
+    // quality-managed too, but must not mask the first adaptive point's
+    // stable registry-order override; a tiles-only view uses defaults.
+    const targetState = globalQualityTargets
+      ? null
+      : (adaptive.find((state) => state.qualityTargets !== undefined) ?? null);
+    const nextTargets = globalQualityTargets ?? targetState?.qualityTargets;
+    if (
+      targetState !== appliedTargetState ||
+      !sameTargets(nextTargets, appliedTargets)
+    ) {
+      governor.setOptions(governorOptions(nextTargets));
+      appliedTargetState = targetState;
+      appliedTargets = nextTargets ? { ...nextTargets } : undefined;
+    }
+    // Fixed members do not consume normalized quality, but their frame cost
+    // and incomplete work still contaminate the same view-wide sample.
+    let tileOperations = 0;
+    let hierarchyOperations = 0;
+    let pending = submissions.hasPending();
+    for (const state of members) {
+      if (!state.active) continue;
+      if (!state.stalled) {
+        tileOperations += state.inputs.physicalTileOperations;
+        hierarchyOperations += state.inputs.physicalHierarchyOperations;
+        pending = pending || state.inputs.work.operations > 0;
+      }
+    }
+    governor.setWorkState({
+      physicalTileOperations: tileOperations,
+      physicalHierarchyOperations: hierarchyOperations,
+      workPending: pending,
+    });
+    applyAllocations();
+  };
+
   const refresh = (): void => {
-    if (disposed || refreshing) return;
+    if (disposed) return;
+    // A refresh raised from inside a refresh — an allocation's own work change
+    // — is remembered rather than dropped, and rather than recursing into a
+    // second pass on top of the first. Recursing is what this guard exists to
+    // stop: the member callbacks are several frames deep already, and a scene
+    // whose members trade quality would exhaust the stack rather than settle.
+    if (refreshing) {
+      refreshPending = true;
+      return;
+    }
     refreshing = true;
     try {
-      for (const state of members) {
-        state.inputs = state.active
-          ? normalizeInputs(state.member.governorInputs())
-          : EMPTY_INPUTS;
-      }
-      if (stallTimer !== null) clearTimeout(stallTimer);
-      stallTimer = null;
-      const checkedAt = now();
-      let nextStallDelay = Number.POSITIVE_INFINITY;
-      for (const state of members) {
-        const operations =
-          state.inputs.work.operations +
-          state.inputs.physicalTileOperations +
-          state.inputs.physicalHierarchyOperations;
-        if (!state.active || operations === 0) {
-          state.lastProgressSerial = state.inputs.work.progressSerial;
-          state.lastProgressAt = checkedAt;
-          state.stalled = false;
-          state.stallReported = false;
-          continue;
-        }
-        if (state.inputs.work.progressSerial !== state.lastProgressSerial) {
-          state.lastProgressSerial = state.inputs.work.progressSerial;
-          state.lastProgressAt = checkedAt;
-          state.stalled = false;
-          state.stallReported = false;
-        }
-        const remaining = stallWindowMs - (checkedAt - state.lastProgressAt);
-        if (remaining <= 0) {
-          state.stalled = true;
-          if (!state.stallReported) {
-            state.stallReported = true;
-            state.member.onStall?.(
-              new Error(
-                `streamed member ${state.id ?? "<unnamed>"} made no progress for ${stallWindowMs} ms`,
-              ),
-            );
-          }
-        } else {
-          nextStallDelay = Math.min(nextStallDelay, remaining);
-        }
-      }
-      if (Number.isFinite(nextStallDelay)) {
-        stallTimer = setTimeout(
-          refresh,
-          Math.max(1, Math.ceil(nextStallDelay)),
-        );
-      }
-      // Insertion order is the conflict rule. A hidden managed member yields
-      // to the first active one and regains precedence if it is shown again.
-      const adaptive = adaptiveStates();
-      // Only adaptive point members supply a target bag. A tiles member is
-      // quality-managed too, but must not mask the first adaptive point's
-      // stable registry-order override; a tiles-only view uses defaults.
-      const targetState = globalQualityTargets
-        ? null
-        : (adaptive.find((state) => state.qualityTargets !== undefined) ??
-          null);
-      const nextTargets = globalQualityTargets ?? targetState?.qualityTargets;
-      if (
-        targetState !== appliedTargetState ||
-        !sameTargets(nextTargets, appliedTargets)
-      ) {
-        governor.setOptions(governorOptions(nextTargets));
-        appliedTargetState = targetState;
-        appliedTargets = nextTargets ? { ...nextTargets } : undefined;
-      }
-      // Fixed members do not consume normalized quality, but their frame cost
-      // and incomplete work still contaminate the same view-wide sample.
-      let tileOperations = 0;
-      let hierarchyOperations = 0;
-      let pending = submissions.hasPending();
-      for (const state of members) {
-        if (!state.active) continue;
-        if (!state.stalled) {
-          tileOperations += state.inputs.physicalTileOperations;
-          hierarchyOperations += state.inputs.physicalHierarchyOperations;
-          pending = pending || state.inputs.work.operations > 0;
-        }
-      }
-      governor.setWorkState({
-        physicalTileOperations: tileOperations,
-        physicalHierarchyOperations: hierarchyOperations,
-        workPending: pending,
-      });
+      let pass = 0;
+      do {
+        refreshPending = false;
+        refreshOnce();
+        pass += 1;
+      } while (refreshPending && !disposed && pass < MAX_REFRESH_PASSES);
     } finally {
       refreshing = false;
     }
-    applyAllocations();
   };
 
   return {

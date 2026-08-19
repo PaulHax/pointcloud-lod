@@ -70,6 +70,52 @@ describe("createStreamedSceneCoordinator", () => {
     expect(b.allocations.at(-1)?.memoryBudgetBytes).toBe(900);
   });
 
+  it("survives members that report work from inside applyAllocation", async () => {
+    // Applying an allocation makes the member queue work, and queueing work is
+    // a work change, which is another refresh. Two members sharing one quality
+    // budget can trade it indefinitely; before the refresh loop was made
+    // iterative this recursed until the stack ran out, which is how a combined
+    // point-cloud and 3D Tiles scene died a few seconds into a gesture.
+    const coordinator = createStreamedSceneCoordinator({
+      scheduleRender: vi.fn(),
+      memory: createMemoryPool({ totalBytes: 1_000 }),
+    });
+    const context = coordinator.context({} as never);
+
+    let serial = 0;
+    const reentrant = (demand: () => number) => {
+      const member = makeMember();
+      return {
+        ...member,
+        // Every allocation moves this member's demand, so the allocator never
+        // reaches a fixed point and the loop has to be the thing that stops.
+        governorInputs: () => ({
+          ...member.governorInputs(),
+          qualityDemand: demand(),
+          work: { operations: 1, progressSerial: (serial += 1) },
+        }),
+        applyAllocation: (allocation: Allocation) => {
+          member.applyAllocation(allocation);
+          context.onWorkChange?.();
+        },
+      };
+    };
+
+    let flip = 0;
+    const a = reentrant(() => ((flip += 1) % 2 === 0 ? 0.1 : 1));
+    const b = reentrant(() => ((flip += 1) % 2 === 0 ? 1 : 0.1));
+    coordinator.register(a, { qualityManaged: true });
+    coordinator.register(b, { qualityManaged: true });
+
+    expect(() => context.onWorkChange?.()).not.toThrow();
+    // It stopped rather than running away, and each member still holds a real
+    // allocation rather than being left mid-update.
+    expect(a.allocations.length).toBeGreaterThan(0);
+    expect(b.allocations.length).toBeGreaterThan(0);
+    expect(a.allocations.length).toBeLessThan(100);
+    expect(b.allocations.length).toBeLessThan(100);
+  });
+
   it("water-fills normalized quality across managed members only", () => {
     const coordinator = createStreamedSceneCoordinator({
       scheduleRender: vi.fn(),
