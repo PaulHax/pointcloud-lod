@@ -386,6 +386,7 @@ export const startSceneExplorer = (preset: ExplorerPreset): void => {
   const message = element<HTMLOutputElement>("#message");
   const stats = element<HTMLElement>("#stats");
   const resetView = element<HTMLButtonElement>("#reset-view");
+  const targetNote = element<HTMLElement>("#target-note");
   const movingTarget = element<HTMLInputElement>("#moving-target");
   const stationaryTarget = element<HTMLInputElement>("#stationary-target");
   const dialog = element<HTMLDialogElement>("#add-dataset-dialog");
@@ -827,6 +828,18 @@ export const startSceneExplorer = (preset: ExplorerPreset): void => {
       ),
     );
     frameRate.setTargetFrameMs(coordinator.governor.targetFrameTimeMs);
+    // A target below what the display can present is one the governor can
+    // never be shown to have met, so it steers to a reachable one instead.
+    // Say which, rather than leaving the box reading 16 while the view aims
+    // at something else.
+    const quantum = coordinator.governor.displayQuantumMs;
+    const steering = coordinator.governor.targetFrameTimeMs;
+    const asked = coordinator.governor.configuredFrameTimeMs;
+    const raised = quantum !== null && steering > asked;
+    targetNote.hidden = !raised;
+    targetNote.textContent = raised
+      ? `Steering to ${steering.toFixed(0)} ms while ${coordinator.governor.regime === "interaction" ? "moving" : "settled"}: this display refreshes every ${quantum.toFixed(1)} ms, so nothing slower than that can be measured.`
+      : "";
     message.hidden =
       sceneError === null && (loading > 0 || datasets.length > 0);
     message.textContent =

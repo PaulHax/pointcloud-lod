@@ -170,4 +170,48 @@ describe("createViewGovernor", () => {
     expect(governor.stats().lastAdjustment?.reason).toBe("clamped");
     expect(governor.needsFrame()).toBe(false);
   });
+
+  it("learns the display quantum and stops asking for what it cannot show", () => {
+    const governor = createViewGovernor({
+      initialFraction: 0.5,
+      interactionTargetMs: 16,
+      minSamples: 2,
+      cooldownMs: 0,
+      hysteresis: 0.2,
+    });
+    const motion = governor.beginMotion("explicit");
+    // A 60 Hz display presents no faster than this however cheap the frame,
+    // so at a 16 ms target every one of these lands inside the hysteresis
+    // band and the interaction track can only ever be cut.
+    for (let frame = 0; frame < 2; frame += 1) {
+      governor.recordHostFrame({ hostFrameMs: 16.7, now: frame });
+    }
+    expect(governor.stats().displayQuantumMs).toBeNull();
+    expect(governor.stats().lastAdjustment?.direction).toBe("none");
+
+    // The third short interval settles what the display is: the target moves
+    // to one the same measurement can fall below, and the very frame that
+    // taught it that is evidence of headroom.
+    governor.recordHostFrame({ hostFrameMs: 16.7, now: 2 });
+    expect(governor.stats().displayQuantumMs).toBeCloseTo(16.7, 5);
+    expect(governor.stats().configuredFrameTimeMs).toBe(16);
+    expect(governor.stats().targetFrameTimeMs).toBeCloseTo(24, 1);
+    expect(governor.stats().lastAdjustment).toMatchObject({
+      direction: "increase",
+      reason: "below-target",
+    });
+    expect(governor.qualityFraction()).toBeGreaterThan(0.5);
+    motion.release();
+    governor.dispose();
+  });
+
+  it("will not believe an interval no display could have produced", () => {
+    const governor = createViewGovernor({ minSamples: 2, cooldownMs: 0 });
+    // Two callbacks inside one refresh say nothing about the refresh period.
+    for (let frame = 0; frame < 4; frame += 1) {
+      governor.recordHostFrame({ hostFrameMs: 0.5, now: frame });
+    }
+    expect(governor.stats().displayQuantumMs).toBeNull();
+    governor.dispose();
+  });
 });
