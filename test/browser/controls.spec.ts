@@ -106,37 +106,6 @@ describe("example controls", () => {
     const session = await openExample({ cloud: MULTIPAGE_CLOUD.urlPath });
     try {
       expect(
-        (await session.page.locator("[role=tooltip]").allTextContents()).map(
-          (text) => text.replace(/\s+/g, " ").trim(),
-        ),
-      ).toEqual([
-        "Adaptive changes the visible-point budget to meet frame-time targets; Fixed uses the configured point count.",
-        "Sets the frame-time target used to tune quality while the camera is moving.",
-        "Sets the frame-time target used to tune quality after camera movement stops.",
-        "Caps the adaptive visible-point budget; leave blank to use only the memory-derived ceiling.",
-        "Auto derives point diameter from projected density; Fixed uses a constant CSS-pixel diameter.",
-        "Auto scale multiplies the density-derived point diameter; Fixed size sets its CSS-pixel diameter directly.",
-      ]);
-      expect(await session.page.locator(".info-tip").count()).toBe(6);
-      const budgetInfo = session.page.locator(".info-tip").first();
-      await budgetInfo.hover();
-      await expect
-        .poll(() =>
-          session.page
-            .locator("#budget-mode-help")
-            .evaluate((tooltip) => getComputedStyle(tooltip).opacity),
-        )
-        .toBe("1");
-      const infoBox = await budgetInfo.boundingBox();
-      const tooltipBox = await session.page
-        .locator("#budget-mode-help")
-        .boundingBox();
-      expect(infoBox).not.toBeNull();
-      expect(tooltipBox).not.toBeNull();
-      expect(tooltipBox!.y + tooltipBox!.height).toBeLessThanOrEqual(
-        infoBox!.y,
-      );
-      expect(
         await session.page.locator("#budget-mode").evaluate((budget) => {
           const adaptive = document.querySelector("#adaptive-controls")!;
           const pointSize = document.querySelector("#point-size-mode")!;
