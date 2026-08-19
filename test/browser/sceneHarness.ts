@@ -24,7 +24,7 @@ import {
 } from "playwright";
 
 import type { TelemetrySummary, TelemetryTrace } from "../../src/telemetry";
-import type { RecordedPose } from "../../examples/vtk/scene/inputRecorder";
+import type { RecordedPose } from "../../examples/vtk/harness/inputRecorder";
 import {
   createHttpCache,
   type HttpCache,
@@ -193,9 +193,11 @@ export const replayPath = (href: string): string => {
     : url.pathname;
   const query = new URLSearchParams(url.search);
   // The capture overlay is a recording tool; a replay must not paint it over
-  // the view it is measuring.
+  // the view it is measuring. Nor does a replay want telemetry auto-started at
+  // load: the benchmark starts it once the camera is placed, so the trace
+  // describes the gesture rather than the page arriving.
   query.delete("record");
-  query.set("telemetry", "1");
+  query.delete("telemetry");
   return `${path}?${query}`;
 };
 
@@ -244,7 +246,13 @@ export const openScene = async (options: {
     if (Number.isFinite(size)) transferred += size;
   });
 
-  await page.goto(`${server.origin}${options.path}`, { waitUntil: "load" });
+  // The page's measurement harness is a dynamic import guarded on the URL, so
+  // a session nobody is measuring never loads it. Every session here is being
+  // measured, so ask for it rather than depending on whichever query string a
+  // caller happened to pass.
+  const target = new URL(`${server.origin}${options.path}`);
+  target.searchParams.set("harness", "1");
+  await page.goto(target.toString(), { waitUntil: "load" });
   await page.waitForFunction(
     () => (window as never as SceneWindow).pointCloudScene !== undefined,
     null,

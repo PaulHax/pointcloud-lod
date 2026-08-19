@@ -13,7 +13,7 @@
 
 import { afterAll, describe, expect, it } from "vitest";
 
-import type { InputRecording } from "../../examples/vtk/scene/inputRecorder";
+import type { InputRecording } from "../../examples/vtk/harness/inputRecorder";
 import { compareCameraTracks, replayInput, wheelNotches } from "./inputReplay";
 import {
   closeBenchmarkBrowser,

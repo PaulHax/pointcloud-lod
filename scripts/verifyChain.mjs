@@ -168,6 +168,55 @@ const checkExampleBundle = () => {
       );
     }
   }
+  // The harness — telemetry, gesture capture, the automation surface — must
+  // stay out of the bundle an ordinary visitor downloads. It is reached by a
+  // dynamic import guarded on a URL parameter, so the isolation is structural
+  // rather than a matter of care: if anything under `harness/` ever gets named
+  // by a static import, it lands in the entry bundle and this fails.
+  for (const [name, entry] of [
+    ["complete", completeEntry],
+    ["simple", simpleEntry],
+  ]) {
+    // The overlay's own class name, which survives minification because it is
+    // a string. A statically imported harness is merged into the entry chunk
+    // rather than emitted beside it, so this is what catches that.
+    if (entryBundle(entry).toString("utf8").includes("input-recorder")) {
+      fail(
+        `${name} example bundle contains the capture overlay — measurement` +
+          " code must be reachable only through the guarded dynamic import," +
+          " or every visitor pays for it and the measured page stops being" +
+          " the page that ships",
+      );
+    }
+  }
+  const harnessChunk = Object.entries(manifest).find(([id]) =>
+    id.startsWith("harness/"),
+  );
+  if (!harnessChunk) {
+    fail(
+      `no harness chunk in ${manifestPath} — the explorer stopped reaching` +
+        " the harness at all, so nothing can measure it",
+    );
+  }
+  const reachesHarness = (entry) => {
+    const seen = new Set();
+    const visit = (chunk) => {
+      if (!chunk || seen.has(chunk.file)) return false;
+      seen.add(chunk.file);
+      if (chunk.file === harnessChunk[1].file) return true;
+      return (chunk.imports ?? []).some((name) => visit(manifest[name]));
+    };
+    return visit(entry);
+  };
+  for (const [name, entry] of [
+    ["complete", completeEntry],
+    ["simple", simpleEntry],
+  ]) {
+    if (reachesHarness(entry)) {
+      fail(`${name} example statically imports the harness chunk`);
+    }
+  }
+
   const file = join(output, completeEntry.file);
   const bytes = entryBundle(completeEntry);
   return {

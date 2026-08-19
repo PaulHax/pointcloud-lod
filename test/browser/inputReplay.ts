@@ -33,7 +33,7 @@ import type {
   RecordedPointerEvent,
   RecordedPoseSample,
   RecordedWheelEvent,
-} from "../../examples/vtk/scene/inputRecorder";
+} from "../../examples/vtk/harness/inputRecorder";
 
 /** Where the viewer sits on the page, so recorded viewer coordinates land. */
 export type ViewerBox = {

@@ -52,11 +52,13 @@ import {
   installExampleSceneSelect,
 } from "../scene/exampleScenes";
 import {
-  createInputRecorder,
   installRecorderOverlay,
   recordingRequested,
+} from "../harness/captureOverlay";
+import {
+  createInputRecorder,
   type InputRecorder,
-} from "../scene/inputRecorder";
+} from "../harness/inputRecorder";
 
 const element = <T extends Element>(selector: string): T => {
   const found = document.querySelector<T>(selector);

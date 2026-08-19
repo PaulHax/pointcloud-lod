@@ -24,7 +24,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import type {
   InputRecording,
   RecordedPoseSample,
-} from "../../examples/vtk/scene/inputRecorder";
+} from "../../examples/vtk/harness/inputRecorder";
 import type { CacheMode, HttpCache } from "./httpCache";
 import { compareCameraTracks, replayInput } from "./inputReplay";
 import {
