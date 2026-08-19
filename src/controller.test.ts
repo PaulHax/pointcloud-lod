@@ -1796,6 +1796,77 @@ describe("createLodController — failing sources", () => {
     vi.useRealTimers();
   });
 
+  it("stops claiming pending work for tiles that are out of attempts", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { controller, deferred } = makeController(SMALL_TREE, {
+      onError: () => {},
+    });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      for (const d of deferred.values()) d.reject(new Error("500"));
+      await settle();
+      await vi.advanceTimersByTimeAsync(1000);
+      await settle();
+    }
+
+    // The tiles are still selected and still hold nothing, but nothing is
+    // going to fetch them until their rest is over. A caller waiting for the
+    // view to converge must not be told the work is still running.
+    const stats = controller.stats();
+    expect(stats.selection.targetUndecodedTiles).toBe(3);
+    expect(stats.restingTiles).toBe(3);
+    expect(stats.workPending).toBe(false);
+
+    controller.dispose();
+    vi.useRealTimers();
+  });
+
+  it("rests longer each time a key spends its whole allowance", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { controller, loadCalls, deferred } = makeController(SMALL_TREE, {
+      onError: () => {},
+    });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+
+    const spendAllowance = async (): Promise<void> => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        for (const d of deferred.values()) d.reject(new Error("500"));
+        await settle();
+        await vi.advanceTimersByTimeAsync(1000);
+        await settle();
+      }
+    };
+
+    await spendAllowance();
+    expect(loadCalls).toHaveLength(9);
+
+    // The first rest is 30 s, and the endpoint is still down when it ends.
+    await vi.advanceTimersByTimeAsync(30_000);
+    await settle();
+    expect(loadCalls).toHaveLength(12);
+    await spendAllowance();
+    expect(loadCalls).toHaveLength(18);
+
+    // A second spent allowance rests twice as long, so the 30 s that was
+    // enough last time buys nothing.
+    await vi.advanceTimersByTimeAsync(30_000);
+    await settle();
+    expect(loadCalls).toHaveLength(18);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await settle();
+    expect(loadCalls).toHaveLength(21);
+
+    controller.dispose();
+    vi.useRealTimers();
+  });
+
   it("dispose cancels armed retries", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
