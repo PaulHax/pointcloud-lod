@@ -51,6 +51,12 @@ import {
   HOSTED_POINT_CLOUDS,
   installExampleSceneSelect,
 } from "../scene/exampleScenes";
+import {
+  createInputRecorder,
+  installRecorderOverlay,
+  recordingRequested,
+  type InputRecorder,
+} from "../scene/inputRecorder";
 
 const element = <T extends Element>(selector: string): T => {
   const found = document.querySelector<T>(selector);
@@ -1609,11 +1615,41 @@ urlInput.addEventListener("input", () =>
 if (initialParameters.get("telemetry") === "1") startTelemetry();
 loadUrl();
 
+/**
+ * Gesture capture, so a benchmark can replay a hand-driven camera path rather
+ * than one this file described. It reads the same camera the page renders
+ * from, and records nothing until asked, so an ordinary session is unchanged.
+ */
+const inputRecorder: InputRecorder = createInputRecorder({
+  viewer,
+  pose: () => ({
+    position: [...camera.getPosition()] as [number, number, number],
+    focalPoint: [...camera.getFocalPoint()] as [number, number, number],
+    viewUp: [...camera.getViewUp()] as [number, number, number],
+    viewAngle: camera.getViewAngle(),
+    parallelScale: camera.getParallelScale(),
+    parallelProjection: !!camera.getParallelProjection(),
+  }),
+  environment: telemetryEnvironment,
+});
+if (recordingRequested()) {
+  installRecorderOverlay(inputRecorder, {
+    telemetry: {
+      start: startTelemetry,
+      stop: stopTelemetry,
+      isActive: () => telemetry.isActive(),
+      download: (filename) => telemetry.download(filename),
+      summary: () => telemetry.summary(),
+    },
+  });
+}
+
 // Driving handles for browser checks. Everything here drives the page the way
 // a user or a host would — the camera moves, the panel changes, a frame is
 // requested — rather than reaching past it into the library, so a check that
 // passes says the assembled page works, not that the modules do.
 Object.assign(window, {
+  pointCloudRecorder: inputRecorder,
   pointCloudExample: {
     stats: () => ({
       controller: controller?.stats() ?? null,
