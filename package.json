@@ -64,6 +64,7 @@
     "telemetry:capture": "POINTCLOUD_LOD_BROWSER_GPU=1 npm run test:perf -- test/browser/telemetry-capture.perf.spec.ts",
     "bench:replay": "npm run build && npm run example:build && POINTCLOUD_LOD_BROWSER_GPU=1 vitest run --config vitest.perf.config.ts test/browser/replay.perf.spec.ts",
     "bench:analyze": "node scripts/analyzeReplay.mjs",
+    "trace:analyze": "node scripts/analyzeTrace.mjs",
     "fixture:tiles3d": "node scripts/generateTiles3dFixture.mjs",
     "fixture:meshopt": "node scripts/generateMeshoptFixtures.mjs",
     "verify:chain": "node scripts/verifyChain.mjs",
