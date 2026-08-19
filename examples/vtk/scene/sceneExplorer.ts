@@ -207,6 +207,18 @@ const datasetActivity = (
 ): Activity => {
   if (stats.kind === "pointCloud") {
     const controller = stats.controller;
+    // Selected content whose retry allowance is spent: the request failed
+    // three times and the key is waiting out a rest before trying again. It
+    // is no longer counted as work pending, so nothing else here would say
+    // anything is wrong.
+    const resting = controller.restingTiles + controller.restingPages;
+    if (resting > 0) {
+      return {
+        state: "error",
+        label: "Some data is not loading",
+        detail: `${resting} point-cloud request${resting === 1 ? "" : "s"} failed and ${resting === 1 ? "is" : "are"} waiting to be retried`,
+      };
+    }
     const activeOperations =
       controller.physicalTileOperations +
       controller.physicalHierarchyOperations;
@@ -251,6 +263,14 @@ const datasetActivity = (
       state: "loading",
       label: "Fetching data",
       detail: "Fetching the 3D Tiles tileset",
+    };
+  }
+  const failed = stats.queue?.failed ?? 0;
+  if (failed > 0) {
+    return {
+      state: "error",
+      label: "Some data is not loading",
+      detail: `${failed} 3D Tiles content request${failed === 1 ? "" : "s"} gave up after its retries`,
     };
   }
   const decodeJobs =

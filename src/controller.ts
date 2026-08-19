@@ -221,6 +221,19 @@ export type LodControllerStats = {
   readonly workRevision: number;
   /** Required current-view work has not drained yet. */
   readonly workPending: boolean;
+  /**
+   * Selected tiles with no payload that nothing is going to fetch right now:
+   * their retry allowance is spent and they are inside a rest.
+   *
+   * They are deliberately excluded from `workPending`. A caller waiting for
+   * the view to converge would otherwise wait on an endpoint that is not
+   * answering, and the view governor stops sampling capacity for every member
+   * while any of them claims pending work — so one dead tile would freeze
+   * adaptive quality view-wide. A host that wants to say so can report this.
+   */
+  readonly restingTiles: number;
+  /** Hierarchy pages whose retry allowance is spent, inside a rest. */
+  readonly restingPages: number;
   /** A trailing camera-driven selection pass is still scheduled. */
   readonly selectionPending: boolean;
   /** The ceiling `physicalTileOperations` is held under. */
@@ -821,8 +834,14 @@ export const createLodController = (
   // fails would be re-issued on every pass forever. Non-abort failures are
   // counted per key and the key rests once it runs out of attempts. The rest
   // is a backoff, not an eviction: a transient outage must not blank a tile
-  // for the life of the controller, so the allowance is restored once the key
-  // has been quiet for RETRY_BACKOFF_MS.
+  // for the life of the controller, so a rested key gets its allowance back.
+  //
+  // Each spent allowance rests longer than the one before it, to MAX_REST_MS.
+  // An endpoint that is permanently gone therefore costs three requests per
+  // key every 30 s at first and three every five minutes in the steady state,
+  // rather than three every 30 s for as long as the page is open, while an
+  // outage that ends recovers on the first rest — the case worth being quick
+  // about.
   //
   // Restoring the allowance only makes a key fetchable — something still has
   // to ask. A selection pass cannot be that something: on a converged scene
@@ -838,36 +857,54 @@ export const createLodController = (
   // A new source (dropEverything) is a fresh start. Aborts never count —
   // deselection, setSource, and dispose cancel normally and stay retryable.
   const MAX_ATTEMPTS = 3;
-  const RETRY_BACKOFF_MS = 30_000;
+  const FIRST_REST_MS = 30_000;
+  const MAX_REST_MS = 300_000;
   // Long enough that three attempts at a struggling endpoint are not one
   // burst, short enough that a blip repaints without waiting on the user.
   const RETRY_SOON_MS = 1_000;
   type FailureRecord = {
+    /** Failures in the current round. The allowance is MAX_ATTEMPTS. */
     count: number;
+    /** Allowances already spent on this key; each one lengthens the rest. */
+    rounds: number;
     lastMs: number;
   };
   const pageFailures = new Map<string, FailureRecord>();
   const tileFailures = new Map<string, FailureRecord>();
 
+  const restMs = (record: FailureRecord): number =>
+    Math.min(MAX_REST_MS, FIRST_REST_MS * 2 ** record.rounds);
+
   const recordFailure = (
     failures: Map<string, FailureRecord>,
     keyString: string,
   ): void => {
+    const prior = failures.get(keyString);
+    // A failure arriving on a key whose allowance is already spent means its
+    // rest elapsed and the attempt that followed failed too: open a new round,
+    // and rest longer for it.
+    const spent = prior !== undefined && prior.count >= MAX_ATTEMPTS;
     failures.set(keyString, {
-      count: (failures.get(keyString)?.count ?? 0) + 1,
+      count: spent ? 1 : (prior?.count ?? 0) + 1,
+      rounds: spent ? prior.rounds + 1 : (prior?.rounds ?? 0),
       lastMs: Date.now(),
     });
   };
-  /** Clears the record once the backoff elapses, restoring a full allowance. */
+  /**
+   * Whether the key is inside its rest.
+   *
+   * Pure: the allowance comes back on the clock rather than by being read, so
+   * a diagnostic can ask this without changing what the controller fetches
+   * next. The record itself is dropped when the key succeeds, and by
+   * dropEverything.
+   */
   const resting = (
     failures: Map<string, FailureRecord>,
     keyString: string,
   ): boolean => {
     const record = failures.get(keyString);
     if (record === undefined || record.count < MAX_ATTEMPTS) return false;
-    if (Date.now() - record.lastMs < RETRY_BACKOFF_MS) return true;
-    failures.delete(keyString);
-    return false;
+    return Date.now() - record.lastMs < restMs(record);
   };
 
   /** When the key may be asked for again: soon, or when its rest is over. */
@@ -879,7 +916,7 @@ export const createLodController = (
     if (record === undefined || record.count < MAX_ATTEMPTS) {
       return RETRY_SOON_MS;
     }
-    return Math.max(0, record.lastMs + RETRY_BACKOFF_MS - Date.now());
+    return Math.max(0, record.lastMs + restMs(record) - Date.now());
   };
 
   const tileRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -926,8 +963,7 @@ export const createLodController = (
     ) {
       return;
     }
-    // Reading the record is also what restores the allowance, and a key still
-    // inside its backoff must wait rather than spend an attempt early.
+    // A key inside its rest waits rather than spending an attempt early.
     if (resting(tileFailures, keyString)) {
       scheduleTileRetry(keyString);
       return;
@@ -2044,6 +2080,7 @@ export const createLodController = (
     stats() {
       const cachedBytes = cache.totalBytes();
       let targetUndecodedTiles = 0;
+      let restingTiles = 0;
       for (const keyString of target) {
         if (
           hierarchy.get(keyString)?.pointCount !== 0 &&
@@ -2051,7 +2088,12 @@ export const createLodController = (
           !cache.has(keyString)
         ) {
           targetUndecodedTiles += 1;
+          if (resting(tileFailures, keyString)) restingTiles += 1;
         }
+      }
+      let restingPages = 0;
+      for (const keyString of pageFailures.keys()) {
+        if (resting(pageFailures, keyString)) restingPages += 1;
       }
       let drawnPoints = 0;
       for (const [keyString, tile] of submitted) {
@@ -2062,7 +2104,7 @@ export const createLodController = (
         physicalHierarchyOperations > 0 ||
         queue.length > 0 ||
         pageQueue.length > 0 ||
-        targetUndecodedTiles > 0;
+        targetUndecodedTiles > restingTiles;
       return {
         active,
         residentTiles: resident.size,
@@ -2079,6 +2121,8 @@ export const createLodController = (
         physicalHierarchyOperations,
         workRevision,
         workPending,
+        restingTiles,
+        restingPages,
         selectionPending: selectionTimer !== null,
         fetchConcurrency,
         hierarchyConcurrency,
