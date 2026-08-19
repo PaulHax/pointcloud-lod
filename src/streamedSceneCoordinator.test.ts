@@ -114,6 +114,9 @@ describe("createStreamedSceneCoordinator", () => {
     expect(b.allocations.length).toBeGreaterThan(0);
     expect(a.allocations.length).toBeLessThan(100);
     expect(b.allocations.length).toBeLessThan(100);
+    // And it says that it stopped early, so a scene that never settles is a
+    // number someone can look at rather than silence.
+    expect(coordinator.stats().exhaustedRefreshes).toBeGreaterThan(0);
   });
 
   it("water-fills normalized quality across managed members only", () => {

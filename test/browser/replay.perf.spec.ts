@@ -340,11 +340,19 @@ describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
             expect(trace.summary.frames).toBeGreaterThan(0);
             expect(session.failures).toEqual([]);
             expect(cacheStats?.unrecorded ?? []).toEqual([]);
+            // A dataset that gave up on some of its content has stopped
+            // working, which is a run that finished. What it is not is a run
+            // that drew everything, so the state travels with the artifact and
+            // is printed beside it rather than passing as an ordinary result.
             expect(
               settledAfter.datasets.every(
-                (dataset) => dataset.state === "settled",
+                (dataset) =>
+                  dataset.state === "settled" || dataset.state === "error",
               ),
             ).toBe(true);
+            const failedDatasets = settledAfter.datasets.filter(
+              (dataset) => dataset.state === "error",
+            );
 
             const artifact = {
               schemaVersion: 1 as const,
@@ -371,6 +379,7 @@ describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
                 transferredBytes: session.transferredBytes(),
               },
               fidelity: { dispatch: replay.dispatch, drift },
+              activity: settledAfter,
               datasets: await session.datasets(),
               finalStats: await session.stats(),
               trace,
@@ -390,7 +399,13 @@ describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
                 `  frames=${trace.summary.frames} clean=${trace.summary.cleanFrames}` +
                 ` longTasks=${trace.summary.longTasks}` +
                 ` lateness=${replay.dispatch.meanLatenessMs.toFixed(1)}/${replay.dispatch.maxLatenessMs.toFixed(1)} ms` +
-                ` drift=${drift ? `${(drift.meanRelativeError * 100).toFixed(2)}%/${(drift.maxRelativeError * 100).toFixed(2)}%` : "n/a"}\n`,
+                ` drift=${drift ? `${(drift.meanRelativeError * 100).toFixed(2)}%/${(drift.maxRelativeError * 100).toFixed(2)}%` : "n/a"}\n` +
+                failedDatasets
+                  .map(
+                    (dataset) =>
+                      `  INCOMPLETE ${dataset.id}: ${dataset.detail}\n`,
+                  )
+                  .join(""),
             );
           } finally {
             await session.close();

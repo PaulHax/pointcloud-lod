@@ -1,7 +1,7 @@
 /**
  * Opening and driving the scene explorer for the replay benchmark.
  *
- * The existing `harness.ts` drives `complete/`, which is one point cloud with
+ * The existing `harness.ts` drives `instrumented/`, one point cloud with
  * its own governor. The benchmark drives the explorer instead, because that is
  * the page that can hold a point cloud, a 3D Tiles set, or both under one
  * coordinator — the three scenes being measured differ only in the dataset
@@ -445,11 +445,18 @@ export const openScene = async (options: {
       let last: SceneActivity | null = null;
       while (Date.now() < deadline) {
         last = await activity();
-        const converged =
+        // A dataset that reported an error has stopped working on the view:
+        // waiting for it to reach "settled" is waiting for content that is
+        // not coming. It is a finished state, and the caller is handed the
+        // activity so it can say what failed.
+        const finished =
           last.loading === 0 &&
           last.datasets.length > 0 &&
-          last.datasets.every((dataset) => dataset.state === "settled");
-        if (converged) return last;
+          last.datasets.every(
+            (dataset) =>
+              dataset.state === "settled" || dataset.state === "error",
+          );
+        if (finished) return last;
         await page.waitForTimeout(POLL_INTERVAL_MS);
       }
       throw new Error(
