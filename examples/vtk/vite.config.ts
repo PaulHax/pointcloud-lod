@@ -120,8 +120,8 @@ export default defineConfig({
     manifest: true,
     rollupOptions: {
       input: {
-        complete: resolve(exampleRoot, "index.html"),
-        instrumented: resolve(exampleRoot, "complete/index.html"),
+        explorer: resolve(exampleRoot, "index.html"),
+        instrumented: resolve(exampleRoot, "instrumented/index.html"),
         simple: resolve(exampleRoot, "simple/index.html"),
         mesh: resolve(exampleRoot, "mesh/index.html"),
         combined: resolve(exampleRoot, "combined/index.html"),
