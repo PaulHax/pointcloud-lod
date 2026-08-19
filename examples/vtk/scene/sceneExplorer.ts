@@ -270,7 +270,7 @@ const datasetActivity = (
     return {
       state: "error",
       label: "Some data is not loading",
-      detail: `${failed} 3D Tiles content request${failed === 1 ? "" : "s"} gave up after its retries`,
+      detail: `${failed} 3D Tiles content request${failed === 1 ? "" : "s"} gave up after ${failed === 1 ? "its" : "their"} retries${stats.lastError === null || stats.lastError === undefined ? "" : `: ${stats.lastError}`}`,
     };
   }
   const decodeJobs =

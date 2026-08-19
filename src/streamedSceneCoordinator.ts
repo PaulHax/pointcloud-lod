@@ -101,6 +101,14 @@ export type StreamedSceneCoordinatorStats = {
   readonly governor: ViewGovernorStats;
   readonly submissions: ReturnType<SubmissionScheduler["stats"]>;
   readonly stalledMembers: readonly string[];
+  /**
+   * Refreshes that hit the pass cap with an allocation change still pending.
+   *
+   * Nothing is lost when one does — the next frame refreshes again — but a
+   * scene whose members never stop trading quality would otherwise be
+   * invisible. A number that climbs with the frame count is that scene.
+   */
+  readonly exhaustedRefreshes: number;
   readonly members: readonly StreamedCoordinatorMemberStats[];
 };
 
@@ -219,6 +227,7 @@ export const createStreamedSceneCoordinator = (
   let lastPreparedFrameSerial = -1;
   let refreshing = false;
   let refreshPending = false;
+  let exhaustedRefreshes = 0;
   let viewQualityFraction = 1;
   let globalQualityTargets: AdaptiveQualityTargets | undefined;
   let appliedTargetState: MemberState | null = null;
@@ -396,6 +405,7 @@ export const createStreamedSceneCoordinator = (
         refreshOnce();
         pass += 1;
       } while (refreshPending && !disposed && pass < MAX_REFRESH_PASSES);
+      if (refreshPending && !disposed) exhaustedRefreshes += 1;
     } finally {
       refreshing = false;
     }
@@ -586,6 +596,7 @@ export const createStreamedSceneCoordinator = (
         stalledMembers: [...members]
           .filter((state) => state.stalled)
           .map((state) => state.id ?? "<unnamed>"),
+        exhaustedRefreshes,
         members: [...members].map((state) => ({
           id: state.id,
           active: state.active,
