@@ -101,6 +101,27 @@ measurement rather than something to eliminate:
 Record once, then sweep settings against the replayed network, and confirm
 against a live run when the profile starts to look unlike the real thing.
 
+### What a replayed gesture cannot reproduce exactly
+
+CDP can say that a wheel turned, and where, but not how hard: Chrome pins
+`wheelDelta` to a single notch on every injected wheel event whatever `deltaY`
+it carries, and `normalizeWheel` — which is what the interactor reads — prefers
+`wheelDelta`. So a hand's two-notch flick would replay as one, and because
+dolly is multiplicative the shortfall compounds over the rest of the path.
+
+The driver converts magnitude into count instead, dispatching one message per
+notch, counted the way the interactor counts: relative to the turn that opened
+the burst, with a 200 ms gap ending one. A trackpad's fractional turns still
+cannot be dispatched individually, so the remainder is carried to the next
+event rather than rounded away on each, which keeps the total right even where
+no single event is.
+
+Wheel deltas also cross CDP in device pixels while pointer coordinates cross it
+in CSS pixels, so the driver scales them by the device pixel ratio. Both of
+these are checked by `replayHarness.spec.ts` on a fractionally scaled page —
+the mistakes are invisible at a device pixel ratio of 1, where the two units
+coincide.
+
 ### Reading the fidelity numbers
 
 Replay is real time: events go out on their recorded schedule and are not

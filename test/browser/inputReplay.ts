@@ -137,6 +137,53 @@ const isPointer = (event: RecordedInputEvent): event is RecordedPointerEvent =>
 const isWheel = (event: RecordedInputEvent): event is RecordedWheelEvent =>
   event.type === "wheel";
 
+/**
+ * A wheel turn's strength, in notches, as the interactor will count it.
+ *
+ * CDP can say that a wheel turned and where, but not how hard: Chrome pins
+ * `wheelDelta` to a single notch on every injected wheel event regardless of
+ * the `deltaY` it carries, and `normalizeWheel` — which is what vtk.js reads —
+ * prefers `wheelDelta`. A hand's flick of two notches therefore replays as
+ * one, and the dolly it drives compounds the shortfall over the rest of the
+ * path.
+ *
+ * What CDP can express is count, so magnitude is converted into it. The
+ * interactor normalises a burst of wheel events by the first one's strength
+ * and treats a 200 ms gap as the end of a burst, so the same rule is applied
+ * here: each event is worth its delta as a multiple of the delta that opened
+ * its burst. Fractional turns — a trackpad's, rather than a wheel's — cannot
+ * be dispatched at all, so the remainder is carried into the next event of the
+ * burst rather than rounded away one event at a time.
+ */
+const WHEEL_BURST_GAP_MS = 200;
+
+export const wheelNotches = (
+  events: readonly RecordedInputEvent[],
+): ReadonlyMap<RecordedWheelEvent, number> => {
+  const notches = new Map<RecordedWheelEvent, number>();
+  let base = 0;
+  let previousAtMs = Number.NEGATIVE_INFINITY;
+  let carry = 0;
+  for (const event of events) {
+    if (!isWheel(event)) continue;
+    const magnitude = Math.hypot(event.deltaX, event.deltaY);
+    if (event.atMs - previousAtMs > WHEEL_BURST_GAP_MS || base === 0) {
+      base = magnitude;
+      carry = 0;
+    }
+    previousAtMs = event.atMs;
+    if (magnitude === 0) {
+      notches.set(event, 0);
+      continue;
+    }
+    const wanted = carry + magnitude / base;
+    const whole = Math.max(0, Math.round(wanted));
+    carry = wanted - whole;
+    notches.set(event, whole);
+  }
+  return notches;
+};
+
 const CDP_TYPE = {
   pointerdown: "mousePressed",
   pointerup: "mouseReleased",
@@ -328,6 +375,17 @@ export const replayInput = async (
   const pointX = (x: number): number => viewer.x + x;
   const pointY = (y: number): number => viewer.y + y;
 
+  /**
+   * Pointer coordinates cross CDP in CSS pixels, but wheel deltas cross it in
+   * device pixels and reach the page divided by the device pixel ratio. A
+   * recording carries the CSS-pixel deltas the page saw, so they are scaled
+   * back up here; without it, every notch of a gesture captured on a
+   * fractionally scaled display replays at 1/dpr of its recorded strength and
+   * the dolly it drives compounds that shortfall over the whole path.
+   */
+  const wheelScale = await page.evaluate(() => window.devicePixelRatio);
+  const notches = wheelNotches(recording.events);
+
   let latenessSum = 0;
   let latenessMax = 0;
   let lateEvents = 0;
@@ -382,19 +440,23 @@ export const replayInput = async (
         pointerType: "mouse",
       });
     } else if (isWheel(event)) {
-      issue("Input.dispatchMouseEvent", {
-        type: "mouseWheel",
-        x: pointX(event.x),
-        y: pointY(event.y),
-        button: "none",
-        buttons: heldButtons(event.buttons),
-        modifiers: modifiers(event),
-        // The recording carries the browser's own deltas, so a trackpad's
-        // fractional pixels and a wheel's notches both replay as themselves.
-        deltaX: event.deltaX,
-        deltaY: event.deltaY,
-        pointerType: "mouse",
-      });
+      // One message per notch, each carrying its share of the recorded delta,
+      // so both the count the interactor reads and the distance anything else
+      // reads come out at what was recorded.
+      const turns = notches.get(event) ?? 1;
+      for (let turn = 0; turn < turns; turn += 1) {
+        issue("Input.dispatchMouseEvent", {
+          type: "mouseWheel",
+          x: pointX(event.x),
+          y: pointY(event.y),
+          button: "none",
+          buttons: heldButtons(event.buttons),
+          modifiers: modifiers(event),
+          deltaX: (event.deltaX / turns) * wheelScale,
+          deltaY: (event.deltaY / turns) * wheelScale,
+          pointerType: "mouse",
+        });
+      }
     }
     dispatched += 1;
   }
