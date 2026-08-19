@@ -1,5 +1,4 @@
 import {
-  captureTelemetryEnvironment,
   createCopcWorkerTileSource,
   wgs84ToEcef,
   type PointPresentation,
@@ -20,14 +19,9 @@ import { decodeWasmUrls } from "./decodeAssets";
 import { renderDiagnostics, type MemberRow } from "./diagnostics";
 import { renderExplorerShell, type ExplorerPreset } from "./explorerShell";
 import { createFrameRateMonitor } from "./frameRate";
+import { harnessRequested } from "../harness/requested";
+import type { HarnessDatasetControls } from "../harness/sceneHandle";
 import { createSceneHost } from "./host";
-import { createSceneTelemetry } from "./sceneTelemetry";
-import {
-  createInputRecorder,
-  installRecorderOverlay,
-  recordingRequested,
-  type InputRecorder,
-} from "./inputRecorder";
 import { createLocalTilesSource } from "./localTiles";
 import {
   BAG3D_ENDPOINT,
@@ -55,7 +49,7 @@ type Dataset = {
   readonly registration: StreamedMemberRegistration;
   readonly source?: TileSource;
   readonly location: DatasetLocation | null;
-  readonly controls: DatasetControls;
+  readonly controls: HarnessDatasetControls;
   view: ViewTarget | null;
   stats(): PointCloudMemberStats | Tiles3dMemberStats;
   release(): void;
@@ -69,17 +63,6 @@ type Dataset = {
  * same path. A benchmark that reconfigured the member directly would be
  * measuring a configuration the page cannot actually produce.
  */
-type DatasetControls = {
-  setVisible(visible: boolean): void;
-  /** 3D Tiles only. */
-  setScreenSpaceErrorPx?(px: number): void;
-  /** Point clouds only. */
-  setBudgetMode?(mode: "adaptive" | "fixed"): void;
-  setFixedPointBudget?(points: number): void;
-  setMaximumPoints?(points: number | null): void;
-  setPointSize?(mode: "auto" | "fixed", value: number): void;
-};
-
 const fire = (target: HTMLElement, type: "input" | "change"): void => {
   target.dispatchEvent(new Event(type, { bubbles: true }));
 };
@@ -378,36 +361,6 @@ export const startSceneExplorer = (preset: ExplorerPreset): void => {
     host,
     element<HTMLElement>("#frame-rate"),
   );
-  const inputRecorder: InputRecorder = createInputRecorder({
-    viewer: element<HTMLElement>("#viewer"),
-    pose: () => ({
-      position: [...host.camera.getPosition()] as [number, number, number],
-      focalPoint: [...host.camera.getFocalPoint()] as [number, number, number],
-      viewUp: [...host.camera.getViewUp()] as [number, number, number],
-      viewAngle: host.camera.getViewAngle(),
-      parallelScale: host.camera.getParallelScale(),
-      parallelProjection: !!host.camera.getParallelProjection(),
-    }),
-    environment: () => captureTelemetryEnvironment(host.glContext()),
-  });
-  const sceneTelemetry = createSceneTelemetry({
-    host,
-    members: () =>
-      datasets.map((dataset) => ({
-        id: dataset.id,
-        label: dataset.label,
-        stats: dataset.stats(),
-      })),
-    settings: () => ({
-      preset,
-      interactionTargetMs: Number(movingTarget.value),
-      stationaryTargetMs: Number(stationaryTarget.value),
-    }),
-  });
-  if (recordingRequested()) {
-    installRecorderOverlay(inputRecorder, { telemetry: sceneTelemetry });
-  }
-  Object.assign(window, { pointCloudRecorder: inputRecorder });
   const governorActivity = element<HTMLElement>("#governor-activity");
   const datasetList = element<HTMLElement>("#dataset-list");
   const message = element<HTMLOutputElement>("#message");
@@ -1164,83 +1117,31 @@ export const startSceneExplorer = (preset: ExplorerPreset): void => {
     }
     syncUrl();
   };
-  /**
-   * Driving handles for the browser checks and the replay benchmark.
-   *
-   * Everything reaches the scene the way the panel does — a control is written
-   * and its own event dispatched — so a run that passes says the assembled
-   * page works, not that the modules underneath it do.
-   */
-  const datasetById = (id: string): Dataset => {
-    const found = datasets.find((candidate) => candidate.id === id);
-    if (!found) throw new Error(`no dataset ${id} in this scene`);
-    return found;
-  };
-
-  Object.assign(window, {
-    pointCloudScene: {
-      preset,
-      datasets: () =>
-        datasets.map(({ id, kind, label }) => ({ id, kind, label })),
-      /** Coordinator and per-member numbers, as the diagnostics panel reads them. */
-      stats: () => ({
-        coordinator: host.coordinator.stats(),
-        members: datasets.map((dataset) => ({
-          id: dataset.id,
-          kind: dataset.kind,
-          label: dataset.label,
-          stats: dataset.stats(),
-        })),
-        lastFrameMs: host.lastFrameMs(),
-        paints: host.paintCount(),
-        loading,
-        error: sceneError,
-      }),
-      /**
-       * What each dataset is busy with, in the panel's own words. Convergence
-       * is every dataset settled with nothing loading — the same condition the
-       * activity light shows, rather than a second definition beside it.
-       */
-      activity: () => ({
-        loading,
-        datasets: datasets.map((dataset) => ({
-          id: dataset.id,
-          ...datasetActivity(dataset.stats()),
-        })),
-      }),
-      viewport: () => {
-        const viewer = element<HTMLElement>("#viewer");
-        return { width: viewer.clientWidth, height: viewer.clientHeight };
-      },
-      camera: {
-        read: () => ({
-          position: [...host.camera.getPosition()],
-          focalPoint: [...host.camera.getFocalPoint()],
-          viewUp: [...host.camera.getViewUp()],
-          parallelScale: host.camera.getParallelScale(),
-          viewAngle: host.camera.getViewAngle(),
-          parallelProjection: !!host.camera.getParallelProjection(),
+  // Observation is attached, not built in: the harness is a dynamic import a
+  // session nobody is measuring never fetches, and everything it needs comes
+  // through this handle rather than out of the explorer's internals.
+  if (harnessRequested()) {
+    void import("../harness").then(({ attachHarness }) => {
+      attachHarness({
+        preset,
+        host,
+        viewer: element<HTMLElement>("#viewer"),
+        datasets: () =>
+          datasets.map((dataset) => ({
+            id: dataset.id,
+            kind: dataset.kind,
+            label: dataset.label,
+            controls: dataset.controls,
+            stats: () => dataset.stats(),
+            activity: () => datasetActivity(dataset.stats()),
+          })),
+        loading: () => loading,
+        error: () => sceneError,
+        qualityTargets: () => ({
+          interactionTargetMs: Number(movingTarget.value),
+          stationaryTargetMs: Number(stationaryTarget.value),
         }),
-        place: (next: {
-          position?: readonly number[];
-          focalPoint?: readonly number[];
-          viewUp?: readonly number[];
-        }) => {
-          if (next.position) host.camera.setPosition(...next.position);
-          if (next.focalPoint) host.camera.setFocalPoint(...next.focalPoint);
-          if (next.viewUp) host.camera.setViewUp(...next.viewUp);
-          host.scheduleRender();
-        },
-        reset: () => {
-          if (datasets.length === 1) frameDataset(datasets[0]!);
-          else host.frameVisible();
-        },
-      },
-      settings: {
-        setQualityTargets: (targets: {
-          interactionTargetMs?: number;
-          stationaryTargetMs?: number;
-        }) => {
+        setQualityTargets: (targets) => {
           if (targets.interactionTargetMs !== undefined) {
             movingTarget.value = String(targets.interactionTargetMs);
           }
@@ -1249,63 +1150,12 @@ export const startSceneExplorer = (preset: ExplorerPreset): void => {
           }
           syncTargets();
         },
-        setVisible: (id: string, visible: boolean) =>
-          datasetById(id).controls.setVisible(visible),
-        setScreenSpaceErrorPx: (id: string, px: number) => {
-          const dataset = datasetById(id);
-          if (!dataset.controls.setScreenSpaceErrorPx) {
-            throw new Error(`${id} is not a 3D Tiles dataset`);
-          }
-          dataset.controls.setScreenSpaceErrorPx(px);
+        resetCamera: () => {
+          if (datasets.length === 1) frameDataset(datasets[0]!);
+          else host.frameVisible();
         },
-        setBudgetMode: (id: string, mode: "adaptive" | "fixed") => {
-          const dataset = datasetById(id);
-          if (!dataset.controls.setBudgetMode) {
-            throw new Error(`${id} is not a point-cloud dataset`);
-          }
-          dataset.controls.setBudgetMode(mode);
-        },
-        setFixedPointBudget: (id: string, points: number) => {
-          const dataset = datasetById(id);
-          if (!dataset.controls.setFixedPointBudget) {
-            throw new Error(`${id} is not a point-cloud dataset`);
-          }
-          dataset.controls.setFixedPointBudget(points);
-        },
-        setMaximumPoints: (id: string, points: number | null) => {
-          const dataset = datasetById(id);
-          if (!dataset.controls.setMaximumPoints) {
-            throw new Error(`${id} is not a point-cloud dataset`);
-          }
-          dataset.controls.setMaximumPoints(points);
-        },
-        setPointSize: (id: string, mode: "auto" | "fixed", value: number) => {
-          const dataset = datasetById(id);
-          if (!dataset.controls.setPointSize) {
-            throw new Error(`${id} is not a point-cloud dataset`);
-          }
-          dataset.controls.setPointSize(mode, value);
-        },
-      },
-      telemetry: {
-        start: () => sceneTelemetry.start(),
-        stop: () => sceneTelemetry.stop(),
-        clear: () => sceneTelemetry.clear(),
-        isActive: () => sceneTelemetry.isActive(),
-        mark: (label: string) => sceneTelemetry.mark(label),
-        environment: () => sceneTelemetry.environment(),
-        summary: () => sceneTelemetry.summary(),
-        trace: () => sceneTelemetry.trace(),
-        download: () => sceneTelemetry.download(),
-        gpuTimingSupported: () => host.gpuTimingSupported(),
-      },
-      render: () => host.scheduleRender(),
-      needsFrame: () => host.coordinator.needsFrame(),
-    },
-  });
-
-  if (new URLSearchParams(window.location.search).get("telemetry") === "1") {
-    sceneTelemetry.start();
+      });
+    });
   }
 
   void initial().catch((error: unknown) => {

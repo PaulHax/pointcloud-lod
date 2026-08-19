@@ -29,7 +29,7 @@ import type {
   FrameReport,
   GpuFrameResolution,
   SceneHost,
-} from "./host";
+} from "../scene/host";
 
 export type SceneMemberSnapshot = {
   readonly id: string;
