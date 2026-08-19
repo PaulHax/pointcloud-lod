@@ -14,12 +14,10 @@
  * tiles behind 474 requests; one city needs a handful.
  */
 
-import type { ContentQueueFetch } from "../../../src/tiles3d/contentQueue";
 import type {
   TilesetFetch,
   TilesetFetchResponse,
 } from "../../../src/tiles3d/tilesetSource";
-import { repairMeshoptFallbackOffsets } from "./meshoptFallback";
 
 type RawTile = {
   readonly boundingVolume?: { readonly box?: readonly number[] };
@@ -156,21 +154,5 @@ export const createBag3dTilesetFetch = (
       statusText: "OK",
       json: async () => document,
     };
-  };
-};
-
-/**
- * Tile content, repaired on the way past. 3DBAG's GLBs stack both of their
- * meshopt buffer views at offset zero of one fallback buffer; see
- * `meshoptFallback.ts` for what that does to the triangles.
- */
-export const bag3dContentFetch: ContentQueueFetch = async (url, init) => {
-  const response = await fetch(url, { signal: init.signal });
-  return {
-    ok: response.ok,
-    status: response.status,
-    statusText: response.statusText,
-    arrayBuffer: async () =>
-      repairMeshoptFallbackOffsets(await response.arrayBuffer()),
   };
 };

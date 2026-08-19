@@ -13,6 +13,7 @@ import {
   type RtcPrimitiveResult,
 } from "../rtc";
 import { capabilityTarget, loadersBasisFormat } from "./capabilities";
+import { repairMeshoptFallbackOffsets } from "./meshoptFallback";
 import { collectContentBuffers } from "./transfer";
 import type {
   CompressedTextureFormat,
@@ -130,11 +131,21 @@ interface GltfMaterial {
   };
 }
 
+/**
+ * Required extensions this decoder can actually honour.
+ *
+ * The gate exists so an asset that needs something unimplemented fails by
+ * name instead of drawing something wrong. `EXT_meshopt_compression` is on the
+ * list because loaders.gl decompresses it and this decoder repairs the one
+ * authoring mistake that decoding in place turns into silent corruption; see
+ * `meshoptFallback.ts`.
+ */
 const REQUIRED_EXTENSION_ALLOWLIST = new Set([
   "KHR_draco_mesh_compression",
   "KHR_texture_basisu",
   "KHR_materials_unlit",
   "KHR_mesh_quantization",
+  "EXT_meshopt_compression",
 ]);
 
 const validateRequiredExtensions = (json: GltfJson, tileUri: string): void => {
@@ -1436,7 +1447,10 @@ const decodeTileContentInner = async (
     basisTextures: 0,
     basisTarget: null,
   };
-  const originalJson = contentJson(request.content);
+  // Repaired before anything reads it, so the JSON validated here and the
+  // bytes handed to the parser describe the same buffer layout.
+  const content = repairMeshoptFallbackOffsets(request.content);
+  const originalJson = contentJson(content);
   validateRequiredExtensions(originalJson, request.contentUrl);
   const allowedDependencies = dependencyAllowlist(request, originalJson);
   const needsDraco = hasExtension(originalJson, "KHR_draco_mesh_compression");
@@ -1472,7 +1486,7 @@ const decodeTileContentInner = async (
     const data = await (options.fetchDependency ?? fetchOkBytes)(canonicalUrl);
     return new Response(data, { status: 200 });
   };
-  const parsed = (await parse(request.content.slice(0), GLTFLoader, {
+  const parsed = (await parse(content.slice(0), GLTFLoader, {
     core: {
       worker: false,
       CDN: null,

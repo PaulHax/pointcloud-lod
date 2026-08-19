@@ -5,8 +5,13 @@ repository and are covered by the repository's MIT license. They isolate the
 error path so the tests do not depend on network access.
 
 - `y-up-triangle.gltf` pins the glTF Y-up to scene Z-up transform.
-- `meshopt-required.gltf` declares `EXT_meshopt_compression` as required and
-  pins the named unsupported-extension failure.
+- `unsupported-extension.gltf` declares an extension this decoder does not
+  implement and pins the named unsupported-extension failure.
+- `meshopt-quad.glb` and `meshopt-quad-collision.glb` hold the same
+  meshopt-compressed quad, the second with both compressed views claiming
+  offset zero of one fallback buffer. Together they pin meshopt decompression
+  and the fallback-offset repair that keeps the second from silently decoding a
+  wrong mesh. Regenerate with `npm run fixture:meshopt`.
 - `invalid-index.gltf` contains an index outside its POSITION accessor and
   pins vertex-index validation before renderer submission.
 - `unlit-triangle.gltf` requires `KHR_materials_unlit` and pins the material
@@ -18,7 +23,3 @@ error path so the tests do not depend on network access.
 
 The fixtures are self-contained JSON with data-URI buffers so the tests never
 depend on a network service.
-
-The required-meshopt error path was also checked against three.js'
-`facecap.glb` during implementation. It is not copied here because it does not
-carry a standalone asset license record suitable for redistribution.
