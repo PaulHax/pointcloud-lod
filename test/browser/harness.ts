@@ -435,7 +435,7 @@ export const openExample = async (
 
   const query = new URLSearchParams({ url: cloud });
   if (options.telemetry) query.set("telemetry", "1");
-  await page.goto(`${server.origin}/complete/index.html?${query}`, {
+  await page.goto(`${server.origin}/instrumented/index.html?${query}`, {
     waitUntil: "load",
   });
   await page.waitForFunction(

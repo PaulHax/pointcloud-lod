@@ -54,7 +54,7 @@ const navigateTo = (selection: SceneSelection): void => {
   const exampleRoot =
     currentPath.endsWith("/mesh/") ||
     currentPath.endsWith("/combined/") ||
-    currentPath.endsWith("/complete/")
+    currentPath.endsWith("/instrumented/")
       ? new URL("../", window.location.href)
       : new URL("./", window.location.href);
   const target = new URL(

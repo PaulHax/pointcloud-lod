@@ -110,13 +110,13 @@ const checkExampleBundle = () => {
     ? JSON.parse(readFileSync(manifestPath, "utf8"))
     : {};
   const entries = Object.values(manifest).filter((chunk) => chunk.isEntry);
-  const completeEntry = entries.find((chunk) => chunk.src === "index.html");
+  const explorerEntry = entries.find((chunk) => chunk.src === "index.html");
   const simpleEntry = entries.find(
     (chunk) => chunk.src === "simple/index.html",
   );
-  if (!completeEntry || !simpleEntry) {
+  if (!explorerEntry || !simpleEntry) {
     fail(
-      `complete or simple example entry is missing from ${manifestPath} — run 'npm run example:build' first`,
+      `explorer or simple example entry is missing from ${manifestPath} — run 'npm run example:build' first`,
     );
   }
 
@@ -155,7 +155,7 @@ const checkExampleBundle = () => {
     maximumPointCount: text.includes("maximumPointCount"),
   });
   for (const [name, entry] of [
-    ["complete", completeEntry],
+    ["explorer", explorerEntry],
     ["simple", simpleEntry],
   ]) {
     const required = requiredFeatures(entryBundle(entry).toString("utf8"));
@@ -174,7 +174,7 @@ const checkExampleBundle = () => {
   // rather than a matter of care: if anything under `harness/` ever gets named
   // by a static import, it lands in the entry bundle and this fails.
   for (const [name, entry] of [
-    ["complete", completeEntry],
+    ["explorer", explorerEntry],
     ["simple", simpleEntry],
   ]) {
     // The overlay's own class name, which survives minification because it is
@@ -209,7 +209,7 @@ const checkExampleBundle = () => {
     return visit(entry);
   };
   for (const [name, entry] of [
-    ["complete", completeEntry],
+    ["explorer", explorerEntry],
     ["simple", simpleEntry],
   ]) {
     if (reachesHarness(entry)) {
@@ -217,8 +217,8 @@ const checkExampleBundle = () => {
     }
   }
 
-  const file = join(output, completeEntry.file);
-  const bytes = entryBundle(completeEntry);
+  const file = join(output, explorerEntry.file);
+  const bytes = entryBundle(explorerEntry);
   return {
     file,
     sha256: createHash("sha256").update(bytes).digest("hex"),
