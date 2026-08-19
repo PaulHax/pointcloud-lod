@@ -503,6 +503,16 @@ export type OverlayTelemetry = {
 };
 
 /**
+ * A capture is two files and they are only useful together: the input is what
+ * a benchmark replays, the trace is what this machine did with it. Naming both
+ * from one stamp is what lets a pair be recognised later as one session.
+ */
+const captureBasename = (recorder: InputRecorder): string =>
+  `pointcloud-capture-${filenameTimestamp(
+    new Date(recorder.recording().recordedAt),
+  )}`;
+
+/**
  * A floating panel, deliberately not part of either example's own layout.
  *
  * The three pages it has to appear on have three different shells, and a
@@ -539,18 +549,11 @@ export const installRecorderOverlay = (
       <button type="button" data-role="mark" disabled>Mark</button>
     </div>
     <div class="input-recorder-actions">
-      <button type="button" data-role="download" disabled>Download</button>
+      <button type="button" data-role="download" disabled>Save capture</button>
       <button type="button" data-role="clear" disabled>Clear</button>
     </div>
     <div class="input-recorder-status" data-role="status">idle</div>
     <div class="input-recorder-hint">F9 record · F10 mark</div>`;
-  if (options.telemetry) {
-    const traceRow = document.createElement("div");
-    traceRow.className = "input-recorder-actions";
-    traceRow.innerHTML =
-      '<button type="button" data-role="trace" disabled>Download trace</button>';
-    panel.querySelector('[data-role="status"]')!.before(traceRow);
-  }
   document.body.append(panel);
 
   const control = <T extends HTMLElement>(role: string): T => {
@@ -563,7 +566,6 @@ export const installRecorderOverlay = (
   const download = control<HTMLButtonElement>("download");
   const clear = control<HTMLButtonElement>("clear");
   const status = control<HTMLElement>("status");
-  const trace = options.telemetry ? control<HTMLButtonElement>("trace") : null;
 
   const refresh = (): void => {
     const state = recorder.status();
@@ -577,7 +579,6 @@ export const installRecorderOverlay = (
       state.viewerResized ? "viewer resized mid-capture" : null,
     ].filter((entry): entry is string => entry !== null);
     const traceSummary = options.telemetry?.summary();
-    if (trace !== null) trace.disabled = (traceSummary?.frames ?? 0) === 0;
     status.textContent =
       `${(state.durationMs / 1000).toFixed(1)} s · ${state.events} events\n` +
       `${state.poses} poses · ${state.markers} marks` +
@@ -596,14 +597,27 @@ export const installRecorderOverlay = (
     }
     refresh();
   });
-  trace?.addEventListener("click", () => options.telemetry?.download());
   mark.addEventListener("click", () => {
     recorder.mark(
       options.markLabel?.() ?? `mark-${recorder.status().markers + 1}`,
     );
     refresh();
   });
-  download.addEventListener("click", () => recorder.download());
+  /**
+   * Both halves, under one name. Stopping first because a trace downloaded
+   * mid-recording has no end, and the pair would describe a session that was
+   * still running when it was written out.
+   */
+  download.addEventListener("click", () => {
+    if (recorder.isActive()) {
+      recorder.stop();
+      options.telemetry?.stop();
+    }
+    const base = captureBasename(recorder);
+    recorder.download(`${base}-input.json`);
+    options.telemetry?.download(`${base}-trace.json`);
+    refresh();
+  });
   clear.addEventListener("click", () => {
     recorder.clear();
     refresh();
