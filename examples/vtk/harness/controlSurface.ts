@@ -11,8 +11,6 @@
 import type { SceneTelemetry } from "./telemetry";
 import type { HarnessDataset, SceneHandle } from "./sceneHandle";
 
-export type ControlSurface = ReturnType<typeof createControlSurface>;
-
 const required = <T>(
   dataset: HarnessDataset,
   control: T | undefined,
