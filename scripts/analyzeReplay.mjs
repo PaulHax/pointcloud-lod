@@ -27,9 +27,35 @@ import {
   markerTimes,
   number,
   percent,
+  percentile,
   phaseMetrics,
   table,
 } from "./traceMetrics.mjs";
+
+/**
+ * The same run repeated is not the same numbers, and a tuning change is only
+ * worth reporting if it moved a metric further than repetition does. Each
+ * configuration is therefore summarised as a median and the spread its own
+ * repeats covered, so the two can be read against each other; a difference
+ * inside the spread is a difference this benchmark cannot see.
+ */
+const across = (rows, read) => {
+  const values = rows.map(read).filter((value) => Number.isFinite(value));
+  if (values.length === 0) return { median: null, spread: null, runs: 0 };
+  const sorted = [...values].sort((left, right) => left - right);
+  return {
+    median: percentile(sorted, 0.5),
+    spread: sorted[sorted.length - 1] - sorted[0],
+    runs: sorted.length,
+  };
+};
+
+const withSpread = (summary, format) =>
+  summary.median === null
+    ? "—"
+    : summary.runs < 2
+      ? format(summary.median)
+      : `${format(summary.median)} ±${format(summary.spread / 2)}`;
 
 const analyzeArtifact = (artifact) => {
   const trace = artifact.trace;
@@ -78,6 +104,7 @@ const analyzeArtifact = (artifact) => {
       transferredMb: artifact.network.transferredBytes / 1e6,
       cacheHits: artifact.network.cache?.hits ?? null,
       cacheMisses: artifact.network.cache?.misses ?? null,
+      fetched: artifact.network.cache?.fetched ?? null,
     },
     fidelity: {
       meanLatenessMs: artifact.fidelity.dispatch.meanLatenessMs,
@@ -117,6 +144,7 @@ const COLUMNS = [
   { title: "moving p50 ms", value: (row) => number(row.motion.intervalMs.p50) },
   { title: "moving p95 ms", value: (row) => number(row.motion.intervalMs.p95) },
   { title: "moving gpu p95", value: (row) => number(row.motion.gpuMs.p95) },
+  { title: "moving quality", value: (row) => percent(row.motion.quality) },
   { title: "moving pts", value: (row) => integer(row.motion.drawnPoints) },
   { title: "moving tris", value: (row) => integer(row.motion.drawnTriangles) },
   {
@@ -131,6 +159,12 @@ const COLUMNS = [
   { title: "settled sse", value: (row) => number(row.settled.worstSse) },
   { title: "long tasks", value: (row) => integer(row.longTasks.count) },
   { title: "MB", value: (row) => number(row.network.transferredMb) },
+  {
+    // Requests that went to the origin rather than the cache. A run with more
+    // than a handful paid a real network for part of its measurement.
+    title: "live req",
+    value: (row) => integer(row.network.fetched),
+  },
   { title: "path drift", value: (row) => percent(row.fidelity.pathDrift) },
 ];
 
@@ -184,6 +218,60 @@ const main = async () => {
     lines.push("");
     lines.push(table(group, COLUMNS));
     lines.push("");
+
+    const configs = [...new Set(group.map((row) => row.config))];
+    if (group.length > configs.length) {
+      const summaries = configs.map((config) => {
+        const rows = group.filter((row) => row.config === config);
+        return {
+          config,
+          runs: rows.length,
+          fps: across(rows, (row) => row.motion.fps),
+          p95: across(rows, (row) => row.motion.intervalMs.p95),
+          gpu: across(rows, (row) => row.motion.gpuMs.p95),
+          quality: across(rows, (row) => row.motion.quality),
+          points: across(rows, (row) => row.motion.drawnPoints),
+          triangles: across(rows, (row) => row.motion.drawnTriangles),
+          settle: across(rows, (row) => row.convergence.msAfterGesture),
+        };
+      });
+      lines.push(
+        "Median across repeats, ± half the spread those repeats covered:",
+      );
+      lines.push("");
+      lines.push(
+        table(summaries, [
+          { title: "config", value: (row) => row.config },
+          { title: "runs", value: (row) => String(row.runs) },
+          { title: "moving fps", value: (row) => withSpread(row.fps, number) },
+          {
+            title: "moving p95 ms",
+            value: (row) => withSpread(row.p95, number),
+          },
+          {
+            title: "moving gpu p95",
+            value: (row) => withSpread(row.gpu, number),
+          },
+          {
+            title: "moving quality",
+            value: (row) => withSpread(row.quality, percent),
+          },
+          {
+            title: "moving pts",
+            value: (row) => withSpread(row.points, integer),
+          },
+          {
+            title: "moving tris",
+            value: (row) => withSpread(row.triangles, integer),
+          },
+          {
+            title: "settle ms",
+            value: (row) => withSpread(row.settle, integer),
+          },
+        ]),
+      );
+      lines.push("");
+    }
     const drifted = group.filter(
       (row) => (row.fidelity.maxPathDrift ?? 0) > 0.1,
     );

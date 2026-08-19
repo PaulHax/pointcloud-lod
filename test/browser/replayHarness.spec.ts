@@ -14,7 +14,7 @@
 import { afterAll, describe, expect, it } from "vitest";
 
 import type { InputRecording } from "../../examples/vtk/scene/inputRecorder";
-import { compareCameraTracks, replayInput } from "./inputReplay";
+import { compareCameraTracks, replayInput, wheelNotches } from "./inputReplay";
 import {
   closeBenchmarkBrowser,
   openScene,
@@ -190,6 +190,129 @@ describe("recorded-gesture replay harness", () => {
     } finally {
       await replay.close();
     }
+  });
+
+  /**
+   * Wheel deltas cross CDP in device pixels while pointer coordinates cross it
+   * in CSS pixels, so a recording replayed onto a scaled display reaches the
+   * page with every notch divided by the device pixel ratio unless the driver
+   * scales it back. The rest of this suite runs unscaled, where the two units
+   * coincide and the mistake is invisible; the shortfall it causes compounds
+   * through the dolly it drives, so a gesture that zoomed in replays somewhere
+   * else entirely.
+   */
+  it("replays wheel deltas at their recorded strength on a scaled display", async () => {
+    const DEVICE_SCALE_FACTOR = 1.65;
+    const RECORDED_DELTA_Y = 181.81817130937452;
+    const session = await openScene({
+      path: FIXTURE_SCENE,
+      headless: true,
+      deviceScaleFactor: DEVICE_SCALE_FACTOR,
+    });
+    try {
+      await session.resizeViewer(VIEWER);
+      await session.settle(120_000);
+      const seen = await session.page.evaluate(() => {
+        const deltas: number[] = [];
+        (window as never as { __wheelDeltas: number[] }).__wheelDeltas = deltas;
+        window.addEventListener("wheel", (event) => deltas.push(event.deltaY), {
+          capture: true,
+          passive: true,
+        });
+        return deltas.length;
+      });
+      expect(seen).toBe(0);
+
+      // An empty real recording, so the fields a replay does not read still
+      // describe this page rather than something invented here.
+      await session.startInputRecorder();
+      await session.stopInputRecorder();
+      const empty = (await session.inputRecording()) as InputRecording;
+      const recording: InputRecording = {
+        ...empty,
+        viewer: {
+          widthCssPx: VIEWER.width,
+          heightCssPx: VIEWER.height,
+          devicePixelRatio: DEVICE_SCALE_FACTOR,
+        },
+        markers: [],
+        events: [
+          {
+            atMs: 0,
+            x: VIEWER.width / 2,
+            y: VIEWER.height / 2,
+            buttons: 0,
+            shiftKey: false,
+            ctrlKey: false,
+            altKey: false,
+            metaKey: false,
+            type: "wheel",
+            deltaX: 0,
+            deltaY: RECORDED_DELTA_Y,
+            deltaMode: 0,
+          },
+        ],
+      };
+
+      await replayInput({
+        page: session.page,
+        recording,
+        viewer: await session.viewerBox(),
+      });
+      await session.page.waitForFunction(
+        () =>
+          (window as never as { __wheelDeltas: number[] }).__wheelDeltas
+            .length > 0,
+        null,
+        { timeout: 10_000 },
+      );
+      const deltas = await session.page.evaluate(
+        () => (window as never as { __wheelDeltas: number[] }).__wheelDeltas,
+      );
+      // Chrome may split one dispatched turn across several events, so the
+      // total is what has to survive the trip, not the event count.
+      const total = deltas.reduce((sum, value) => sum + value, 0);
+      expect(total / RECORDED_DELTA_Y).toBeGreaterThan(0.99);
+      expect(total / RECORDED_DELTA_Y).toBeLessThan(1.01);
+    } finally {
+      await session.close();
+    }
+  });
+
+  it("counts a wheel turn's strength in notches, relative to its burst", () => {
+    const wheel = (atMs: number, deltaY: number) =>
+      ({
+        atMs,
+        x: 0,
+        y: 0,
+        buttons: 0,
+        shiftKey: false,
+        ctrlKey: false,
+        altKey: false,
+        metaKey: false,
+        type: "wheel",
+        deltaX: 0,
+        deltaY,
+        deltaMode: 0,
+      }) as const;
+
+    const burst = [wheel(0, 100), wheel(20, 200), wheel(40, -100)];
+    expect([...wheelNotches(burst).values()]).toEqual([1, 2, 1]);
+
+    // A gap longer than the interactor's own burst timeout restarts the
+    // normalisation, so the second burst's own first turn is its unit.
+    const twoBursts = [wheel(0, 100), wheel(400, 300), wheel(420, 600)];
+    expect([...wheelNotches(twoBursts).values()]).toEqual([1, 1, 2]);
+
+    // Fractional turns cannot be dispatched, so the remainder carries rather
+    // than being rounded away on every event: five half-turns are three
+    // notches, not five and not zero.
+    const trackpad = Array.from({ length: 5 }, (_, index) =>
+      wheel(index * 20, index === 0 ? 100 : 50),
+    );
+    expect(
+      [...wheelNotches(trackpad).values()].reduce((sum, n) => sum + n, 0),
+    ).toBe(3);
   });
 
   it("reports drift between two genuinely different camera tracks", () => {

@@ -7,14 +7,19 @@
  * that never touches the network measures something no user has, because
  * streaming decisions exist to hide latency.
  *
- * So both, chosen per run. `live` goes to the origin. `record` goes to the
- * origin and keeps every response. `replay` serves what was kept, at a stated
+ * So both, chosen per run. `live` goes to the origin. `record` serves what it
+ * already has and fetches and keeps the rest, so repeating a sweep converges
+ * on a cache that answers it. `replay` serves only what was kept, at a stated
  * latency and rate, and fails loudly on a request nothing recorded rather than
  * silently reaching for the network mid-measurement.
  *
  * Entries are keyed by method, URL and Range, because these datasets are read
  * almost entirely through range requests and two ranges of one COPC file are
- * two different responses.
+ * two different responses. That key is also why `replay` alone cannot carry a
+ * sweep of a point cloud: the reader coalesces adjacent octree nodes into one
+ * range, which nodes travel together depends on what arrived when, and a range
+ * that shifted by a node is a key nothing recorded. Strict replay is for
+ * confirming a measurement is reproducible; `record` is for taking it.
  */
 
 import { createHash } from "node:crypto";
@@ -46,6 +51,8 @@ export type HttpCacheStats = {
   readonly hits: number;
   readonly misses: number;
   readonly recorded: number;
+  /** Requests that went to the origin. Zero is a fully cached measurement. */
+  readonly fetched: number;
   readonly bytes: number;
   /** Requests `replay` could not answer, by URL. Empty is the only good value. */
   readonly unrecorded: readonly string[];
@@ -106,6 +113,20 @@ const writeAtomic = async (path: string, body: Uint8Array): Promise<void> => {
   await rename(temporary, path);
 };
 
+const readEntry = async (paths: {
+  readonly meta: string;
+  readonly body: string;
+}): Promise<{ meta: CacheEntryMeta; body: Buffer } | null> => {
+  try {
+    const meta = JSON.parse(
+      await readFile(paths.meta, "utf8"),
+    ) as CacheEntryMeta;
+    return { meta, body: await readFile(paths.body) };
+  } catch {
+    return null;
+  }
+};
+
 export type HttpCache = {
   /** Install request handling on a page. Safe to call once per page. */
   install(page: Page): Promise<void>;
@@ -117,6 +138,7 @@ export const createHttpCache = (options: HttpCacheOptions): HttpCache => {
   let hits = 0;
   let misses = 0;
   let recorded = 0;
+  let fetched = 0;
   let bytes = 0;
   const unrecorded: string[] = [];
 
@@ -146,12 +168,8 @@ export const createHttpCache = (options: HttpCacheOptions): HttpCache => {
     const paths = entryPaths(options.directory, key);
 
     if (options.mode === "replay") {
-      let meta: CacheEntryMeta;
-      let body: Buffer;
-      try {
-        meta = JSON.parse(await readFile(paths.meta, "utf8")) as CacheEntryMeta;
-        body = await readFile(paths.body);
-      } catch {
+      const stored = await readEntry(paths);
+      if (stored === null) {
         misses += 1;
         unrecorded.push(
           `${request.method()} ${url}${range ? ` ${range}` : ""}`,
@@ -163,19 +181,39 @@ export const createHttpCache = (options: HttpCacheOptions): HttpCache => {
         return;
       }
       hits += 1;
-      bytes += body.byteLength;
-      await shaped(body.byteLength);
+      bytes += stored.body.byteLength;
+      await shaped(stored.body.byteLength);
       await route.fulfill({
-        status: meta.status,
-        headers: meta.headers,
-        body,
+        status: stored.meta.status,
+        headers: stored.meta.headers,
+        body: stored.body,
       });
       return;
+    }
+
+    if (options.mode === "record") {
+      // Read-through: what is already here is served without touching the
+      // network, so a second pass over the same gesture is mostly the recorded
+      // bytes and only the requests this run invented are live. `fetched` says
+      // how much of the run that was.
+      const stored = await readEntry(paths);
+      if (stored !== null) {
+        hits += 1;
+        bytes += stored.body.byteLength;
+        await shaped(stored.body.byteLength);
+        await route.fulfill({
+          status: stored.meta.status,
+          headers: stored.meta.headers,
+          body: stored.body,
+        });
+        return;
+      }
     }
 
     const response = await route.fetch();
     const body = await response.body();
     bytes += body.byteLength;
+    fetched += 1;
     if (options.mode === "record") {
       const meta: CacheEntryMeta = {
         url,
@@ -207,6 +245,7 @@ export const createHttpCache = (options: HttpCacheOptions): HttpCache => {
       hits,
       misses,
       recorded,
+      fetched,
       bytes,
       unrecorded: [...unrecorded],
     }),

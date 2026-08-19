@@ -25,7 +25,7 @@ import type {
   InputRecording,
   RecordedPoseSample,
 } from "../../examples/vtk/scene/inputRecorder";
-import type { CacheMode } from "./httpCache";
+import type { CacheMode, HttpCache } from "./httpCache";
 import { compareCameraTracks, replayInput } from "./inputReplay";
 import {
   closeBenchmarkBrowser,
@@ -73,6 +73,13 @@ const repeats = Math.max(
   1,
   Math.floor(environmentNumber("POINTCLOUD_LOD_REPLAY_REPEATS", 1)),
 );
+/**
+ * How long a scene is given to converge before the run is called a failure.
+ * A sweep pays this several times per run, so a configuration that cannot
+ * converge at all should say so quickly rather than holding a browser open
+ * for the default.
+ */
+const settleMs = environmentNumber("POINTCLOUD_LOD_REPLAY_SETTLE_MS", 120_000);
 const usingRealGpu = (process.env.POINTCLOUD_LOD_BROWSER_GPU ?? "") !== "";
 /**
  * Runs the whole pipeline against a software rasteriser, for checking that the
@@ -192,40 +199,72 @@ const artifactName = (
 ): string =>
   `${basename(recordingPath, ".json")}__${config.name}__${repeat + 1}.json`;
 
+/**
+ * One test per recording, configuration and repeat, rather than one test that
+ * loops over all of them. A sweep is the point of this file, and a single test
+ * around the whole sweep gives every combination one shared timeout: adding a
+ * fourth configuration would push a passing sweep over a limit that describes
+ * nothing about any run in it, and the artifacts already written would be
+ * reported as a failure. Split, each run is bounded by its own gesture's
+ * length and the ones that finished are kept.
+ */
+const recordingPaths = await listRecordings();
+if (recordingPaths.length === 0) {
+  throw new Error(
+    `no recordings in ${RECORDINGS_DIR}. Capture one by opening the ` +
+      `example with ?record=1 and downloading the JSON.`,
+  );
+}
+const benchmarkConfigs = await loadConfigs();
+
 describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
   afterAll(async () => {
     await closeBenchmarkBrowser();
   });
 
-  it("replays every recording against every configuration", async () => {
-    const recordings = await listRecordings();
-    if (recordings.length === 0) {
-      throw new Error(
-        `no recordings in ${RECORDINGS_DIR}. Capture one by opening the ` +
-          `example with ?record=1 and downloading the JSON.`,
-      );
-    }
-    if (!usingRealGpu && !allowSoftware) {
-      throw new Error(
-        "the replay benchmark requires POINTCLOUD_LOD_BROWSER_GPU=1: frame " +
-          "times under a software rasterizer describe the rasterizer. Set " +
-          "POINTCLOUD_LOD_REPLAY_ALLOW_SOFTWARE=1 to exercise the pipeline " +
-          "without measuring anything.",
-      );
-    }
-    const configs = await loadConfigs();
-    await mkdir(outputDirectory, { recursive: true });
+  for (const recordingPath of recordingPaths) {
+    for (const config of benchmarkConfigs) {
+      for (let repeat = 0; repeat < repeats; repeat += 1) {
+        it(`${basename(recordingPath, ".json")} · ${config.name} · run ${
+          repeat + 1
+        }`, async () => {
+          if (!usingRealGpu && !allowSoftware) {
+            throw new Error(
+              "the replay benchmark requires POINTCLOUD_LOD_BROWSER_GPU=1: " +
+                "frame times under a software rasterizer describe the " +
+                "rasterizer. Set POINTCLOUD_LOD_REPLAY_ALLOW_SOFTWARE=1 to " +
+                "exercise the pipeline without measuring anything.",
+            );
+          }
+          await mkdir(outputDirectory, { recursive: true });
+          const recording = JSON.parse(
+            await readFile(recordingPath, "utf8"),
+          ) as InputRecording;
+          if (recording.schemaVersion !== 1) {
+            throw new Error(`${recordingPath} is not a version 1 recording`);
+          }
 
-    for (const recordingPath of recordings) {
-      const recording = JSON.parse(
-        await readFile(recordingPath, "utf8"),
-      ) as InputRecording;
-      if (recording.schemaVersion !== 1) {
-        throw new Error(`${recordingPath} is not a version 1 recording`);
-      }
+          const settle = async (
+            session: SceneSession & { readonly cache: HttpCache | null },
+          ) => {
+            try {
+              return await session.settle(settleMs);
+            } catch (error) {
+              // A replayed network that cannot answer a request aborts it, and
+              // an aborted tile is one the scene waits on forever. Reported as
+              // "did not settle" alone that reads as a streaming bug, so the
+              // requests nothing recorded are named here instead.
+              const missing = session.cache?.stats().unrecorded ?? [];
+              if (missing.length === 0) throw error;
+              throw new Error(
+                `${(error as Error).message}\n\n` +
+                  `${missing.length} request(s) the ${networkMode} cache could ` +
+                  `not answer, which is why it never converged:\n` +
+                  `${missing.slice(0, 10).join("\n")}`,
+              );
+            }
+          };
 
-      for (const config of configs) {
-        for (let repeat = 0; repeat < repeats; repeat += 1) {
           const session = await openScene({
             path: replayPath(recording.href),
             deviceScaleFactor: recording.viewer.devicePixelRatio,
@@ -234,14 +273,17 @@ describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
               mode: networkMode,
               directory: cacheDirectory,
               origins: DATASET_ORIGINS,
-              ...(networkMode === "replay"
-                ? {
+              // Shaped whenever the cache is answering, so a cached byte
+              // costs what a networked one would. A read-through fetch pays
+              // the real network instead and is counted separately.
+              ...(networkMode === "live"
+                ? {}
+                : {
                     shape: {
                       latencyMs,
                       bytesPerSecond: (mbps * 1_000_000) / 8,
                     },
-                  }
-                : {}),
+                  }),
             },
           });
           try {
@@ -249,9 +291,9 @@ describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
               width: recording.viewer.widthCssPx,
               height: recording.viewer.heightCssPx,
             });
-            await session.settle();
+            await settle(session);
             await applyConfig(session, config);
-            await session.settle();
+            await settle(session);
 
             // The gesture is only reproducible from the camera it was recorded
             // from. Placing it before telemetry starts keeps the reframing
@@ -261,10 +303,10 @@ describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
               focalPoint: recording.startPose.focalPoint,
               viewUp: recording.startPose.viewUp,
             });
-            await session.settle();
+            await settle(session);
             await session.render();
             await session.frame();
-            await session.settle();
+            await settle(session);
 
             await session.startTelemetry();
             await session.startInputRecorder();
@@ -279,7 +321,7 @@ describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
 
             await session.markTelemetry("replay-ended");
             await session.frame();
-            const settledAfter = await session.settle();
+            const settledAfter = await settle(session);
             await session.markTelemetry("settled-after-replay");
             await session.stopInputRecorder();
             await session.stopTelemetry();
@@ -322,9 +364,9 @@ describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
               repeat: repeat + 1,
               network: {
                 mode: networkMode,
-                ...(networkMode === "replay"
-                  ? { latencyMs, mbpsPerRequest: mbps }
-                  : {}),
+                ...(networkMode === "live"
+                  ? {}
+                  : { latencyMs, mbpsPerRequest: mbps }),
                 cache: cacheStats,
                 transferredBytes: session.transferredBytes(),
               },
@@ -353,8 +395,8 @@ describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
           } finally {
             await session.close();
           }
-        }
+        });
       }
     }
-  });
+  }
 });

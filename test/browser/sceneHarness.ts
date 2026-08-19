@@ -224,7 +224,17 @@ export const openScene = async (options: {
   await cache?.install(page);
 
   const failures: string[] = [];
-  page.on("pageerror", (error) => failures.push(`pageerror: ${error.message}`));
+  page.on("pageerror", (error) =>
+    // With the stack: a page error that only reports its message names the
+    // failure but not the code, and these runs are long enough that losing
+    // that costs a whole re-run to recover.
+    failures.push(
+      `pageerror: ${error.message}\n${(error.stack ?? "")
+        .split("\n")
+        .slice(1, 9)
+        .join("\n")}`,
+    ),
+  );
   page.on("console", (message: ConsoleMessage) => {
     if (message.type() === "error") failures.push(`console: ${message.text()}`);
   });
