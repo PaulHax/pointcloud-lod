@@ -493,6 +493,17 @@ dialog form {
   font-size: 12px;
 }
 
+.field-note {
+  margin: 8px 0 0;
+  color: #8aa0b0;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.field-note[hidden] {
+  display: none;
+}
+
 .dataset-stats {
   margin-top: 12px;
   padding-top: 10px;

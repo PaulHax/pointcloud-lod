@@ -80,7 +80,12 @@ export type ViewGovernorStats = {
     readonly rejected: number;
     readonly lastEligible: boolean | null;
   };
+  /** The target being steered to, raised if the display cannot beat it. */
   readonly targetFrameTimeMs: number;
+  /** The configured target, before the display quantum is taken into account. */
+  readonly configuredFrameTimeMs: number;
+  /** Shortest interval this display has presented, once it is known. */
+  readonly displayQuantumMs: number | null;
   readonly estimateMs: number | null;
   readonly samples: number;
   readonly lastAdjustment: QualityAdjustment | null;
@@ -118,6 +123,10 @@ export type ViewGovernor = {
 };
 
 const EMERGENCY_CONSECUTIVE_FRAMES = 2;
+/** Faster than any display refreshes: a shorter interval is a doubled tick. */
+const MIN_DISPLAY_QUANTUM_MS = 3;
+/** How many short intervals must agree before the quantum is believed. */
+const DISPLAY_QUANTUM_SAMPLES = 3;
 const INTERACTION_SEED_OF_STATIONARY = 0.25;
 
 const GOVERNOR_DEFAULTS = {
@@ -212,6 +221,13 @@ export const createViewGovernor = (
   let peakObservedFrameMs = 0;
   let lastHostFrameMs: number | null = null;
   let lastObservedFrameMs: number | null = null;
+  // The shortest presentation intervals seen this session, ascending. Frames
+  // are reported between presentations, so the smallest interval a display can
+  // produce is its refresh period however cheap the frame was — which is what
+  // the quality tracks need in order to tell headroom from a vsync floor. The
+  // k-th smallest rather than the smallest, so one stray short interval from a
+  // compositor hiccup cannot claim a faster display than there is.
+  const shortestFrameMs: number[] = [];
 
   const stampNow = (): number => Date.now() + (hostEpochOffsetMs ?? 0);
   const moving = (): boolean => explicitMotion + inferredMotion > 0;
@@ -325,8 +341,31 @@ export const createViewGovernor = (
     return Math.max(...candidates);
   };
 
+  const noteDisplayQuantum = (hostFrameMs: number): void => {
+    // Below this is faster than any display presents, so it is evidence of a
+    // doubled callback rather than of a refresh period.
+    if (hostFrameMs < MIN_DISPLAY_QUANTUM_MS) return;
+    const at = shortestFrameMs.findIndex((seen) => hostFrameMs < seen);
+    if (at < 0) {
+      if (shortestFrameMs.length >= DISPLAY_QUANTUM_SAMPLES) return;
+      shortestFrameMs.push(hostFrameMs);
+    } else {
+      shortestFrameMs.splice(at, 0, hostFrameMs);
+      shortestFrameMs.length = Math.min(
+        shortestFrameMs.length,
+        DISPLAY_QUANTUM_SAMPLES,
+      );
+    }
+    if (shortestFrameMs.length === DISPLAY_QUANTUM_SAMPLES) {
+      quality.setDisplayQuantumMs(
+        shortestFrameMs[DISPLAY_QUANTUM_SAMPLES - 1]!,
+      );
+    }
+  };
+
   const recordTransientFrame = (metrics: TransientFrameMetrics): number => {
     if (disposed || !finiteNonNegative(metrics?.hostFrameMs)) return 0;
+    noteDisplayQuantum(metrics.hostFrameMs);
     const now = stampFrom(metrics);
     const severeInput =
       (finiteNonNegative(metrics.inputDelayMs) && metrics.inputDelayMs > 50) ||
@@ -484,7 +523,9 @@ export const createViewGovernor = (
           rejected: rejectedCapacitySamples,
           lastEligible: lastCapacitySampleEligible,
         },
-        targetFrameTimeMs: track.targetMs,
+        targetFrameTimeMs: track.effectiveTargetMs,
+        configuredFrameTimeMs: track.targetMs,
+        displayQuantumMs: adaptive.displayQuantumMs,
         estimateMs: track.estimateMs,
         samples: track.samples,
         lastAdjustment: track.lastAdjustment,

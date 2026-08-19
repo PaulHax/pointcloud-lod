@@ -66,6 +66,7 @@ export const renderExplorerShell = (preset: ExplorerPreset): void => {
               </div>
             </div>
           </div>
+          <p id="target-note" class="field-note" hidden></p>
           <details class="governor-diagnostics">
             <summary>Advanced diagnostics</summary>
             <div id="stats" aria-label="Shared streaming diagnostics"></div>

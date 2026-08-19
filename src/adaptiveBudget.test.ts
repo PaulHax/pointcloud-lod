@@ -97,4 +97,50 @@ describe("createAdaptiveQuality", () => {
   ] as const)("rejects invalid option %s", (bad, name) => {
     expect(() => createAdaptiveQuality(bad)).toThrow(name);
   });
+
+  it("raises a target the display can never beat", () => {
+    const quality = createAdaptiveQuality({ ...options, hysteresis: 0.2 });
+    // 60 Hz: a frame that draws nothing still waits for the refresh, so 16.7
+    // is both the floor of the measurement and, at a 16 ms target, inside the
+    // hysteresis band — the interaction track can never be told it has room.
+    frames(quality, 16.7, true);
+    expect(quality.stats().interaction).toMatchObject({
+      fraction: 0.8,
+      lastAdjustment: { reason: "within-hysteresis" },
+    });
+
+    quality.setDisplayQuantumMs(16.7);
+    expect(quality.stats().interaction.targetMs).toBe(16);
+    expect(quality.stats().interaction.effectiveTargetMs).toBeCloseTo(24, 1);
+    expect(quality.target(true)).toBeCloseTo(24, 1);
+
+    quality.recordFrame(16.7, { interacting: true, now: 2 });
+    expect(quality.stats().interaction).toMatchObject({
+      lastAdjustment: { direction: "increase", reason: "below-target" },
+    });
+    expect(quality.fraction(true)).toBeGreaterThan(0.8);
+  });
+
+  it("leaves a target the display can already beat alone", () => {
+    const quality = createAdaptiveQuality({ ...options, hysteresis: 0.2 });
+    quality.setDisplayQuantumMs(16.7);
+    // 32 ms is nearly two refreshes away: its increase threshold at 25.6 is
+    // reachable as it stands, so the quantum has nothing to say about it.
+    expect(quality.stats().stationary.effectiveTargetMs).toBe(32);
+
+    // A frame slower than the raised interaction target is still slow.
+    frames(quality, 40, true);
+    expect(quality.stats().interaction).toMatchObject({
+      lastAdjustment: { direction: "decrease", reason: "above-target" },
+    });
+  });
+
+  it("ignores a display quantum that is not a duration", () => {
+    const quality = createAdaptiveQuality(options);
+    quality.setDisplayQuantumMs(Number.NaN);
+    quality.setDisplayQuantumMs(0);
+    quality.setDisplayQuantumMs(-16);
+    expect(quality.stats().displayQuantumMs).toBeNull();
+    expect(quality.stats().interaction.effectiveTargetMs).toBe(16);
+  });
 });
