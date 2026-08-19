@@ -23,6 +23,13 @@ so the page plus its query string is the whole scene description:
 - `http://localhost:5173/mesh/?record=1&place=Rotterdam` — 3D Tiles
 - `http://localhost:5173/combined/?record=1&place=Rotterdam` — both
 
+Everything that measures the page — the capture panel, telemetry, and the
+automation surface the benchmark drives — lives in `examples/vtk/harness/` and
+is a dynamic import the page only fetches when the URL asks for it, so an
+ordinary session runs and downloads none of it. `?record=1` and `?telemetry=1`
+both ask; `?harness=1` asks for the surface without starting either, which is
+what the benchmark uses.
+
 A capture panel appears at the top right. Let the scene finish loading, press
 **Record** (or F9), fly the camera, press **Stop**, then **Download**. Drop the
 file in this directory.
