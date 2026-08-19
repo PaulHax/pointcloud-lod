@@ -54,20 +54,26 @@ export const markerTimes = (trace) => {
 };
 
 /**
- * The regime the coordinator was in when a frame was recorded. The governor
- * names the two "interaction" and "stationary".
+ * Two pages write these traces and they are shaped differently on purpose.
+ * The explorer drives a scene coordinator holding a list of members; the
+ * instrumented page drives a controller, adapter and governor directly, which
+ * is the low-level API it exists to demonstrate. Neither shape is a mistake,
+ * so every reader below takes the coordinator's answer first and the bare
+ * governor's second.
+ */
+
+/**
+ * The regime the governor was in when a frame was recorded. It names the two
+ * "interaction" and "stationary".
  */
 export const regimeOf = (frame) =>
-  frame.state?.coordinator?.governor?.regime ?? null;
+  frame.state?.coordinator?.governor?.regime ??
+  frame.state?.governor?.regime ??
+  null;
 
 export const isMoving = (frame) => regimeOf(frame) === "interaction";
 
-/**
- * The point example and the scene examples describe their members
- * differently: one has a single controller and adapter at the top of its
- * state, the others a list of coordinator members. Both are normalised here so
- * a trace from either reads the same.
- */
+/** The one member an instrumented-page trace has, in coordinator shape. */
 export const membersOf = (frame) => {
   const state = frame.state;
   if (state === null || state === undefined) return [];
