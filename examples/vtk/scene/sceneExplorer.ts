@@ -14,7 +14,7 @@ import type {
   Tiles3dMemberConfig,
   Tiles3dMemberStats,
 } from "../../../src/tiles3d/memberTypes";
-import { bag3dContentFetch, createBag3dTilesetFetch } from "./bag3d";
+import { createBag3dTilesetFetch } from "./bag3d";
 import { decodeWasmUrls } from "./decodeAssets";
 import { renderDiagnostics, type MemberRow } from "./diagnostics";
 import { renderExplorerShell, type ExplorerPreset } from "./explorerShell";
@@ -96,7 +96,6 @@ const tilesPreset = (place: Place, radiusMeters = 3_000): TilesSource => ({
   label: `3DBAG buildings · ${place.label}`,
   endpoint: BAG3D_ENDPOINT,
   place,
-  fetchContent: bag3dContentFetch,
   fetchTileset: createBag3dTilesetFetch({
     endpoint: BAG3D_ENDPOINT,
     center: wgs84ToEcef(place.longitude, place.latitude, place.napZeroHeight),

@@ -579,7 +579,7 @@ describe("createTiles3dMember", () => {
       promise: Promise.reject(
         new TileUnsupportedExtensionError(
           "/tiles/root.glb",
-          "EXT_meshopt_compression",
+          "EXT_mesh_gpu_instancing",
         ),
       ),
       cancel: vi.fn(),
@@ -602,7 +602,7 @@ describe("createTiles3dMember", () => {
     expect(error.cause).toMatchObject({
       name: "TileUnsupportedExtensionError",
       stage: "profile",
-      extension: "EXT_meshopt_compression",
+      extension: "EXT_mesh_gpu_instancing",
     });
     expect(member.stats()).toMatchObject({
       errorCount: 1,

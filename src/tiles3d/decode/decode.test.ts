@@ -216,18 +216,70 @@ const embeddedGltf = ({
 };
 
 describe("decoded tile contract", () => {
-  it("rejects a meshopt-required asset with a named tile/profile error", async () => {
+  it("rejects an unimplemented required extension with a named tile/profile error", async () => {
     await expect(
-      decodeTileContent(await checkedInRequest("meshopt-required.gltf")),
+      decodeTileContent(await checkedInRequest("unsupported-extension.gltf")),
     ).rejects.toMatchObject({
       name: "TileUnsupportedExtensionError",
-      tileUri: "https://fixture.invalid/content/meshopt-required.gltf",
+      tileUri: "https://fixture.invalid/content/unsupported-extension.gltf",
       stage: "profile",
-      extension: "EXT_meshopt_compression",
+      extension: "EXT_mesh_gpu_instancing",
     });
     await expect(
-      decodeTileContent(await checkedInRequest("meshopt-required.gltf")),
+      decodeTileContent(await checkedInRequest("unsupported-extension.gltf")),
     ).rejects.toBeInstanceOf(TileUnsupportedExtensionError);
+  });
+
+  /**
+   * The authored quad, Y-up glTF mapped to the scene's Z-up: (x, y, z) becomes
+   * (x, -z, y). Stated absolutely because the decoder returns positions
+   * relative to a origin it chooses, and the mesh is what the assertion is about.
+   */
+  const MESHOPT_QUAD_VERTICES = [
+    [0, 0, 0],
+    [4, -1, 0],
+    [4, -2, 3],
+    [0, -3, 3],
+  ];
+
+  const absoluteVertices = (result: {
+    origin: readonly number[];
+    primitives: readonly { positions: Float32Array }[];
+  }): number[][] => {
+    const positions = result.primitives[0]!.positions;
+    return Array.from({ length: positions.length / 3 }, (_value, vertex) => [
+      positions[vertex * 3]! + result.origin[0]!,
+      positions[vertex * 3 + 1]! + result.origin[1]!,
+      positions[vertex * 3 + 2]! + result.origin[2]!,
+    ]);
+  };
+
+  it("decodes meshopt-compressed geometry", async () => {
+    const result = await decodeTileContent(
+      await checkedInRequest("meshopt-quad.glb"),
+    );
+    expect(result.primitives).toHaveLength(1);
+    expect(absoluteVertices(result)).toEqual(MESHOPT_QUAD_VERTICES);
+    expect(Array.from(result.primitives[0]!.indices!)).toEqual([
+      0, 1, 2, 0, 2, 3,
+    ]);
+  });
+
+  /**
+   * Compressed views that share a fallback buffer and both claim offset zero.
+   * loaders.gl decompresses in place, so the vertex view overwrites the index
+   * view and a vertex silently becomes a copy of its neighbour — no error, a
+   * wrong mesh. Decoding to the same geometry as the well-formed fixture is
+   * the only way to see that the repair ran.
+   */
+  it("repairs colliding meshopt fallback-buffer offsets", async () => {
+    const result = await decodeTileContent(
+      await checkedInRequest("meshopt-quad-collision.glb"),
+    );
+    expect(absoluteVertices(result)).toEqual(MESHOPT_QUAD_VERTICES);
+    expect(Array.from(result.primitives[0]!.indices!)).toEqual([
+      0, 1, 2, 0, 2, 3,
+    ]);
   });
 
   it("pins Y-up conversion and rejects indices outside POSITION", async () => {

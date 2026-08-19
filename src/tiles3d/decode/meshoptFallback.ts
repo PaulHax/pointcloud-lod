@@ -3,15 +3,17 @@
  *
  * `EXT_meshopt_compression` points each compressed buffer view at a *fallback*
  * buffer — storage that carries no bytes in the file and exists so a loader
- * without the extension has somewhere to look. 3DBAG writes both of its
- * compressed views at offset zero of one fallback buffer sized for the two
- * concatenated, which conformant renderers never notice because they decode
- * each view into storage of its own.
+ * without the extension has somewhere to look. Publishers exist that write
+ * every compressed view at offset zero of one fallback buffer sized for them
+ * all concatenated, which conformant renderers never notice because they
+ * decode each view into storage of its own.
  *
  * loaders.gl decodes in place, into the fallback buffer at the view's own
- * offset, so the 152 KB vertex view lands on top of the 26 KB index view and
- * the tile draws as a fan of spikes radiating from whichever vertex the
- * scrambled indices happen to name.
+ * offset, so a 152 KB vertex view lands on top of a 26 KB index view and the
+ * tile draws as a fan of spikes radiating from whichever vertex the scrambled
+ * indices happen to name. Nothing reports an error, which is why this runs in
+ * the decode path rather than being left to whoever supplies the content: a
+ * silently wrong mesh is the one failure a profile gate cannot catch.
  *
  * Giving each view a distinct offset — the layout the fallback buffer's size
  * says was intended — is enough, and it touches only the JSON chunk.
