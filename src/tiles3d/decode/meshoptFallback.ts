@@ -68,6 +68,8 @@ const needsRepair = (gltf: Gltf): boolean => {
   return false;
 };
 
+const padToFour = (value: number): number => (value + 3) & ~3;
+
 const repairOffsets = (gltf: Gltf): Gltf => {
   const nextOffset = new Map<number, number>();
   const bufferViews = (gltf.bufferViews ?? []).map((view) => {
@@ -81,13 +83,25 @@ const repairOffsets = (gltf: Gltf): Gltf => {
     }
     const index = view.buffer!;
     const byteOffset = nextOffset.get(index) ?? 0;
-    nextOffset.set(index, byteOffset + (view.byteLength ?? 0));
+    // Padded, because an accessor may only start on a multiple of its
+    // component size and a compressed view's length is arbitrary — the
+    // 90,318-byte index view in a 3DBAG tile put the float attributes that
+    // follow it two bytes off, and the decode failed outright.
+    nextOffset.set(index, padToFour(byteOffset + (view.byteLength ?? 0)));
     return { ...view, byteOffset };
   });
-  return { ...gltf, bufferViews };
+  // The fallback buffer was sized for those views concatenated without
+  // padding, so the alignment above can push the last one past its declared
+  // end. The buffer carries no bytes in the file; its length is only the
+  // storage a loader allocates to decode into.
+  const buffers = (gltf.buffers ?? []).map((buffer, index) => {
+    const needed = nextOffset.get(index) ?? 0;
+    return isFallbackBuffer(buffer) && needed > (buffer.byteLength ?? 0)
+      ? { ...buffer, byteLength: needed }
+      : buffer;
+  });
+  return { ...gltf, bufferViews, buffers };
 };
-
-const padToFour = (value: number): number => (value + 3) & ~3;
 
 /**
  * Returns the GLB unchanged unless it carries colliding meshopt views, so a
