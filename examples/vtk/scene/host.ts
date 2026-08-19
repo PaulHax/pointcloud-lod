@@ -20,15 +20,55 @@ import vtkFullScreenRenderWindow from "@kitware/vtk.js/Rendering/Misc/FullScreen
 import { getCompressedTextureCapabilities } from "@kitware/vtk.js/Rendering/OpenGL/Texture/compressedFormats";
 
 import {
+  createGpuFrameTimer,
   createMemoryPool,
   createStreamedSceneCoordinator,
   isSoftwareRenderer,
   type CameraView,
+  type GpuFrameTimer,
   type StreamedSceneCoordinator,
   type TextureCapabilities,
 } from "../../../src";
 import { WORLD_UP, installCameraControls } from "../../../src/vtk";
 import { createDecodeWorkers } from "./decodeAssets";
+
+/**
+ * One presented frame, as the host measured it.
+ *
+ * `hostFrameMs` is null exactly when the interval was rejected as idle and
+ * never reached the governor, which a measurement must be able to tell apart
+ * from a frame that cost nothing.
+ */
+export type FrameReport = {
+  readonly id: number;
+  readonly presentedAtMs: number;
+  readonly hostFrameMs: number | null;
+  readonly vtkFrameMs: number;
+  readonly paints: number;
+  readonly capacitySampleEligible: boolean;
+  readonly reportedToGovernor: boolean;
+  /** A GPU timer query is outstanding; its duration arrives on resolution. */
+  readonly gpuPending: boolean;
+};
+
+export type GpuFrameResolution = {
+  /** The `FrameReport.id` this duration belongs to. */
+  readonly id: number;
+  readonly status: "valid" | "disjoint" | "error";
+  readonly gpuMs: number | null;
+};
+
+/**
+ * An observer of painted frames.
+ *
+ * Attaching one is the only thing that makes the host issue GPU timer
+ * queries, so an ordinary session runs the same code path it always did — a
+ * measurement that changed the frame loop would be measuring itself.
+ */
+export type FrameProbe = {
+  readonly onFrame: (report: FrameReport) => void;
+  readonly onGpuResolved: (resolution: GpuFrameResolution) => void;
+};
 
 export type SceneHost = {
   readonly coordinator: StreamedSceneCoordinator;
@@ -36,6 +76,8 @@ export type SceneHost = {
   readonly camera: any;
   readonly textureCapabilities: TextureCapabilities;
   readonly rendererName: string;
+  /** The live WebGL context, for callers that report on the machine drawing. */
+  glContext(): WebGL2RenderingContext | null;
   /** Coalesced repaint request; the only way anything here paints. */
   scheduleRender(): void;
   cameraView(): CameraView;
@@ -47,6 +89,10 @@ export type SceneHost = {
   onFrame(listener: (view: CameraView) => void): void;
   /** Notified when a painted frame reaches the browser presentation clock. */
   onPresentation(listener: (presentedAt: number) => void): void;
+  /** Attach or clear the frame observer. Null restores the unmeasured loop. */
+  setFrameProbe(probe: FrameProbe | null): void;
+  /** True when this context can time the GPU rather than only the CPU. */
+  gpuTimingSupported(): boolean;
   /** Frame the camera on a scene-space sphere. */
   lookAt(
     center: readonly [number, number, number],
@@ -152,6 +198,10 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
   let lastPresentedAt: number | null = null;
   let presentationQueued = false;
   let frameSerial = 0;
+  let probe: FrameProbe | null = null;
+  let presentationSerial = 0;
+  let paintsSincePresentation = 0;
+  let pendingQueryIds: number[] = [];
   const frameListeners: ((view: CameraView) => void)[] = [];
   const presentationListeners: ((presentedAt: number) => void)[] = [];
   const beforeFrameListeners: ((
@@ -171,6 +221,52 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
     if (renderer.getActors().length > 0) renderer.resetCameraClippingRange();
   };
 
+  /**
+   * Outstanding GPU queries, grouped by the presentation they were painted
+   * for. A presentation can carry more than one paint, and its duration is
+   * their sum; the group resolves once every query in it has come back.
+   */
+  const gpuGroups = new Map<
+    number,
+    {
+      readonly remaining: Set<number>;
+      status: GpuFrameResolution["status"];
+      gpuMs: number;
+    }
+  >();
+  const gpuGroupByQuery = new Map<number, number>();
+
+  const gpuTimer: GpuFrameTimer = createGpuFrameTimer(
+    openGlRenderWindow.getContext?.() ?? null,
+    {
+      onResult: (result) => {
+        const groupId = gpuGroupByQuery.get(result.id);
+        if (groupId === undefined) return;
+        gpuGroupByQuery.delete(result.id);
+        const group = gpuGroups.get(groupId);
+        if (group === undefined) return;
+        group.remaining.delete(result.id);
+        if (result.status !== "valid") group.status = result.status;
+        else group.gpuMs += result.gpuMs ?? 0;
+        if (group.remaining.size > 0) return;
+        gpuGroups.delete(groupId);
+        probe?.onGpuResolved({
+          id: groupId,
+          status: group.status,
+          gpuMs: group.status === "valid" ? group.gpuMs : null,
+        });
+      },
+    },
+  );
+
+  /** Open a query around the paint that is about to run, when observed. */
+  const beginPaint = (): void => {
+    paintStartedAt = performance.now();
+    if (probe === null) return;
+    const id = gpuTimer.begin();
+    if (id !== null) pendingQueryIds.push(id);
+  };
+
   const scheduleRender = (): void => {
     if (frameQueued) return;
     frameQueued = true;
@@ -184,7 +280,7 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
         listener(view, currentDevicePixelRatio);
       coordinator.prepareFrame(++frameSerial);
       refreshClippingRange();
-      paintStartedAt = performance.now();
+      beginPaint();
       interactor.render();
     });
   };
@@ -245,24 +341,57 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
         lastPresentedAt === null ? null : presentedAt - lastPresentedAt;
       lastPresentedAt = presentedAt;
       const contiguous = Math.max(80, vtkFrameMs * 4);
-      if (interval === null || interval <= 0 || interval > contiguous) return;
-      coordinator.recordHostFrame({
-        hostFrameMs: interval,
-        vtkFrameMs,
-        capacitySampleEligible:
-          coordinator.stats().governor.activity.measurementEligible,
-        now: presentedAt,
-      });
-      if (coordinator.needsFrame()) scheduleRender();
+      const usable =
+        interval !== null && interval > 0 && interval <= contiguous;
+      const eligible =
+        coordinator.stats().governor.activity.measurementEligible;
+      if (usable) {
+        coordinator.recordHostFrame({
+          hostFrameMs: interval,
+          vtkFrameMs,
+          capacitySampleEligible: eligible,
+          now: presentedAt,
+        });
+      }
+      // Reported after the governor has been told, so an observer sees the
+      // same ordering the adaptive loop ran in, and reported for rejected
+      // intervals too: a benchmark counts every frame the display showed.
+      if (probe !== null) {
+        const queryIds = pendingQueryIds;
+        pendingQueryIds = [];
+        const id = ++presentationSerial;
+        if (queryIds.length > 0) {
+          gpuGroups.set(id, {
+            remaining: new Set(queryIds),
+            status: "valid",
+            gpuMs: 0,
+          });
+          for (const queryId of queryIds) gpuGroupByQuery.set(queryId, id);
+        }
+        probe.onFrame({
+          id,
+          presentedAtMs: presentedAt,
+          hostFrameMs: usable ? interval : null,
+          vtkFrameMs,
+          paints: Math.max(1, paintsSincePresentation),
+          capacitySampleEligible: eligible,
+          reportedToGovernor: usable,
+          gpuPending: queryIds.length > 0,
+        });
+      }
+      paintsSincePresentation = 0;
+      if (usable && coordinator.needsFrame()) scheduleRender();
     });
   };
 
   interactor.onRenderEvent(() => {
     const startedAt = paintStartedAt;
     paintStartedAt = null;
+    if (probe !== null) gpuTimer.end();
     if (startedAt !== null) {
       lastFrameMs = performance.now() - startedAt;
       paints += 1;
+      paintsSincePresentation += 1;
     }
     const view = cameraView();
     renderedCameras.set(renderer, view);
@@ -280,7 +409,7 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
       listener(view, currentDevicePixelRatio);
     coordinator.prepareFrame(++frameSerial);
     refreshClippingRange();
-    paintStartedAt = performance.now();
+    beginPaint();
   });
   interactor.onEndAnimation(() => {
     coordinator.endInteraction();
@@ -298,11 +427,20 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
     camera,
     textureCapabilities: capabilities,
     rendererName,
+    glContext: () => openGlRenderWindow.getContext?.() ?? null,
     scheduleRender,
     cameraView,
     onBeforeFrame: (listener) => beforeFrameListeners.push(listener),
     onFrame: (listener) => frameListeners.push(listener),
     onPresentation: (listener) => presentationListeners.push(listener),
+    setFrameProbe(next) {
+      probe = next;
+      if (next !== null) return;
+      pendingQueryIds = [];
+      gpuGroups.clear();
+      gpuGroupByQuery.clear();
+    },
+    gpuTimingSupported: () => gpuTimer.supported,
     lookAt(center, distanceMeters) {
       const [x, y, z] = center;
       camera.setFocalPoint(x, y, z);
