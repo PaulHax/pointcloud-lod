@@ -48,7 +48,12 @@ describe("progressive draw density", () => {
       expect(thin.adapter!.drawnPoints).toBeLessThan(full.adapter!.drawnPoints);
       expect(thin.adapter!.drawnPoints).toBe(thin.controller!.drawnPoints);
       expect(thin.controller!.densityFraction).toBe(0.25);
-      expect(thin.adapter!.drawnFraction).toBeCloseTo(0.25, 5);
+      // A tile draws whole points, so a quarter of the submitted set is only
+      // reachable to within one point per tile — the fraction is the ratio
+      // those integer allocations came out at, not the one that was asked for.
+      expect(Math.abs(thin.adapter!.drawnFraction - 0.25)).toBeLessThanOrEqual(
+        thin.controller!.residentTiles / full.adapter!.submittedPoints,
+      );
       expect(await session.keys()).toEqual(fullKeys);
       expect((await session.scene()).actors).toBe(fullScene.actors);
       expect(
