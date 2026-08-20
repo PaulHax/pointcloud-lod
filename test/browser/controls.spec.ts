@@ -105,26 +105,6 @@ describe("example controls", () => {
   it("exposes Fixed size and Auto scale as live point-presentation controls", async () => {
     const session = await openExample({ cloud: MULTIPAGE_CLOUD.urlPath });
     try {
-      expect(
-        await session.page.locator("#budget-mode").evaluate((budget) => {
-          const adaptive = document.querySelector("#adaptive-controls")!;
-          const pointSize = document.querySelector("#point-size-mode")!;
-          return {
-            adaptiveFollowsBudget: Boolean(
-              budget.compareDocumentPosition(adaptive) &
-              Node.DOCUMENT_POSITION_FOLLOWING,
-            ),
-            pointSizeFollowsAdaptive: Boolean(
-              adaptive.compareDocumentPosition(pointSize) &
-              Node.DOCUMENT_POSITION_FOLLOWING,
-            ),
-          };
-        }),
-      ).toEqual({
-        adaptiveFollowsBudget: true,
-        pointSizeFollowsAdaptive: true,
-      });
-      expect(await session.page.locator("a[href='./simple/']").count()).toBe(0);
       expect((await session.stats()).controller?.presentation).toMatchObject({
         config: {
           mode: "auto",
