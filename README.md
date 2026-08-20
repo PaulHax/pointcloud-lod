@@ -593,7 +593,18 @@ tighter **16 ms** target and trades drawn points for responsiveness; a settled
 camera is being read, so it gets the looser **33 ms** target and spends the
 extra frame time on detail. With the default 20% hysteresis the no-change bands
 are 12.8-19.2 ms while moving and 26.4-39.6 ms while settled. Both tracks start
-at quality **1** and never drop below **0.05**. Point `minBudget`/`maxBudget`
+at quality **1** and never drop below **0.05**.
+
+A target below what the display can present is raised to one it can. Frames
+are measured between presentations, so no sample falls below the refresh
+period however little was drawn: at 60 Hz the 16 ms moving target's 12.8 ms
+increase threshold is unreachable, and quality could only ever ratchet down.
+The governor learns the refresh period from the shortest intervals it has
+presented — never believing anything above 17 ms, so a page slower than its
+display cannot mistake its own best frame for the floor — and steers to
+`quantum x 1.15 / (1 - hysteresis)`: 24 ms at 60 Hz, and no change at 120.
+`stats().configuredFrameTimeMs` keeps the number that was asked for beside the
+`targetFrameTimeMs` being steered to. Point `minBudget`/`maxBudget`
 remain point-member clamps; they are not governor options. The point member
 keeps the denser proven stationary selection while moving and expresses the
 interaction allocation as parent-closed per-tile prefixes.
