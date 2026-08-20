@@ -171,8 +171,17 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
    * may dolly. A streamed scene has nothing in it when the controls are
    * installed and grows with every tile, so this is read per gesture.
    */
+  /**
+   * Whether there is anything to take bounds from.
+   *
+   * `getActors()` rebuilds its answer by concatenating a fresh array per prop,
+   * so asking it costs more the more the scene holds — and a streamed scene
+   * holds a tile per actor. The prop list itself is returned by reference.
+   */
+  const sceneIsEmpty = (): boolean => renderer.getViewProps().length === 0;
+
   const sceneRadius = (): number | null => {
-    if (renderer.getActors().length === 0) return null;
+    if (sceneIsEmpty()) return null;
     const b = renderer.computeVisiblePropBounds() as number[];
     const radius = Math.hypot(b[1]! - b[0]!, b[3]! - b[2]!, b[5]! - b[4]!) / 2;
     return Number.isFinite(radius) && radius > 0 ? radius : null;
@@ -218,7 +227,7 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
    * strip of ground with everything behind it clipped away.
    */
   const refreshClippingRange = (): void => {
-    if (renderer.getActors().length > 0) renderer.resetCameraClippingRange();
+    if (!sceneIsEmpty()) renderer.resetCameraClippingRange();
   };
 
   /**
@@ -459,7 +468,7 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
       scheduleRender();
     },
     frameVisible() {
-      if (renderer.getActors().length === 0) return false;
+      if (sceneIsEmpty()) return false;
       const bounds = renderer.computeVisiblePropBounds() as number[];
       if (
         bounds.length < 6 ||
