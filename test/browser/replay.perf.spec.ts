@@ -217,6 +217,36 @@ if (recordingPaths.length === 0) {
 }
 const benchmarkConfigs = await loadConfigs();
 
+/** Settles a run waits out: two to configure, two to frame, one after. */
+const SETTLES_PER_RUN = 5;
+/**
+ * Everything a run spends outside settling and the gesture: starting a
+ * browser, loading the page, applying a configuration, and writing an
+ * artifact that carries a frame-by-frame trace.
+ */
+const RUN_OVERHEAD_MS = 120_000;
+
+/**
+ * A run is given what it can actually need, rather than a fixed ceiling that
+ * silently stops fitting. At the default settle budget five settles alone
+ * exhaust a 600 s timeout, so a scene converging slowly failed as "timed out"
+ * — indistinguishable from a hang, and the artifact that would have said
+ * which was never written.
+ */
+const runTimeoutMs = (gestureMs: number): number =>
+  SETTLES_PER_RUN * settleMs + gestureMs + RUN_OVERHEAD_MS;
+
+const gestureDurations = new Map<string, number>(
+  await Promise.all(
+    recordingPaths.map(
+      async (path): Promise<[string, number]> => [
+        path,
+        (JSON.parse(await readFile(path, "utf8")) as InputRecording).durationMs,
+      ],
+    ),
+  ),
+);
+
 describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
   afterAll(async () => {
     await closeBenchmarkBrowser();
@@ -225,192 +255,197 @@ describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
   for (const recordingPath of recordingPaths) {
     for (const config of benchmarkConfigs) {
       for (let repeat = 0; repeat < repeats; repeat += 1) {
-        it(`${basename(recordingPath, ".json")} · ${config.name} · run ${
-          repeat + 1
-        }`, async () => {
-          if (!usingRealGpu && !allowSoftware) {
-            throw new Error(
-              "the replay benchmark requires POINTCLOUD_LOD_BROWSER_GPU=1: " +
-                "frame times under a software rasterizer describe the " +
-                "rasterizer. Set POINTCLOUD_LOD_REPLAY_ALLOW_SOFTWARE=1 to " +
-                "exercise the pipeline without measuring anything.",
-            );
-          }
-          await mkdir(outputDirectory, { recursive: true });
-          const recording = JSON.parse(
-            await readFile(recordingPath, "utf8"),
-          ) as InputRecording;
-          if (recording.schemaVersion !== 1) {
-            throw new Error(`${recordingPath} is not a version 1 recording`);
-          }
-
-          const settle = async (
-            session: SceneSession & { readonly cache: HttpCache | null },
-          ) => {
-            try {
-              return await session.settle(settleMs);
-            } catch (error) {
-              // A replayed network that cannot answer a request aborts it, and
-              // an aborted tile is one the scene waits on forever. Reported as
-              // "did not settle" alone that reads as a streaming bug, so the
-              // requests nothing recorded are named here instead.
-              const missing = session.cache?.stats().unrecorded ?? [];
-              if (missing.length === 0) throw error;
+        it(
+          `${basename(recordingPath, ".json")} · ${config.name} · run ${
+            repeat + 1
+          }`,
+          async () => {
+            if (!usingRealGpu && !allowSoftware) {
               throw new Error(
-                `${(error as Error).message}\n\n` +
-                  `${missing.length} request(s) the ${networkMode} cache could ` +
-                  `not answer, which is why it never converged:\n` +
-                  `${missing.slice(0, 10).join("\n")}`,
+                "the replay benchmark requires POINTCLOUD_LOD_BROWSER_GPU=1: " +
+                  "frame times under a software rasterizer describe the " +
+                  "rasterizer. Set POINTCLOUD_LOD_REPLAY_ALLOW_SOFTWARE=1 to " +
+                  "exercise the pipeline without measuring anything.",
               );
             }
-          };
+            await mkdir(outputDirectory, { recursive: true });
+            const recording = JSON.parse(
+              await readFile(recordingPath, "utf8"),
+            ) as InputRecording;
+            if (recording.schemaVersion !== 1) {
+              throw new Error(`${recordingPath} is not a version 1 recording`);
+            }
 
-          const session = await openScene({
-            path: replayPath(recording.href),
-            deviceScaleFactor: recording.viewer.devicePixelRatio,
-            headless: !usingRealGpu,
-            cache: {
-              mode: networkMode,
-              directory: cacheDirectory,
-              origins: DATASET_ORIGINS,
-              // Shaped whenever the cache is answering, so a cached byte
-              // costs what a networked one would. A read-through fetch pays
-              // the real network instead and is counted separately.
-              ...(networkMode === "live"
-                ? {}
-                : {
-                    shape: {
-                      latencyMs,
-                      bytesPerSecond: (mbps * 1_000_000) / 8,
-                    },
-                  }),
-            },
-          });
-          try {
-            await session.resizeViewer({
-              width: recording.viewer.widthCssPx,
-              height: recording.viewer.heightCssPx,
-            });
-            await settle(session);
-            await applyConfig(session, config);
-            await settle(session);
+            const settle = async (
+              session: SceneSession & { readonly cache: HttpCache | null },
+            ) => {
+              try {
+                return await session.settle(settleMs);
+              } catch (error) {
+                // A replayed network that cannot answer a request aborts it, and
+                // an aborted tile is one the scene waits on forever. Reported as
+                // "did not settle" alone that reads as a streaming bug, so the
+                // requests nothing recorded are named here instead.
+                const missing = session.cache?.stats().unrecorded ?? [];
+                if (missing.length === 0) throw error;
+                throw new Error(
+                  `${(error as Error).message}\n\n` +
+                    `${missing.length} request(s) the ${networkMode} cache could ` +
+                    `not answer, which is why it never converged:\n` +
+                    `${missing.slice(0, 10).join("\n")}`,
+                );
+              }
+            };
 
-            // The gesture is only reproducible from the camera it was recorded
-            // from. Placing it before telemetry starts keeps the reframing
-            // work out of the measurement.
-            await session.placeCamera({
-              position: recording.startPose.position,
-              focalPoint: recording.startPose.focalPoint,
-              viewUp: recording.startPose.viewUp,
-            });
-            await settle(session);
-            await session.render();
-            await session.frame();
-            await settle(session);
-
-            await session.startTelemetry();
-            await session.startInputRecorder();
-            await session.markTelemetry("replay-start");
-
-            const replay = await replayInput({
-              page: session.page,
-              recording,
-              viewer: await session.viewerBox(),
-              onMarker: (label) => session.markTelemetry(label),
-            });
-
-            await session.markTelemetry("replay-ended");
-            await session.frame();
-            const settledAfter = await settle(session);
-            await session.markTelemetry("settled-after-replay");
-            await session.stopInputRecorder();
-            await session.stopTelemetry();
-
-            const replayed = (await session.inputRecording()) as InputRecording;
-            const drift = compareCameraTracks(
-              recording.poses,
-              replayed.poses as readonly RecordedPoseSample[],
-            );
-            const trace = await session.telemetryTrace();
-            const cacheStats = session.cache?.stats() ?? null;
-
-            expect(trace.environment.webgl.softwareRenderer).toBe(
-              !usingRealGpu && allowSoftware,
-            );
-            expect(trace.summary.frames).toBeGreaterThan(0);
-            expect(session.failures).toEqual([]);
-            expect(cacheStats?.unrecorded ?? []).toEqual([]);
-            // A dataset that gave up on some of its content has stopped
-            // working, which is a run that finished. What it is not is a run
-            // that drew everything, so the state travels with the artifact and
-            // is printed beside it rather than passing as an ordinary result.
-            expect(
-              settledAfter.datasets.every(
-                (dataset) =>
-                  dataset.state === "settled" || dataset.state === "error",
-              ),
-            ).toBe(true);
-            const failedDatasets = settledAfter.datasets.filter(
-              (dataset) => dataset.state === "error",
-            );
-
-            const artifact = {
-              schemaVersion: 1 as const,
-              recording: {
-                path: recordingPath,
-                name: basename(recordingPath, ".json"),
-                recordedAt: recording.recordedAt,
-                href: recording.href,
-                label: recording.label,
-                viewer: recording.viewer,
-                durationMs: recording.durationMs,
-                events: recording.events.length,
-                markers: recording.markers,
-                environment: recording.environment,
-              },
-              config,
-              repeat: repeat + 1,
-              network: {
+            const session = await openScene({
+              path: replayPath(recording.href),
+              deviceScaleFactor: recording.viewer.devicePixelRatio,
+              headless: !usingRealGpu,
+              cache: {
                 mode: networkMode,
+                directory: cacheDirectory,
+                origins: DATASET_ORIGINS,
+                // Shaped whenever the cache is answering, so a cached byte
+                // costs what a networked one would. A read-through fetch pays
+                // the real network instead and is counted separately.
                 ...(networkMode === "live"
                   ? {}
-                  : { latencyMs, mbpsPerRequest: mbps }),
-                cache: cacheStats,
-                transferredBytes: session.transferredBytes(),
+                  : {
+                      shape: {
+                        latencyMs,
+                        bytesPerSecond: (mbps * 1_000_000) / 8,
+                      },
+                    }),
               },
-              fidelity: { dispatch: replay.dispatch, drift },
-              activity: settledAfter,
-              datasets: await session.datasets(),
-              finalStats: await session.stats(),
-              trace,
-              replayedPoses: replayed.poses,
-            };
-            const path = resolve(
-              outputDirectory,
-              artifactName(recordingPath, config, repeat),
-            );
-            await writeFile(
-              path,
-              `${JSON.stringify(artifact, null, 2)}\n`,
-              "utf8",
-            );
-            process.stdout.write(
-              `REPLAY_ARTIFACT ${path}\n` +
-                `  frames=${trace.summary.frames} clean=${trace.summary.cleanFrames}` +
-                ` longTasks=${trace.summary.longTasks}` +
-                ` lateness=${replay.dispatch.meanLatenessMs.toFixed(1)}/${replay.dispatch.maxLatenessMs.toFixed(1)} ms` +
-                ` drift=${drift ? `${(drift.meanRelativeError * 100).toFixed(2)}%/${(drift.maxRelativeError * 100).toFixed(2)}%` : "n/a"}\n` +
-                failedDatasets
-                  .map(
-                    (dataset) =>
-                      `  INCOMPLETE ${dataset.id}: ${dataset.detail}\n`,
-                  )
-                  .join(""),
-            );
-          } finally {
-            await session.close();
-          }
-        });
+            });
+            try {
+              await session.resizeViewer({
+                width: recording.viewer.widthCssPx,
+                height: recording.viewer.heightCssPx,
+              });
+              await settle(session);
+              await applyConfig(session, config);
+              await settle(session);
+
+              // The gesture is only reproducible from the camera it was recorded
+              // from. Placing it before telemetry starts keeps the reframing
+              // work out of the measurement.
+              await session.placeCamera({
+                position: recording.startPose.position,
+                focalPoint: recording.startPose.focalPoint,
+                viewUp: recording.startPose.viewUp,
+              });
+              await settle(session);
+              await session.render();
+              await session.frame();
+              await settle(session);
+
+              await session.startTelemetry();
+              await session.startInputRecorder();
+              await session.markTelemetry("replay-start");
+
+              const replay = await replayInput({
+                page: session.page,
+                recording,
+                viewer: await session.viewerBox(),
+                onMarker: (label) => session.markTelemetry(label),
+              });
+
+              await session.markTelemetry("replay-ended");
+              await session.frame();
+              const settledAfter = await settle(session);
+              await session.markTelemetry("settled-after-replay");
+              await session.stopInputRecorder();
+              await session.stopTelemetry();
+
+              const replayed =
+                (await session.inputRecording()) as InputRecording;
+              const drift = compareCameraTracks(
+                recording.poses,
+                replayed.poses as readonly RecordedPoseSample[],
+              );
+              const trace = await session.telemetryTrace();
+              const cacheStats = session.cache?.stats() ?? null;
+
+              expect(trace.environment.webgl.softwareRenderer).toBe(
+                !usingRealGpu && allowSoftware,
+              );
+              expect(trace.summary.frames).toBeGreaterThan(0);
+              expect(session.failures).toEqual([]);
+              expect(cacheStats?.unrecorded ?? []).toEqual([]);
+              // A dataset that gave up on some of its content has stopped
+              // working, which is a run that finished. What it is not is a run
+              // that drew everything, so the state travels with the artifact and
+              // is printed beside it rather than passing as an ordinary result.
+              expect(
+                settledAfter.datasets.every(
+                  (dataset) =>
+                    dataset.state === "settled" || dataset.state === "error",
+                ),
+              ).toBe(true);
+              const failedDatasets = settledAfter.datasets.filter(
+                (dataset) => dataset.state === "error",
+              );
+
+              const artifact = {
+                schemaVersion: 1 as const,
+                recording: {
+                  path: recordingPath,
+                  name: basename(recordingPath, ".json"),
+                  recordedAt: recording.recordedAt,
+                  href: recording.href,
+                  label: recording.label,
+                  viewer: recording.viewer,
+                  durationMs: recording.durationMs,
+                  events: recording.events.length,
+                  markers: recording.markers,
+                  environment: recording.environment,
+                },
+                config,
+                repeat: repeat + 1,
+                network: {
+                  mode: networkMode,
+                  ...(networkMode === "live"
+                    ? {}
+                    : { latencyMs, mbpsPerRequest: mbps }),
+                  cache: cacheStats,
+                  transferredBytes: session.transferredBytes(),
+                },
+                fidelity: { dispatch: replay.dispatch, drift },
+                activity: settledAfter,
+                datasets: await session.datasets(),
+                finalStats: await session.stats(),
+                trace,
+                replayedPoses: replayed.poses,
+              };
+              const path = resolve(
+                outputDirectory,
+                artifactName(recordingPath, config, repeat),
+              );
+              await writeFile(
+                path,
+                `${JSON.stringify(artifact, null, 2)}\n`,
+                "utf8",
+              );
+              process.stdout.write(
+                `REPLAY_ARTIFACT ${path}\n` +
+                  `  frames=${trace.summary.frames} clean=${trace.summary.cleanFrames}` +
+                  ` longTasks=${trace.summary.longTasks}` +
+                  ` lateness=${replay.dispatch.meanLatenessMs.toFixed(1)}/${replay.dispatch.maxLatenessMs.toFixed(1)} ms` +
+                  ` drift=${drift ? `${(drift.meanRelativeError * 100).toFixed(2)}%/${(drift.maxRelativeError * 100).toFixed(2)}%` : "n/a"}\n` +
+                  failedDatasets
+                    .map(
+                      (dataset) =>
+                        `  INCOMPLETE ${dataset.id}: ${dataset.detail}\n`,
+                    )
+                    .join(""),
+              );
+            } finally {
+              await session.close();
+            }
+          },
+          runTimeoutMs(gestureDurations.get(recordingPath) ?? 0),
+        );
       }
     }
   }
