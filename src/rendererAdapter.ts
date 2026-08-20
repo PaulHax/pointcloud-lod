@@ -131,6 +131,13 @@ export type RendererAdapterStats = {
   readonly pooledTiles: number;
   readonly pooledPoints: number;
   readonly pooledBytes: number;
+  /**
+   * Whether the pool is earning its residency: session totals for tiles that
+   * came back to the same key holding the same payload, against tiles built
+   * from nothing. A pool that never hits is memory spent on nothing.
+   */
+  readonly reusedTiles: number;
+  readonly builtTiles: number;
   /** Submitted plus pooled: everything holding polydata/mapper/actor state. */
   readonly gpuResidentTiles: number;
   readonly gpuResidentPoints: number;
@@ -209,12 +216,15 @@ export const createRendererAdapter = (
   let submittedBytes = 0;
   let pooledPoints = 0;
   let pooledBytes = 0;
+  let reusedTiles = 0;
+  let builtTiles = 0;
   let workRevision = 0;
 
   const holdSubmitted = (keyString: string, entry: TileActors): void => {
     tiles.set(keyString, entry);
     submittedPoints += entry.tile.pointCount;
     submittedBytes += entry.resourceBytes;
+    renderer.addActor(entry.actor);
   };
 
   const dropSubmitted = (keyString: string, entry: TileActors): void => {
@@ -227,6 +237,11 @@ export const createRendererAdapter = (
     pendingRelease.set(keyString, entry);
     pooledPoints += entry.tile.pointCount;
     pooledBytes += entry.resourceBytes;
+    // Retained attached as well as resident. Detaching would let the renderer
+    // delete the prop's view node and release its buffers, so the two tiles in
+    // three that come back to the same key (`reusedTiles` against
+    // `builtTiles`) would each pay a full upload to be drawn again.
+    entry.actor.setVisibility(false);
   };
 
   const dropPooled = (keyString: string, entry: TileActors): void => {
@@ -286,6 +301,7 @@ export const createRendererAdapter = (
   };
 
   const createTile = (keyString: string, tile: TileData): TileActors => {
+    builtTiles += 1;
     const polyData = vtkPolyData.newInstance();
     polyData.getPoints().setData(tile.positions, 3);
     if (tile.rgb !== undefined) {
@@ -368,7 +384,6 @@ export const createRendererAdapter = (
         // Stop drawing the stale selection synchronously, but retain its
         // resources for bounded reuse. Releasing and reallocating a refined
         // cloud's actors at every interaction boundary creates input long tasks.
-        entry.actor.setVisibility(false);
         holdPooled(keyString, entry);
         changed = true;
       }
@@ -391,6 +406,7 @@ export const createRendererAdapter = (
             stale.tile = tile;
             applyTileState(keyString, stale);
             holdSubmitted(keyString, stale);
+            reusedTiles += 1;
             changed = true;
             continue;
           }
@@ -399,7 +415,6 @@ export const createRendererAdapter = (
         trimPool(tileBytes(tile));
         const entry = createTile(keyString, tile);
         holdSubmitted(keyString, entry);
-        renderer.addActor(entry.actor);
         changed = true;
       }
       // Removals alone must still bring the pool back under its ceiling. A
@@ -479,6 +494,8 @@ export const createRendererAdapter = (
         pooledTiles: pendingRelease.size,
         pooledPoints,
         pooledBytes,
+        reusedTiles,
+        builtTiles,
         gpuResidentTiles: tiles.size + pendingRelease.size,
         gpuResidentPoints: submittedPoints + pooledPoints,
         gpuResidentBytes: submittedBytes + pooledBytes,

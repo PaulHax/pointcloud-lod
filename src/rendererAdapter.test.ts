@@ -34,14 +34,21 @@ const makeAdapter = (options?: {
   visible?: boolean;
   densityFraction?: number;
 }) => {
-  const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
+  // Attachment, not call counts: what costs a frame is what the renderer
+  // holds, and the same actor legitimately leaves and rejoins the prop list as
+  // its tile moves between the drawn set and the reuse pool.
+  const attached = new Set<unknown>();
+  const renderer = {
+    addActor: vi.fn((actor: unknown) => void attached.add(actor)),
+    removeActor: vi.fn((actor: unknown) => void attached.delete(actor)),
+  };
   const scheduleRender = vi.fn();
   const adapter = createRendererAdapter({
     renderer,
     scheduleRender,
     ...options,
   });
-  return { adapter, renderer, scheduleRender };
+  return { adapter, renderer, scheduleRender, attached };
 };
 
 /** The two half-empty batch shapes every test but the live-controller one sends. */
@@ -85,6 +92,8 @@ describe("createRendererAdapter", () => {
       pooledTiles: 0,
       pooledPoints: 0,
       pooledBytes: 0,
+      reusedTiles: 0,
+      builtTiles: 1,
       gpuResidentTiles: 1,
       gpuResidentPoints: 2,
       gpuResidentBytes: 94,
@@ -346,7 +355,7 @@ describe("adapter visibility", () => {
   });
 
   it("restores tiles resubmitted after a controller reactivation", () => {
-    const { adapter, renderer } = makeAdapter();
+    const { adapter, attached } = makeAdapter();
     const data = tile([0, 0, 0]);
     add(adapter, { key: KEY_A, tile: data });
     adapter.setVisible(false);
@@ -362,7 +371,7 @@ describe("adapter visibility", () => {
     // Reactivation resubmits the cached payload while still hidden.
     add(adapter, { key: KEY_A, tile: data });
     expect(actorInstances).toHaveLength(1);
-    expect(renderer.addActor).toHaveBeenCalledTimes(1);
+    expect(attached.size).toBe(1);
     expect(actorInstances[0]!.visibility).toBe(false);
 
     adapter.setVisible(true);
@@ -388,7 +397,7 @@ describe("adapter visibility", () => {
 
 describe("adapter resource pool", () => {
   it("hides a removed actor synchronously and pools it", () => {
-    const { adapter, renderer } = makeAdapter();
+    const { adapter, attached } = makeAdapter();
     add(adapter, { key: KEY_A, tile: tile([0, 0, 0]) });
     drop(adapter, KEY_A);
 
@@ -404,18 +413,21 @@ describe("adapter resource pool", () => {
       gpuResidentBytes: 94,
       drawnTiles: 0,
     });
-    expect(renderer.removeActor).not.toHaveBeenCalled();
+    // Invisible but still the renderer's, so the payload is there to be taken
+    // back the moment the same key returns.
+    expect(attached.size).toBe(1);
+    expect(actorInstances[0]!.visibility).toBe(false);
+    expect(actorInstances[0]!.deleted).toBe(false);
 
     adapter.dispose();
-    expect(renderer.removeActor).toHaveBeenCalledTimes(1);
-    expect(actorInstances[0]!.deleted).toBe(true);
+    expect(actorInstances[0]!.deletes).toBe(1);
     expect(mapperInstances[0]!.deleted).toBe(true);
     expect(polyDataInstances[0]!.deleted).toBe(true);
     expect(adapter.stats().gpuResidentTiles).toBe(0);
   });
 
   it("brings the pool back under its ceiling on a batch of pure removals", () => {
-    const { adapter, renderer } = makeAdapter();
+    const { adapter, attached } = makeAdapter();
     add(
       adapter,
       { key: KEY_A, tile: tile([0, 0, 0]) },
@@ -439,19 +451,20 @@ describe("adapter resource pool", () => {
       gpuResidentTiles: 0,
       gpuResidentBytes: 0,
     });
-    expect(renderer.removeActor).toHaveBeenCalledTimes(2);
+    expect(attached.size).toBe(0);
+    expect(actorInstances.map((actor) => actor.deletes)).toEqual([1, 1]);
   });
 
   it("reuses a pooled actor when the same payload returns", () => {
-    const { adapter, renderer } = makeAdapter();
+    const { adapter, attached } = makeAdapter();
     const data = tile([0, 0, 0]);
     add(adapter, { key: KEY_A, tile: data });
     drop(adapter, KEY_A);
     add(adapter, { key: KEY_A, tile: data });
 
-    expect(renderer.addActor).toHaveBeenCalledTimes(1);
-    expect(renderer.removeActor).not.toHaveBeenCalled();
     expect(actorInstances).toHaveLength(1);
+    expect(actorInstances[0]!.deleted).toBe(false);
+    expect(attached.size).toBe(1);
     expect(adapter.stats()).toMatchObject({
       submittedTiles: 1,
       pooledTiles: 0,
@@ -460,7 +473,7 @@ describe("adapter resource pool", () => {
   });
 
   it("releases a pooled actor rather than resurrect an obsolete payload", () => {
-    const { adapter, renderer } = makeAdapter();
+    const { adapter, attached } = makeAdapter();
     add(adapter, { key: KEY_A, tile: tile([0, 0, 0]) });
     drop(adapter, KEY_A);
 
@@ -468,8 +481,8 @@ describe("adapter resource pool", () => {
     add(adapter, { key: KEY_A, tile: refreshed });
 
     expect(actorInstances).toHaveLength(2);
-    expect(actorInstances[0]!.deleted).toBe(true);
-    expect(renderer.removeActor).toHaveBeenCalledTimes(1);
+    expect(actorInstances[0]!.deletes).toBe(1);
+    expect(attached.size).toBe(1);
     expect(polyDataInstances[1]!.points).toBe(refreshed.positions);
     expect(actorInstances[1]!.userMatrix!.slice(12, 15)).toEqual([5, 0, 0]);
     expect(adapter.stats()).toMatchObject({
@@ -520,14 +533,14 @@ describe("adapter resource pool", () => {
   });
 
   it("evicts pooled resources at the shared-memory ceiling", () => {
-    const { adapter, renderer } = makeAdapter();
+    const { adapter, attached } = makeAdapter();
     adapter.setResourceCeilingBytes(94);
     add(adapter, { key: KEY_A, tile: tile([0, 0, 0]) });
     drop(adapter, KEY_A);
     add(adapter, { key: KEY_B, tile: tile([1, 0, 0]) });
 
-    expect(renderer.removeActor).toHaveBeenCalledTimes(1);
-    expect(actorInstances[0]!.deleted).toBe(true);
+    expect(actorInstances[0]!.deletes).toBe(1);
+    expect(attached.size).toBe(1);
     expect(adapter.stats()).toMatchObject({
       submittedTiles: 1,
       submittedBytes: 94,
@@ -545,7 +558,7 @@ describe("adapter resource pool", () => {
     // deactivated cloud — nothing but removals, then a ceiling of zero — is
     // both the longest eviction and the one where drift would show up as
     // actors left on the GPU.
-    const { adapter, renderer } = makeAdapter();
+    const { adapter, attached } = makeAdapter();
     const keys = Array.from({ length: 64 }, (_, index) => ({
       level: 3,
       x: index % 8,
@@ -573,7 +586,8 @@ describe("adapter resource pool", () => {
     });
 
     adapter.setResourceCeilingBytes(0);
-    expect(renderer.removeActor).toHaveBeenCalledTimes(64);
+    expect(attached.size).toBe(0);
+    expect(actorInstances.every((actor) => actor.deletes === 1)).toBe(true);
     expect(adapter.stats()).toMatchObject({
       submittedTiles: 0,
       submittedBytes: 0,
@@ -588,7 +602,7 @@ describe("adapter resource pool", () => {
   });
 
   it("never trims a submitted actor, however tight the ceiling", () => {
-    const { adapter, renderer } = makeAdapter();
+    const { adapter, attached } = makeAdapter();
     add(
       adapter,
       { key: KEY_A, tile: tile([0, 0, 0]) },
@@ -597,9 +611,9 @@ describe("adapter resource pool", () => {
     drop(adapter, KEY_B);
 
     adapter.setResourceCeilingBytes(0);
-    expect(renderer.removeActor).toHaveBeenCalledTimes(1);
+    expect(attached.size).toBe(1);
     expect(actorInstances[0]!.deleted).toBe(false);
-    expect(actorInstances[1]!.deleted).toBe(true);
+    expect(actorInstances[1]!.deletes).toBe(1);
     expect(adapter.stats()).toMatchObject({
       submittedTiles: 1,
       submittedBytes: 94,
@@ -617,7 +631,7 @@ describe("adapter resource pool", () => {
   });
 
   it("dispose releases submitted and pooled actors exactly once", () => {
-    const { adapter, renderer } = makeAdapter();
+    const { adapter, attached } = makeAdapter();
     add(
       adapter,
       { key: KEY_A, tile: tile([0, 0, 0]) },
@@ -626,9 +640,8 @@ describe("adapter resource pool", () => {
     drop(adapter, KEY_B);
 
     adapter.dispose();
-    const released = renderer.removeActor.mock.calls.map(([actor]) => actor);
-    expect(released).toHaveLength(2);
-    expect(new Set(released).size).toBe(2);
+    expect(attached.size).toBe(0);
+    expect(actorInstances.map((actor) => actor.deletes)).toEqual([1, 1]);
     expect(adapter.stats()).toMatchObject({
       submittedTiles: 0,
       pooledTiles: 0,
@@ -701,7 +714,7 @@ const settle = async (): Promise<void> => {
 
 describe("adapter driven by a live controller", () => {
   it("draws exactly the controller's submitted set through rapid churn", async () => {
-    const { adapter, renderer } = makeAdapter();
+    const { adapter, attached } = makeAdapter();
     const { source, payloadFor } = makeStressSource();
     // Mirrors the submitted state the controller's deltas describe.
     const submitted = new Map<string, TileData>();
@@ -748,6 +761,7 @@ describe("adapter driven by a live controller", () => {
 
     expect(submitted.size).toBe(5);
     expect(drawnPositions()).toEqual(submittedPositions());
+    expect(attached.size).toBe(submitted.size);
     const controllerStats = controller.stats();
     expect(adapter.stats()).toMatchObject({
       submittedTiles: controllerStats.residentTiles,
@@ -773,10 +787,13 @@ describe("adapter driven by a live controller", () => {
       drawnTiles: 0,
       pooledTiles: 5,
     });
+    // Five payloads are still held for reuse, none of them drawn.
+    expect(attached.size).toBe(5);
+    expect(actorInstances.filter((actor) => actor.visibility)).toHaveLength(0);
 
     adapter.dispose();
-    const released = renderer.removeActor.mock.calls.map(([actor]) => actor);
-    expect(new Set(released).size).toBe(released.length);
+    expect(attached.size).toBe(0);
+    expect(actorInstances.every((actor) => actor.deletes === 1)).toBe(true);
     expect(adapter.stats().gpuResidentTiles).toBe(0);
   });
 });
