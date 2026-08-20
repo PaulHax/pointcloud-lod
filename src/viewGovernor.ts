@@ -84,7 +84,11 @@ export type ViewGovernorStats = {
   readonly targetFrameTimeMs: number;
   /** The configured target, before the display quantum is taken into account. */
   readonly configuredFrameTimeMs: number;
-  /** Shortest interval this display has presented, once it is known. */
+  /**
+   * The refresh period the targets are held above, once it is known: the
+   * shortest interval presented, and never above the slowest refresh worth
+   * assuming.
+   */
   readonly displayQuantumMs: number | null;
   readonly estimateMs: number | null;
   readonly samples: number;
@@ -125,6 +129,18 @@ export type ViewGovernor = {
 const EMERGENCY_CONSECUTIVE_FRAMES = 2;
 /** Faster than any display refreshes: a shorter interval is a doubled tick. */
 const MIN_DISPLAY_QUANTUM_MS = 3;
+/**
+ * The slowest refresh worth assuming, a little above 60 Hz's 16.67 ms.
+ *
+ * The shortest interval a page has presented is only the refresh period if the
+ * page was ever quick enough to hit it. One that never is — a software
+ * rasteriser, a throttled tab — would otherwise report its own best frame as
+ * the display's floor and have every target raised to match, which is the
+ * opposite of what the floor is for. Capping it lets the estimate be too low,
+ * never too high: a genuinely slower display just gets less of the correction
+ * than it could have had.
+ */
+const MAX_DISPLAY_QUANTUM_MS = 17;
 /** How many short intervals must agree before the quantum is believed. */
 const DISPLAY_QUANTUM_SAMPLES = 3;
 const INTERACTION_SEED_OF_STATIONARY = 0.25;
@@ -341,6 +357,14 @@ export const createViewGovernor = (
     return Math.max(...candidates);
   };
 
+  const believedQuantumMs = (): number | null =>
+    shortestFrameMs.length < DISPLAY_QUANTUM_SAMPLES
+      ? null
+      : Math.min(
+          MAX_DISPLAY_QUANTUM_MS,
+          shortestFrameMs[DISPLAY_QUANTUM_SAMPLES - 1]!,
+        );
+
   const noteDisplayQuantum = (hostFrameMs: number): void => {
     // Below this is faster than any display presents, so it is evidence of a
     // doubled callback rather than of a refresh period.
@@ -356,11 +380,8 @@ export const createViewGovernor = (
         DISPLAY_QUANTUM_SAMPLES,
       );
     }
-    if (shortestFrameMs.length === DISPLAY_QUANTUM_SAMPLES) {
-      quality.setDisplayQuantumMs(
-        shortestFrameMs[DISPLAY_QUANTUM_SAMPLES - 1]!,
-      );
-    }
+    const quantum = believedQuantumMs();
+    if (quantum !== null) quality.setDisplayQuantumMs(quantum);
   };
 
   const recordTransientFrame = (metrics: TransientFrameMetrics): number => {
@@ -437,6 +458,12 @@ export const createViewGovernor = (
         quality,
         emergencyCooldownMs,
       } = configuration);
+      // The display did not change because the targets did: hand the new
+      // tracks what this one has already been measured to refresh at, or the
+      // first frames after every settings change steer to a target the panel
+      // cannot reach.
+      const quantum = believedQuantumMs();
+      if (quantum !== null) quality.setDisplayQuantumMs(quantum);
       emergencyStreak = 0;
       emergencyCooldownUntil = Number.NEGATIVE_INFINITY;
       lastEmergencyCutAt = Number.NEGATIVE_INFINITY;
