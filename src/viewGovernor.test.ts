@@ -205,6 +205,57 @@ describe("createViewGovernor", () => {
     governor.dispose();
   });
 
+  it("does not mistake a slow page's best frame for the display's floor", () => {
+    const governor = createViewGovernor({
+      initialFraction: 0.5,
+      interactionTargetMs: 16,
+      stationaryTargetMs: 33,
+      minSamples: 2,
+      cooldownMs: 0,
+      hysteresis: 0.2,
+    });
+    // A software rasteriser never reaches a refresh boundary, so its shortest
+    // interval says what it managed, not what the display can show. Believing
+    // it would raise the settled target past 100 ms and read these frames as
+    // headroom.
+    for (let frame = 0; frame < 4; frame += 1) {
+      governor.recordHostFrame({ hostFrameMs: 100, now: frame });
+    }
+    expect(governor.stats().displayQuantumMs).toBeLessThanOrEqual(17);
+    expect(governor.stats().targetFrameTimeMs).toBe(33);
+    expect(governor.stats().lastAdjustment?.reason).toBe("above-target");
+    governor.dispose();
+  });
+
+  it("keeps what it learned about the display across a settings change", () => {
+    const governor = createViewGovernor({
+      initialFraction: 0.5,
+      interactionTargetMs: 16,
+      minSamples: 2,
+      cooldownMs: 0,
+      hysteresis: 0.2,
+    });
+    const motion = governor.beginMotion("explicit");
+    for (let frame = 0; frame < 3; frame += 1) {
+      governor.recordHostFrame({ hostFrameMs: 16.7, now: frame });
+    }
+    expect(governor.stats().targetFrameTimeMs).toBeCloseTo(24, 1);
+
+    // New targets build new tracks. The display did not change with them.
+    governor.setOptions({
+      initialFraction: 0.5,
+      interactionTargetMs: 16,
+      minSamples: 2,
+      cooldownMs: 0,
+      hysteresis: 0.2,
+      stationaryTargetMs: 40,
+    });
+    expect(governor.stats().displayQuantumMs).toBeCloseTo(16.7, 5);
+    expect(governor.stats().targetFrameTimeMs).toBeCloseTo(24, 1);
+    motion.release();
+    governor.dispose();
+  });
+
   it("will not believe an interval no display could have produced", () => {
     const governor = createViewGovernor({ minSamples: 2, cooldownMs: 0 });
     // Two callbacks inside one refresh say nothing about the refresh period.
