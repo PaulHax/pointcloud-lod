@@ -94,6 +94,7 @@ describe("createRendererAdapter", () => {
       pooledBytes: 0,
       reusedTiles: 0,
       builtTiles: 1,
+      reuseDepths: Array.from({ length: 12 }, () => 0),
       gpuResidentTiles: 1,
       gpuResidentPoints: 2,
       gpuResidentBytes: 94,
@@ -453,6 +454,29 @@ describe("adapter resource pool", () => {
     });
     expect(attached.size).toBe(0);
     expect(actorInstances.map((actor) => actor.deletes)).toEqual([1, 1]);
+  });
+
+  it("records how deep in the pool each hit landed", () => {
+    const { adapter } = makeAdapter();
+    const keys = [0, 1, 2, 3].map((x) => ({ level: 1, x, y: 0, z: 0 }));
+    const payloads = keys.map((_, index) => tile([index, 0, 0]));
+    add(
+      adapter,
+      ...keys.map((key, index) => ({ key, tile: payloads[index]! })),
+    );
+    for (const key of keys) drop(adapter, key);
+
+    // The last tile pooled, with nothing pooled after it: a window of one
+    // would have kept this one attached.
+    add(adapter, { key: keys[3]!, tile: payloads[3]! });
+    // The first, with three pooled after it — only a window of four covers it.
+    add(adapter, { key: keys[0]!, tile: payloads[0]! });
+
+    const depths = adapter.stats().reuseDepths;
+    expect(adapter.stats().reusedTiles).toBe(2);
+    expect(depths[0]).toBe(1);
+    expect(depths[2]).toBe(1);
+    expect(depths.reduce((sum, count) => sum + count, 0)).toBe(2);
   });
 
   it("reuses a pooled actor when the same payload returns", () => {
