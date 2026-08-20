@@ -12,16 +12,15 @@
  * benchmark call a scene converged that the page is still showing as busy.
  */
 
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import type { Browser, BrowserContext, Page } from "playwright";
 
 import {
-  chromium,
-  type Browser,
-  type BrowserContext,
-  type ConsoleMessage,
-  type Page,
-} from "playwright";
+  browserFor,
+  closeBrowsers,
+  collectPageFailures,
+  EXAMPLE_DIST,
+  FIXTURES,
+} from "./browserSession";
 
 import type { TelemetrySummary, TelemetryTrace } from "../../src/telemetry";
 import type { RecordedPose } from "../../examples/vtk/harness/inputRecorder";
@@ -33,10 +32,7 @@ import {
 import { startStaticServer, type StaticServer } from "./server";
 import type { ViewerBox } from "./inputReplay";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, "../..");
-export const EXAMPLE_DIST = resolve(repoRoot, "examples/vtk/dist");
-export const FIXTURES = resolve(repoRoot, "test/fixtures");
+export { EXAMPLE_DIST, FIXTURES } from "./browserSession";
 
 export type DatasetActivity = {
   readonly id: string;
@@ -152,34 +148,15 @@ type SceneWindow = {
 
 const POLL_INTERVAL_MS = 100;
 
-let sharedBrowser: Browser | null = null;
-
 /**
- * A headed browser on the real GPU. Unlike the correctness suite this is a
- * measurement, and SwiftShader frame times describe SwiftShader.
+ * The browser a scene session runs in. A benchmark takes its default: headed,
+ * on the real GPU, because SwiftShader frame times describe SwiftShader. A
+ * correctness check asks for headless and measures nothing.
  */
-export const benchmarkBrowser = async (headless: boolean): Promise<Browser> => {
-  if (sharedBrowser === null) {
-    sharedBrowser = await chromium.launch(
-      headless
-        ? {
-            args: [
-              "--use-gl=angle",
-              "--use-angle=swiftshader",
-              "--enable-unsafe-swiftshader",
-              "--disable-dev-shm-usage",
-            ],
-          }
-        : { headless: false, args: ["--disable-dev-shm-usage"] },
-    );
-  }
-  return sharedBrowser;
-};
+export const benchmarkBrowser = (headless: boolean): Promise<Browser> =>
+  browserFor(headless ? "software" : "gpu");
 
-export const closeBenchmarkBrowser = async (): Promise<void> => {
-  await sharedBrowser?.close();
-  sharedBrowser = null;
-};
+export const closeBenchmarkBrowser = closeBrowsers;
 
 /**
  * The path and query of a recorded page, moved onto the server serving the
@@ -225,21 +202,7 @@ export const openScene = async (options: {
     options.cache === undefined ? null : createHttpCache(options.cache);
   await cache?.install(page);
 
-  const failures: string[] = [];
-  page.on("pageerror", (error) =>
-    // With the stack: a page error that only reports its message names the
-    // failure but not the code, and these runs are long enough that losing
-    // that costs a whole re-run to recover.
-    failures.push(
-      `pageerror: ${error.message}\n${(error.stack ?? "")
-        .split("\n")
-        .slice(1, 9)
-        .join("\n")}`,
-    ),
-  );
-  page.on("console", (message: ConsoleMessage) => {
-    if (message.type() === "error") failures.push(`console: ${message.text()}`);
-  });
+  const failures = collectPageFailures(page);
   let transferred = 0;
   page.on("response", (response) => {
     const size = Number(response.headers()["content-length"] ?? 0);

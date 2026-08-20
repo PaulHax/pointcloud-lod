@@ -13,16 +13,19 @@
  * `setSyntheticFrameMs`.
  */
 
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 
 import { Copc, Getter, type Hierarchy } from "copc";
+import type { Browser, Page } from "playwright";
+
 import {
-  chromium,
-  type Browser,
-  type ConsoleMessage,
-  type Page,
-} from "playwright";
+  browserFor,
+  closeBrowsers,
+  collectPageFailures,
+  EXAMPLE_DIST,
+  FIXTURES,
+  requestedRenderMode,
+} from "./browserSession";
 
 // The example hands these three back verbatim, so the harness names the
 // library's own types rather than a copy that can drift lossy. `import type`
@@ -47,11 +50,7 @@ import {
 /** Failure messages in this suite carry the whole sample, pretty-printed. */
 export const shown = (value: unknown): string => JSON.stringify(value, null, 2);
 
-const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, "../..");
-
-export const EXAMPLE_DIST = resolve(repoRoot, "examples/vtk/dist");
-export const FIXTURES = resolve(repoRoot, "test/fixtures");
+export { EXAMPLE_DIST, FIXTURES } from "./browserSession";
 
 /** The committed fixture: small, single hierarchy page, always available. */
 export const FIXTURE_URL_PATH = "/fixtures/fixture.copc.laz";
@@ -323,49 +322,18 @@ export const hierarchyPagesServed = async (
   return pages.filter(({ begin, end }) => served.has(`${begin}-${end}`)).length;
 };
 
-let sharedBrowser: Browser | null = null;
-
 /**
  * True when `POINTCLOUD_LOD_BROWSER_GPU` asks for the machine's real GPU
  * instead of SwiftShader. The stress matrix never needs it — nothing there
  * asserts wall-clock speed — but a measurement run does: frame times taken
  * under a software rasteriser describe SwiftShader, not the library.
  */
-export const usingRealGpu = (): boolean =>
-  (process.env.POINTCLOUD_LOD_BROWSER_GPU ?? "") !== "";
+export const usingRealGpu = (): boolean => requestedRenderMode() === "gpu";
 
-/**
- * One browser for the whole file. Launching Chromium costs far more than any
- * check in it, and a fresh page per check already isolates page state.
- */
-export const browser = async (): Promise<Browser> => {
-  if (sharedBrowser === null) {
-    sharedBrowser = await chromium.launch(
-      usingRealGpu()
-        ? {
-            headless: false,
-            args: ["--disable-dev-shm-usage"],
-          }
-        : {
-            args: [
-              // Headless Chromium has no GPU; SwiftShader rasterises WebGL in
-              // software. Recent builds refuse it for WebGL without the
-              // opt-in.
-              "--use-gl=angle",
-              "--use-angle=swiftshader",
-              "--enable-unsafe-swiftshader",
-              "--disable-dev-shm-usage",
-            ],
-          },
-    );
-  }
-  return sharedBrowser;
-};
+export const browser = (): Promise<Browser> =>
+  browserFor(requestedRenderMode());
 
-export const closeBrowser = async (): Promise<void> => {
-  await sharedBrowser?.close();
-  sharedBrowser = null;
-};
+export const closeBrowser = closeBrowsers;
 
 /** The render viewport every session starts at. */
 export const DEFAULT_VIEWPORT: Viewport = { width: 1280, height: 720 };
@@ -409,11 +377,7 @@ export const openExample = async (
   );
   const page = await (await browser()).newPage();
   await options.preparePage?.(page);
-  const failures: string[] = [];
-  page.on("pageerror", (error) => failures.push(`pageerror: ${error.message}`));
-  page.on("console", (message: ConsoleMessage) => {
-    if (message.type() === "error") failures.push(`console: ${message.text()}`);
-  });
+  const failures = collectPageFailures(page);
 
   const served: ServedRange[] = [];
   page.on("response", (response) => {
