@@ -138,6 +138,12 @@ export type RendererAdapterStats = {
    */
   readonly reusedTiles: number;
   readonly builtTiles: number;
+  /**
+   * Pool hits bucketed by how many tiles were pooled after the one that hit:
+   * `[0], [1], [2,3], [4,7], ...` with the last bucket open. A policy keeping
+   * the newest N pooled tiles attached earns the hits in the buckets up to N.
+   */
+  readonly reuseDepths: readonly number[];
   /** Submitted plus pooled: everything holding polydata/mapper/actor state. */
   readonly gpuResidentTiles: number;
   readonly gpuResidentPoints: number;
@@ -173,7 +179,17 @@ type TileActors = {
   tile: TileData;
   resourceBytes: number;
   drawnPointCount: number;
+  /** Pool insertions before this one, so a hit's depth in the pool is known. */
+  pooledSerial: number;
 };
+
+/** `[0], [1], [2,3], [4,7], ...`; the last bucket takes everything deeper. */
+const REUSE_DEPTH_BUCKETS = 12;
+
+const depthBucket = (depth: number): number =>
+  depth <= 0
+    ? 0
+    : Math.min(REUSE_DEPTH_BUCKETS - 1, Math.floor(Math.log2(depth)) + 1);
 
 export const createRendererAdapter = (
   options: RendererAdapterOptions,
@@ -219,6 +235,13 @@ export const createRendererAdapter = (
   let reusedTiles = 0;
   let builtTiles = 0;
   let workRevision = 0;
+  let pooledSerial = 0;
+  /**
+   * Pool hits by how many tiles were pooled after the one that hit, in
+   * power-of-two buckets. The pool is retained by bytes, but what it costs to
+   * leave attached is counted in props, and those are not the same question.
+   */
+  const reuseDepths = Array.from({ length: REUSE_DEPTH_BUCKETS }, () => 0);
 
   const holdSubmitted = (keyString: string, entry: TileActors): void => {
     tiles.set(keyString, entry);
@@ -242,6 +265,7 @@ export const createRendererAdapter = (
     // three that come back to the same key (`reusedTiles` against
     // `builtTiles`) would each pay a full upload to be drawn again.
     entry.actor.setVisibility(false);
+    entry.pooledSerial = pooledSerial++;
   };
 
   const dropPooled = (keyString: string, entry: TileActors): void => {
@@ -325,6 +349,7 @@ export const createRendererAdapter = (
       tile,
       resourceBytes: tileBytes(tile),
       drawnPointCount: 0,
+      pooledSerial: 0,
     };
     applyTileState(keyString, entry);
     return entry;
@@ -407,6 +432,8 @@ export const createRendererAdapter = (
             applyTileState(keyString, stale);
             holdSubmitted(keyString, stale);
             reusedTiles += 1;
+            const bucket = depthBucket(pooledSerial - 1 - stale.pooledSerial);
+            reuseDepths[bucket] = (reuseDepths[bucket] ?? 0) + 1;
             changed = true;
             continue;
           }
@@ -496,6 +523,7 @@ export const createRendererAdapter = (
         pooledBytes,
         reusedTiles,
         builtTiles,
+        reuseDepths: [...reuseDepths],
         gpuResidentTiles: tiles.size + pendingRelease.size,
         gpuResidentPoints: submittedPoints + pooledPoints,
         gpuResidentBytes: submittedBytes + pooledBytes,
