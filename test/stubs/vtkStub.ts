@@ -25,6 +25,8 @@ export type StubActor = {
   visibility: boolean;
   pointSize: number;
   deleted: boolean;
+  /** Release must happen once per actor; a count says so, a flag cannot. */
+  deletes: number;
   textures: unknown[];
   color: number[];
   opacity: number;
@@ -42,6 +44,7 @@ export const makeActor = (): StubActor => {
     visibility: true,
     pointSize: 0,
     deleted: false,
+    deletes: 0,
     textures: [],
     color: [1, 1, 1],
     opacity: 1,
@@ -84,6 +87,7 @@ export const makeActor = (): StubActor => {
     },
     delete() {
       actor.deleted = true;
+      actor.deletes += 1;
     },
   };
   actorInstances.push(actor);
