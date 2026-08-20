@@ -330,7 +330,7 @@ removed.
 
 ### vtk.js examples
 
-The runnable app in [`examples/vtk`](./examples/vtk/) contains four examples.
+The runnable app in [`examples/vtk`](./examples/vtk/) contains five examples.
 Two use `createLodController` directly, which is all a single point cloud
 needs:
 
@@ -339,14 +339,18 @@ needs:
   default vtk.js camera interaction. It intentionally has no governor,
   performance chart, telemetry recorder, diagnostic table, or browser-test
   API.
-- **Complete** (`/`) demonstrates adaptive quality, fixed/adaptive presentation,
-  custom point-cloud camera interaction, local telemetry, and the diagnostic
-  hooks exercised by the browser suite.
+- **Instrumented** (`/instrumented/`) demonstrates adaptive quality,
+  fixed/adaptive presentation, custom point-cloud camera interaction, local
+  telemetry, and the diagnostic hooks exercised by the browser suite.
 
-Two more use the member API — `createStreamedSceneCoordinator` with
+Three more use the member API — `createStreamedSceneCoordinator` with
 `createTiles3dMember` and `createPointCloudMember` — which is what a scene of
 more than one streamed dataset needs, and are the reference for it:
 
+- **Explorer** (`/`) is the page a visitor lands on: add any number of point
+  clouds and 3D Tiles datasets to one scene, each with its own controls, over
+  one shared view governor. It is also the page the recorded-gesture benchmark
+  drives; `?record=1` adds the capture panel and nothing else loads it.
 - **Mesh** (`/mesh/`) streams 3D Tiles: every building in the Netherlands at
   LoD2.2, live from [3DBAG](https://docs.3dbag.nl/) with no key.
 - **Combined** (`/combined/`) puts AHN4 lidar and 3DBAG buildings in one scene
@@ -410,9 +414,9 @@ submitted-but-not-drawn geometry cannot pick or occlude.
 Both load either a local `.copc.laz` file (read through `Blob.slice()` in a
 source worker) or a COPC URL (HTTP Range from that worker), frame it
 automatically, and stream it through a controller and renderer adapter. The
-complete example also wires one view governor for the view.
+instrumented example also wires one view governor for the view.
 
-The complete example defaults to Auto presentation at `0.5×`, using half the
+The instrumented example defaults to Auto presentation at `0.5×`, using half the
 estimated point spacing as its diameter. Its sidebar can switch to a constant
 Fixed CSS-pixel diameter when comparing presentation policies.
 
@@ -457,8 +461,8 @@ Install a vtk.js build containing `vtkPointGaussianMapper` as described in
 npm run example
 ```
 
-Vite serves the complete example at the printed root URL, and the others at
-`/simple/`, `/mesh/` and `/combined/`. The streamed-scene pages decode in a
+Vite serves the explorer at the printed root URL, and the others at
+`/instrumented/`, `/simple/`, `/mesh/` and `/combined/`. The streamed-scene pages decode in a
 classic worker built by `npm run build`, so build the package before serving
 them.
 
@@ -472,7 +476,7 @@ VTK_JS_DIR=/path/to/vtk-js/dist/esm npm run example
 A `?place=` query parameter opens the mesh and combined examples on a named
 place. A `?url=` query parameter loads a cloud on startup in either point-cloud
 example. On the
-complete example, add `&telemetry=1` to begin a local performance trace before
+instrumented example, add `&telemetry=1` to begin a local performance trace before
 that source opens.
 
 The **Local telemetry** controls record only in the current browser tab. Start,
