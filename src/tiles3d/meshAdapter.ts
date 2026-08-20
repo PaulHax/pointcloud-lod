@@ -238,18 +238,41 @@ const vtkSampler = (sampler: DecodedTexture["sampler"]) => ({
   }[sampler.wrapT],
 });
 
-const actualGeometryBytes = (content: DecodedTileContent): number => {
+/**
+ * Bytes a primitive costs once submitted, which depends on whether it is
+ * split: a chunk is deindexed, so no job retains a whole oversized primitive
+ * merely to realize a subset, while a primitive submitted whole keeps the
+ * arrays it was decoded with. Both add vtk's `[3, i0, i1, i2]` cell record.
+ */
+const retainedGeometryBytes = (
+  primitive: DecodedPrimitive,
+  maxJobBytes: number,
+): number => {
+  const triangles = trianglesIn(primitive);
+  const cells = triangles * 4 * Uint32Array.BYTES_PER_ELEMENT;
+  if (splits(primitive, maxJobBytes)) {
+    return (
+      cells +
+      triangles *
+        (9 + (primitive.normals ? 9 : 0) + (primitive.uvs ? 6 : 0)) *
+        Float32Array.BYTES_PER_ELEMENT
+    );
+  }
+  return (
+    cells +
+    primitive.positions.byteLength +
+    (primitive.normals?.byteLength ?? 0) +
+    (primitive.uvs?.byteLength ?? 0)
+  );
+};
+
+const actualGeometryBytes = (
+  content: DecodedTileContent,
+  maxJobBytes: number,
+): number => {
   let bytes = 0;
   for (const primitive of content.primitives) {
-    const triangles = trianglesIn(primitive);
-    // Chunks are deliberately deindexed so no job retains a whole oversized
-    // primitive merely to realize a subset. Every triangle owns three f32
-    // vertices plus vtk's `[3, i0, i1, i2]` Uint32 cell record.
-    bytes += triangles * 9 * Float32Array.BYTES_PER_ELEMENT;
-    if (primitive.normals)
-      bytes += triangles * 9 * Float32Array.BYTES_PER_ELEMENT;
-    if (primitive.uvs) bytes += triangles * 6 * Float32Array.BYTES_PER_ELEMENT;
-    bytes += triangles * 4 * Uint32Array.BYTES_PER_ELEMENT;
+    bytes += retainedGeometryBytes(primitive, maxJobBytes);
   }
   const retainedAlpha = new Set<DecodedTexture>();
   for (const primitive of content.primitives) {
@@ -324,6 +347,16 @@ const cellsFor = (primitive: DecodedPrimitive): Uint32Array => {
   }
   return cells;
 };
+
+/**
+ * Whether a primitive has to be cut into more than one submission slice. Its
+ * per-triangle cost is the deindexed one either way: that is what a chunk
+ * would cost, and a primitive small enough to escape splitting under the
+ * larger estimate is small enough under its own.
+ */
+const splits = (primitive: DecodedPrimitive, maxJobBytes: number): boolean =>
+  trianglesIn(primitive) >
+  Math.max(1, Math.floor(maxJobBytes / bytesPerTriangle(primitive)));
 
 const bytesPerTriangle = (primitive: DecodedPrimitive): number =>
   9 * Float32Array.BYTES_PER_ELEMENT +
@@ -722,7 +755,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         }
         return "queued";
       }
-      const geometryBytes = actualGeometryBytes(content);
+      const geometryBytes = actualGeometryBytes(content, maxJobBytes);
       const textureBytes = actualTextureBytes(content);
       trimPool(geometryBytes + textureBytes);
       const normalizedReplacements = [...new Set(replacementIds)].filter(
@@ -887,6 +920,23 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
             1,
             Math.floor(maxJobBytes / perTriangle),
           );
+          // A primitive that fits one slice is submitted as authored, indices
+          // and all. Splitting is what forces triangle soup — a chunk cannot
+          // carry the whole index buffer — and expanding a mesh that was never
+          // going to be split copies every vertex once per triangle that
+          // references it, for geometry identical to what the indices already
+          // describe.
+          if (!splits(primitive, maxJobBytes)) {
+            enqueue(totalTriangles * perTriangle, () =>
+              createPrimitive(
+                resources,
+                primitive,
+                textures,
+                pickAlphaTextures,
+              ),
+            );
+            return;
+          }
           for (
             let first = 0;
             first < totalTriangles;
@@ -940,7 +990,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
       const groupBytes = entries.reduce(
         (sum, entry) =>
           sum +
-          actualGeometryBytes(entry.content) +
+          actualGeometryBytes(entry.content, maxJobBytes) +
           actualTextureBytes(entry.content),
         0,
       );

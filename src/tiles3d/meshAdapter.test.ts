@@ -333,6 +333,36 @@ describe("vtk mesh adapter", () => {
     expect(renderer.addActor).toHaveBeenCalledTimes(6);
   });
 
+  it("submits a whole primitive on its own indices rather than as triangle soup", () => {
+    const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
+    const scheduler = createSubmissionScheduler({ scheduleRender: vi.fn() });
+    const adapter = createMeshAdapter({
+      renderer,
+      scheduleRender: vi.fn(),
+      submissions: scheduler,
+    });
+    const quad = content();
+    quad.primitives = [
+      {
+        ...quad.primitives[0]!,
+        positions: new Float32Array([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0]),
+        normals: new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1]),
+        uvs: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]),
+        indices: new Uint16Array([0, 1, 2, 0, 2, 3]),
+      },
+    ];
+    adapter.submitTile("quad", quad);
+    scheduler.prepareFrame();
+
+    // Two triangles over four shared vertices: deindexing them would store
+    // six, and the two the diagonal shares would be uploaded twice.
+    expect(polyDataInstances[0]?.points).toHaveLength(12);
+    expect(Array.from(polyDataInstances[0]?.polys as Uint32Array)).toEqual([
+      3, 0, 1, 2, 3, 0, 2, 3,
+    ]);
+    adapter.dispose();
+  });
+
   it("retires/removes/deletes exact submitted actors and never renders synchronously", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
     const scheduleRender = vi.fn();
@@ -359,7 +389,7 @@ describe("vtk mesh adapter", () => {
     adapter.dispose();
   });
 
-  it("reuses retired submitted chunks without retaining the decoded payload", () => {
+  it("reuses retired submitted tiles and keeps only the arrays vtk holds", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
     const scheduler = createSubmissionScheduler({
       scheduleRender: vi.fn(),
@@ -376,14 +406,16 @@ describe("vtk mesh adapter", () => {
     adapter.setDrawnTiles(["tile"]);
     const submitted = adapter.submittedTiles()[0]!;
     expect(submitted.primitives).toHaveLength(2);
+    // A primitive small enough to submit whole hands vtk the decoded arrays
+    // themselves; what the tile must not keep is the rest of the payload —
+    // material.raw and the texture bytes ContentQueue is free to evict.
     expect(submitted.primitives[0]?.positions).toBe(
       polyDataInstances[0]?.points,
     );
-    expect(submitted.primitives[0]?.positions).not.toBe(
+    expect(submitted.primitives[0]?.positions).toBe(
       payload.primitives[0]?.positions,
     );
-    payload.primitives[0]!.positions.fill(99);
-    expect(submitted.primitives[0]?.positions[0]).toBe(0);
+    expect(submitted.primitives[0]).not.toHaveProperty("material");
     const createdActors = [...actorInstances];
     adapter.retireTile("tile");
     expect(adapter.stats()).toMatchObject({
