@@ -32,6 +32,8 @@ export class RevisionGoneError extends Error {
 export const PCT1_HEADER_BYTES = 40;
 const PCT1_MAGIC = 0x31544350; // 'PCT1' little-endian
 const PCT1_FLAG_RGB = 1;
+/** Positions and colors already satisfy TileData's progressive-prefix contract. */
+export const PCT1_FLAG_PROGRESSIVE_ORDER = 2;
 
 /**
  * Parse one PCT1 payload. Typed-array views are constructed directly over
@@ -137,12 +139,15 @@ export const createHttpTileSource = (
         `${endpoint}/tile/${keyString}.bin`,
         opts?.signal,
       );
-      // The parser is left free of the ordering policy: PCT1 records are what
-      // the server wrote, and progressive order is what the source promises.
-      return orderTileForProgressiveDrawing(
-        parsePct1(await response.arrayBuffer()),
-        keyString,
-      );
+      const buffer = await response.arrayBuffer();
+      const tile = parsePct1(buffer);
+      const flags = new DataView(buffer).getUint32(8, true);
+      // Legacy producers send record order, while newer producers can do this
+      // once before their immutable payload enters the HTTP cache. In that
+      // case the response buffer itself becomes renderer-facing storage.
+      return flags & PCT1_FLAG_PROGRESSIVE_ORDER
+        ? tile
+        : orderTileForProgressiveDrawing(tile, keyString);
     },
   };
 };

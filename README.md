@@ -120,6 +120,11 @@ For servers that reproject or transform points per tile, use
 `createHttpTileSource({ endpoint, metadata })` instead of the COPC source; it
 speaks a compact binary tile protocol (`PCT1`).
 
+PCT1 producers may set flag `0x2` when positions and optional RGB are already
+in progressively representative prefix order. The HTTP source then keeps typed
+views over the response buffer instead of allocating and reordering another
+point payload. Unflagged payloads remain compatible and are ordered client-side.
+
 In an interactive browser, put the COPC source behind one module worker. The
 worker owns its laz-perf instance, accepts concurrent range reads, and transfers
 decoded position/color buffers back without copying. For example, make the
