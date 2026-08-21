@@ -19,6 +19,7 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { basename, isAbsolute, resolve } from "node:path";
 
+import sharp from "sharp";
 import { afterAll, describe, expect, it } from "vitest";
 
 import type {
@@ -199,6 +200,61 @@ const artifactName = (
 ): string =>
   `${basename(recordingPath, ".json")}__${config.name}__${repeat + 1}.json`;
 
+type FrameEvidence = {
+  readonly path: string;
+  readonly width: number;
+  readonly height: number;
+  readonly backgroundRgb: readonly [number, number, number];
+  readonly visiblePixels: number;
+  readonly visibleFraction: number;
+  readonly maximumBackgroundDelta: number;
+};
+
+const captureFrameEvidence = async (
+  session: SceneSession,
+  path: string,
+): Promise<FrameEvidence> => {
+  const png = await session.page.locator("#viewer canvas").first().screenshot();
+  await writeFile(path, png);
+  const decoded = await sharp(png)
+    .removeAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const { width, height, channels } = decoded.info;
+  const cornerOffsets = [
+    0,
+    (width - 1) * channels,
+    (height - 1) * width * channels,
+    (height * width - 1) * channels,
+  ];
+  const backgroundRgb = [0, 1, 2].map((channel) => {
+    const values = cornerOffsets
+      .map((offset) => decoded.data[offset + channel]!)
+      .sort((left, right) => left - right);
+    return Math.round((values[1]! + values[2]!) / 2);
+  }) as [number, number, number];
+  let visiblePixels = 0;
+  let maximumBackgroundDelta = 0;
+  for (let offset = 0; offset < decoded.data.length; offset += channels) {
+    const delta = Math.max(
+      Math.abs(decoded.data[offset]! - backgroundRgb[0]),
+      Math.abs(decoded.data[offset + 1]! - backgroundRgb[1]),
+      Math.abs(decoded.data[offset + 2]! - backgroundRgb[2]),
+    );
+    maximumBackgroundDelta = Math.max(maximumBackgroundDelta, delta);
+    if (delta > 8) visiblePixels += 1;
+  }
+  return {
+    path,
+    width,
+    height,
+    backgroundRgb,
+    visiblePixels,
+    visibleFraction: visiblePixels / (width * height),
+    maximumBackgroundDelta,
+  };
+};
+
 /**
  * One test per recording, configuration and repeat, rather than one test that
  * loops over all of them. A sweep is the point of this file, and a single test
@@ -269,6 +325,11 @@ describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
               );
             }
             await mkdir(outputDirectory, { recursive: true });
+            const path = resolve(
+              outputDirectory,
+              artifactName(recordingPath, config, repeat),
+            );
+            const framePath = path.replace(/\.json$/, "__frame.png");
             const recording = JSON.parse(
               await readFile(recordingPath, "utf8"),
             ) as InputRecording;
@@ -339,6 +400,21 @@ describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
               await session.render();
               await session.frame();
               await settle(session);
+
+              // A renderer can keep reporting frames and valid timings while
+              // drawing only its background. Capture the actual vtk canvas
+              // before telemetry and reject such a run as benchmark evidence.
+              const frame = await captureFrameEvidence(session, framePath);
+              if (
+                frame.visiblePixels <= 256 ||
+                frame.visibleFraction <= 0.00005
+              ) {
+                throw new Error(
+                  `vtk canvas is blank (${frame.visiblePixels} visible pixels, ` +
+                    `${(frame.visibleFraction * 100).toFixed(4)}%):\n` +
+                    session.failures.join("\n"),
+                );
+              }
 
               await session.startTelemetry();
               await session.startInputRecorder();
@@ -415,13 +491,10 @@ describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
                 activity: settledAfter,
                 datasets: await session.datasets(),
                 finalStats: await session.stats(),
+                frame,
                 trace,
                 replayedPoses: replayed.poses,
               };
-              const path = resolve(
-                outputDirectory,
-                artifactName(recordingPath, config, repeat),
-              );
               await writeFile(
                 path,
                 `${JSON.stringify(artifact, null, 2)}\n`,
@@ -431,6 +504,7 @@ describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
                 `REPLAY_ARTIFACT ${path}\n` +
                   `  frames=${trace.summary.frames} clean=${trace.summary.cleanFrames}` +
                   ` longTasks=${trace.summary.longTasks}` +
+                  ` visible=${frame.visiblePixels}/${(frame.visibleFraction * 100).toFixed(2)}%` +
                   ` lateness=${replay.dispatch.meanLatenessMs.toFixed(1)}/${replay.dispatch.maxLatenessMs.toFixed(1)} ms` +
                   ` drift=${drift ? `${(drift.meanRelativeError * 100).toFixed(2)}%/${(drift.maxRelativeError * 100).toFixed(2)}%` : "n/a"}\n` +
                   failedDatasets
