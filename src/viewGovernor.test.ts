@@ -256,6 +256,55 @@ describe("createViewGovernor", () => {
     governor.dispose();
   });
 
+  it("does not let stray short intervals pin the quantum for the session", () => {
+    const governor = createViewGovernor({
+      initialFraction: 0.5,
+      interactionTargetMs: 16,
+      minSamples: 2,
+      cooldownMs: 0,
+      hysteresis: 0.2,
+    });
+    // A 60 Hz session with three compositor hiccups spread across it. A
+    // session-lifetime minimum would take those three as the display and
+    // settle at a 4 ms quantum, whose reachable target is 5.75 ms — under the
+    // 16 ms interaction target, so the correction silently disappears.
+    const motion = governor.beginMotion("explicit");
+    const hiccups = new Set([5, 900, 2500]);
+    for (let frame = 0; frame < 3000; frame += 1) {
+      governor.recordHostFrame({
+        hostFrameMs: hiccups.has(frame) ? 4 : 16.7,
+        now: frame * 16.7,
+      });
+    }
+
+    expect(governor.stats().displayQuantumMs).toBeCloseTo(16.7, 5);
+    expect(governor.stats().targetFrameTimeMs).toBeCloseTo(24, 1);
+    motion.release();
+    governor.dispose();
+  });
+
+  it("relearns the quantum when the display it is presenting on changes", () => {
+    const governor = createViewGovernor({
+      initialFraction: 0.5,
+      interactionTargetMs: 16,
+      minSamples: 2,
+      cooldownMs: 0,
+      hysteresis: 0.2,
+    });
+    // A window dragged from a 120 Hz panel to a 60 Hz one. The 8.3 ms
+    // intervals were true when measured and are simply no longer reachable.
+    for (let frame = 0; frame < 50; frame += 1) {
+      governor.recordHostFrame({ hostFrameMs: 8.3, now: frame * 8.3 });
+    }
+    expect(governor.stats().displayQuantumMs).toBeCloseTo(8.3, 5);
+
+    for (let frame = 0; frame < 5000; frame += 1) {
+      governor.recordHostFrame({ hostFrameMs: 16.7, now: 415 + frame * 16.7 });
+    }
+    expect(governor.stats().displayQuantumMs).toBeCloseTo(16.7, 5);
+    governor.dispose();
+  });
+
   it("will not believe an interval no display could have produced", () => {
     const governor = createViewGovernor({ minSamples: 2, cooldownMs: 0 });
     // Two callbacks inside one refresh say nothing about the refresh period.
