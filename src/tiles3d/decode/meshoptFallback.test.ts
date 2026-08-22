@@ -99,4 +99,31 @@ describe("repairMeshoptFallbackOffsets", () => {
     const source = glb(authored);
     expect(repairMeshoptFallbackOffsets(source)).toBe(source);
   });
+
+  it("repairs a bare glTF JSON tile, which the decoder also accepts", () => {
+    // A `.gltf` payload has no GLB magic to key off, and a collision authored
+    // in one draws exactly the wrong mesh this module exists to prevent.
+    const source = new TextEncoder().encode(JSON.stringify(COLLIDING))
+      .buffer as ArrayBuffer;
+    const repaired: RepairedGltf = JSON.parse(
+      new TextDecoder().decode(repairMeshoptFallbackOffsets(source)),
+    );
+
+    expect(repaired.bufferViews[0]!.byteOffset).toBe(0);
+    expect(repaired.bufferViews[1]!.byteOffset).toBe(90_320);
+    expect(repaired.buffers[1]!.byteLength).toBe(598_752);
+  });
+
+  it("leaves content it cannot read, or has nothing to fix in, untouched", () => {
+    const cases = [
+      new TextEncoder().encode(JSON.stringify({ asset: { version: "2.0" } })),
+      new TextEncoder().encode("not json at all"),
+      new Uint8Array([1, 2, 3]),
+      new Uint8Array(0),
+    ];
+    for (const bytes of cases) {
+      const source = bytes.buffer as ArrayBuffer;
+      expect(repairMeshoptFallbackOffsets(source)).toBe(source);
+    }
+  });
 });
