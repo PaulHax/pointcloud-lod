@@ -19,6 +19,17 @@ import { cameraMoved, type CameraView } from "./camera";
 import { finiteAtLeast, finiteNonNegative, finiteWithin } from "./numeric";
 
 export type TransientFrameMetrics = {
+  /**
+   * Interval between this presentation and the previous one, in milliseconds.
+   *
+   * A presentation interval, not a render duration — unlike its
+   * `vtkFrameMs`/`gpuMs` siblings, which are durations. The governor reads the
+   * shortest intervals it sees as the display's refresh period, so a host that
+   * reports how long its frame took to build instead reports sub-refresh
+   * values on every cheap frame and teaches the governor a display quantum
+   * far below the real one. Measure it between successive
+   * `requestAnimationFrame` callbacks, or from a presentation timestamp.
+   */
   readonly hostFrameMs: number;
   readonly vtkFrameMs?: number;
   readonly gpuMs?: number;
@@ -143,6 +154,20 @@ const MIN_DISPLAY_QUANTUM_MS = 3;
 const MAX_DISPLAY_QUANTUM_MS = 17;
 /** How many short intervals must agree before the quantum is believed. */
 const DISPLAY_QUANTUM_SAMPLES = 3;
+/**
+ * Frames the display-quantum estimate looks back over: about four seconds at
+ * 60 Hz.
+ *
+ * A session-lifetime minimum can only ever ratchet down, and the ratchet has
+ * no way back up. Three stray short intervals anywhere in a long session — a
+ * compositor hiccup at frame 5, another at frame 900 — would pin the quantum
+ * at 4 ms for good, and a window dragged from a 120 Hz panel to a 60 Hz one
+ * would keep answering 8.3 ms forever. Either puts the reachable target below
+ * the interaction target, which withdraws the correction entirely. A window
+ * forgets both, while the k-th smallest within it keeps a single hiccup from
+ * claiming a faster display than there is.
+ */
+const DISPLAY_QUANTUM_WINDOW = 240;
 const INTERACTION_SEED_OF_STATIONARY = 0.25;
 
 const GOVERNOR_DEFAULTS = {
@@ -237,13 +262,14 @@ export const createViewGovernor = (
   let peakObservedFrameMs = 0;
   let lastHostFrameMs: number | null = null;
   let lastObservedFrameMs: number | null = null;
-  // The shortest presentation intervals seen this session, ascending. Frames
-  // are reported between presentations, so the smallest interval a display can
+  // The most recent presentation intervals, oldest overwritten. Frames are
+  // reported between presentations, so the smallest interval a display can
   // produce is its refresh period however cheap the frame was — which is what
-  // the quality tracks need in order to tell headroom from a vsync floor. The
-  // k-th smallest rather than the smallest, so one stray short interval from a
-  // compositor hiccup cannot claim a faster display than there is.
-  const shortestFrameMs: number[] = [];
+  // the quality tracks need in order to tell headroom from a vsync floor.
+  const recentFrameMs = new Float64Array(DISPLAY_QUANTUM_WINDOW);
+  let recentFrames = 0;
+  let recentFrameAt = 0;
+  const smallestFrameMs = new Float64Array(DISPLAY_QUANTUM_SAMPLES);
 
   const stampNow = (): number => Date.now() + (hostEpochOffsetMs ?? 0);
   const moving = (): boolean => explicitMotion + inferredMotion > 0;
@@ -357,29 +383,33 @@ export const createViewGovernor = (
     return Math.max(...candidates);
   };
 
-  const believedQuantumMs = (): number | null =>
-    shortestFrameMs.length < DISPLAY_QUANTUM_SAMPLES
-      ? null
-      : Math.min(
-          MAX_DISPLAY_QUANTUM_MS,
-          shortestFrameMs[DISPLAY_QUANTUM_SAMPLES - 1]!,
-        );
+  /** The k-th smallest interval still inside the window, capped. */
+  const believedQuantumMs = (): number | null => {
+    const held = Math.min(recentFrames, DISPLAY_QUANTUM_WINDOW);
+    if (held < DISPLAY_QUANTUM_SAMPLES) return null;
+    smallestFrameMs.fill(Number.POSITIVE_INFINITY);
+    for (let index = 0; index < held; index += 1) {
+      const seen = recentFrameMs[index]!;
+      for (let rank = 0; rank < DISPLAY_QUANTUM_SAMPLES; rank += 1) {
+        if (seen >= smallestFrameMs[rank]!) continue;
+        smallestFrameMs.copyWithin(rank + 1, rank);
+        smallestFrameMs[rank] = seen;
+        break;
+      }
+    }
+    return Math.min(
+      MAX_DISPLAY_QUANTUM_MS,
+      smallestFrameMs[DISPLAY_QUANTUM_SAMPLES - 1]!,
+    );
+  };
 
   const noteDisplayQuantum = (hostFrameMs: number): void => {
     // Below this is faster than any display presents, so it is evidence of a
     // doubled callback rather than of a refresh period.
     if (hostFrameMs < MIN_DISPLAY_QUANTUM_MS) return;
-    const at = shortestFrameMs.findIndex((seen) => hostFrameMs < seen);
-    if (at < 0) {
-      if (shortestFrameMs.length >= DISPLAY_QUANTUM_SAMPLES) return;
-      shortestFrameMs.push(hostFrameMs);
-    } else {
-      shortestFrameMs.splice(at, 0, hostFrameMs);
-      shortestFrameMs.length = Math.min(
-        shortestFrameMs.length,
-        DISPLAY_QUANTUM_SAMPLES,
-      );
-    }
+    recentFrameMs[recentFrameAt] = hostFrameMs;
+    recentFrameAt = (recentFrameAt + 1) % DISPLAY_QUANTUM_WINDOW;
+    recentFrames += 1;
     const quantum = believedQuantumMs();
     if (quantum !== null) quality.setDisplayQuantumMs(quantum);
   };
