@@ -140,8 +140,14 @@ export type RendererAdapterStats = {
   readonly builtTiles: number;
   /**
    * Pool hits bucketed by how many tiles were pooled after the one that hit:
-   * `[0], [1], [2,3], [4,7], ...` with the last bucket open. A policy keeping
-   * the newest N pooled tiles attached earns the hits in the buckets up to N.
+   * `[0], [1], [2,3], [4,7], ...` with the last bucket open.
+   *
+   * The count is insertions since the entry was pooled, not the entry's rank
+   * in the pool at the moment it hit: insertions that were themselves evicted
+   * before the hit still count. So it reads as an upper bound on how deep a
+   * newest-N policy would have had to hold the entry, and the hits in the
+   * buckets up to N are the ones such a policy is guaranteed to have earned —
+   * it may earn some of the deeper ones too.
    */
   readonly reuseDepths: readonly number[];
   /** Submitted plus pooled: everything holding polydata/mapper/actor state. */

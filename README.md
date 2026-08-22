@@ -125,6 +125,14 @@ in progressively representative prefix order. The HTTP source then keeps typed
 views over the response buffer instead of allocating and reordering another
 point payload. Unflagged payloads remain compatible and are ordered client-side.
 
+Because a flagged tile's `positions` and `rgb` are two views over **one**
+`ArrayBuffer`, a host that wraps `createHttpTileSource` in a worker of its own
+must not list both in a `postMessage` transfer list: the second entry names a
+buffer the first already detached, and the call throws. Transfer
+`positions.buffer` alone, or `structuredClone` the payload instead. Unflagged
+tiles are reordered into two freshly allocated buffers and can be transferred
+separately.
+
 In an interactive browser, put the COPC source behind one module worker. The
 worker owns its laz-perf instance, accepts concurrent range reads, and transfers
 decoded position/color buffers back without copying. For example, make the
