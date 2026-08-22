@@ -1,5 +1,6 @@
 /**
- * Repairs meshopt fallback-buffer offsets in a GLB before it is decoded.
+ * Repairs meshopt fallback-buffer offsets in tile content before it is
+ * decoded, whether that content is a GLB or bare glTF JSON.
  *
  * `EXT_meshopt_compression` points each compressed buffer view at a *fallback*
  * buffer — storage that carries no bytes in the file and exists so a loader
@@ -104,37 +105,71 @@ const repairOffsets = (gltf: Gltf): Gltf => {
 };
 
 /**
- * Returns the GLB unchanged unless it carries colliding meshopt views, so a
- * well-formed asset pays one JSON parse and nothing else.
+ * A tile whose content is bare glTF JSON rather than a GLB container. The
+ * decoder accepts both, and a fallback-buffer collision authored in one
+ * decodes to exactly the same silently wrong mesh as in the other.
  */
-export const repairMeshoptFallbackOffsets = (glb: ArrayBuffer): ArrayBuffer => {
-  if (glb.byteLength < HEADER_BYTES + CHUNK_HEADER_BYTES) return glb;
-  const view = new DataView(glb);
-  if (view.getUint32(0, true) !== GLB_MAGIC) return glb;
+const repairJsonAsset = (content: ArrayBuffer): ArrayBuffer => {
+  let gltf: unknown;
+  try {
+    // Matched to what the decoder itself will accept, padding included, so
+    // this never rewrites a payload the decoder would have rejected.
+    let text = new TextDecoder("utf-8", { fatal: true }).decode(
+      new Uint8Array(content),
+    );
+    while (text.endsWith("\0") || text.endsWith(" ")) text = text.slice(0, -1);
+    gltf = JSON.parse(text);
+  } catch {
+    return content;
+  }
+  if (!gltf || typeof gltf !== "object" || Array.isArray(gltf)) return content;
+  if (!needsRepair(gltf as Gltf)) return content;
+
+  const encoded = new TextEncoder().encode(
+    JSON.stringify(repairOffsets(gltf as Gltf)),
+  );
+  return encoded.buffer.slice(
+    encoded.byteOffset,
+    encoded.byteOffset + encoded.byteLength,
+  ) as ArrayBuffer;
+};
+
+/**
+ * Returns the content unchanged unless it carries colliding meshopt views, so
+ * a well-formed asset pays one JSON parse and nothing else.
+ */
+export const repairMeshoptFallbackOffsets = (
+  content: ArrayBuffer,
+): ArrayBuffer => {
+  if (content.byteLength < HEADER_BYTES + CHUNK_HEADER_BYTES) {
+    return repairJsonAsset(content);
+  }
+  const view = new DataView(content);
+  if (view.getUint32(0, true) !== GLB_MAGIC) return repairJsonAsset(content);
   const jsonLength = view.getUint32(HEADER_BYTES, true);
-  if (view.getUint32(HEADER_BYTES + 4, true) !== JSON_CHUNK) return glb;
+  if (view.getUint32(HEADER_BYTES + 4, true) !== JSON_CHUNK) return content;
 
   const jsonStart = HEADER_BYTES + CHUNK_HEADER_BYTES;
   const jsonEnd = jsonStart + jsonLength;
-  if (jsonEnd > glb.byteLength) return glb;
+  if (jsonEnd > content.byteLength) return content;
 
   let gltf: Gltf;
   try {
     gltf = JSON.parse(
-      new TextDecoder().decode(new Uint8Array(glb, jsonStart, jsonLength)),
+      new TextDecoder().decode(new Uint8Array(content, jsonStart, jsonLength)),
     );
   } catch {
-    return glb;
+    return content;
   }
-  if (!needsRepair(gltf)) return glb;
+  if (!needsRepair(gltf)) return content;
 
   const encoded = new TextEncoder().encode(JSON.stringify(repairOffsets(gltf)));
   const paddedLength = padToFour(encoded.byteLength);
-  const rest = new Uint8Array(glb, jsonEnd);
+  const rest = new Uint8Array(content, jsonEnd);
   const output = new Uint8Array(jsonStart + paddedLength + rest.byteLength);
   const outputView = new DataView(output.buffer);
 
-  output.set(new Uint8Array(glb, 0, jsonStart));
+  output.set(new Uint8Array(content, 0, jsonStart));
   outputView.setUint32(0, GLB_MAGIC, true);
   outputView.setUint32(8, output.byteLength, true);
   outputView.setUint32(HEADER_BYTES, paddedLength, true);
