@@ -76,18 +76,23 @@ export type AdaptiveQualityStats = {
   readonly interaction: AdaptiveQualityTrackStats;
 };
 
+/**
+ * The shortest frame interval the display has been seen to present, or `null`
+ * while that is not yet known.
+ *
+ * Frame samples are measured between presentations, so no sample can fall
+ * below the display's refresh period however little was drawn. A target near
+ * that period has an increase threshold — `target * (1 - hysteresis)` — that
+ * no measurement can reach, so quality can only ever fall. The quantum raises
+ * each track's effective target far enough that the threshold sits above it
+ * and both directions are reachable again.
+ *
+ * Whoever measures the display owns this number; the tracks read it whenever
+ * they need a target, so it is a cheap accessor, not a computation.
+ */
+export type DisplayQuantumSupplier = () => number | null;
+
 export type AdaptiveQuality = {
-  /**
-   * Tell the tracks the shortest frame interval the display can present.
-   *
-   * Frame samples are measured between presentations, so no sample can fall
-   * below the display's refresh period however little was drawn. A target
-   * near that period has an increase threshold — `target * (1 - hysteresis)`
-   * — that no measurement can reach, so quality can only ever fall. The
-   * quantum raises each track's effective target far enough that the
-   * threshold sits above it and both directions are reachable again.
-   */
-  setDisplayQuantumMs(quantumMs: number): void;
   recordFrame(
     durationMs: number,
     options: { readonly interacting: boolean; readonly now: number },
@@ -144,6 +149,7 @@ type Track = {
 
 export const createAdaptiveQuality = (
   options: AdaptiveQualityOptions = {},
+  displayQuantum: DisplayQuantumSupplier = () => null,
 ): AdaptiveQuality => {
   const initialFraction = finiteWithin(
     "initialFraction",
@@ -219,12 +225,13 @@ export const createAdaptiveQuality = (
   const trackFor = (interacting: boolean): Track =>
     interacting ? interaction : stationary;
 
-  let displayQuantumMs: number | null = null;
   /** The lowest target whose increase threshold a real sample can reach. */
-  const reachableTargetMs = (): number =>
-    displayQuantumMs === null
+  const reachableTargetMs = (): number => {
+    const quantumMs = displayQuantum();
+    return quantumMs === null
       ? 0
-      : (displayQuantumMs * INCREASE_HEADROOM) / Math.max(0.05, 1 - hysteresis);
+      : (quantumMs * INCREASE_HEADROOM) / Math.max(0.05, 1 - hysteresis);
+  };
   const effectiveTargetMs = (track: Track): number =>
     Math.max(track.targetMs, reachableTargetMs());
 
@@ -291,11 +298,6 @@ export const createAdaptiveQuality = (
   };
 
   return {
-    setDisplayQuantumMs(quantumMs) {
-      if (!Number.isFinite(quantumMs) || quantumMs <= 0) return;
-      displayQuantumMs = quantumMs;
-    },
-
     recordFrame(durationMs, { interacting, now }) {
       const track = trackFor(interacting);
       if (
@@ -358,7 +360,7 @@ export const createAdaptiveQuality = (
         minimumFraction: MIN_VIEW_QUALITY_FRACTION,
         maximumFraction: MAX_VIEW_QUALITY_FRACTION,
         cooldownMs,
-        displayQuantumMs,
+        displayQuantumMs: displayQuantum(),
         stationary: stats(stationary),
         interaction: stats(interaction),
       };

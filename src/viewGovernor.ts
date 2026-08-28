@@ -12,6 +12,7 @@ import {
   createAdaptiveQuality,
   type AdaptiveQuality,
   type AdaptiveQualityOptions,
+  type DisplayQuantumSupplier,
   type QualityAdjustment,
   type QualityRegime,
 } from "./adaptiveBudget";
@@ -200,6 +201,7 @@ type GovernorConfiguration = {
 
 const resolveConfiguration = (
   options: ViewGovernorOptions,
+  displayQuantum: DisplayQuantumSupplier,
 ): GovernorConfiguration => {
   const {
     vtkFrameFraction: rawVtkFraction = GOVERNOR_DEFAULTS.vtkFrameFraction,
@@ -219,7 +221,7 @@ const resolveConfiguration = (
     0,
   );
   const motionDebounceMs = finiteAtLeast("motionDebounceMs", rawDebounceMs, 0);
-  const quality = createAdaptiveQuality(qualityOptions);
+  const quality = createAdaptiveQuality(qualityOptions, displayQuantum);
   return {
     vtkFrameFraction,
     interactionSettleMs,
@@ -233,13 +235,18 @@ export const createViewGovernor = (
   options: ViewGovernorOptions = {},
 ): ViewGovernor => {
   let appliedOptions = { ...options };
+  // What the display has been measured to refresh at, kept here rather than
+  // in the quality tracks: new tracks built by `setOptions` read the same
+  // measurement, and the tracks read it on every target, so the window scan
+  // behind it runs once a frame instead of once a read.
+  let currentQuantum: number | null = null;
   let {
     vtkFrameFraction,
     interactionSettleMs,
     motionDebounceMs,
     quality,
     emergencyCooldownMs,
-  } = resolveConfiguration(options);
+  } = resolveConfiguration(options, () => currentQuantum);
   let work: GovernorWorkState = {
     workPending: false,
     physicalTileOperations: 0,
@@ -411,7 +418,7 @@ export const createViewGovernor = (
     recentFrameAt = (recentFrameAt + 1) % DISPLAY_QUANTUM_WINDOW;
     recentFrames += 1;
     const quantum = believedQuantumMs();
-    if (quantum !== null) quality.setDisplayQuantumMs(quantum);
+    if (quantum !== null) currentQuantum = quantum;
   };
 
   const recordTransientFrame = (metrics: TransientFrameMetrics): number => {
@@ -479,7 +486,7 @@ export const createViewGovernor = (
 
     setOptions(next = {}) {
       if (disposed || sameOptions(appliedOptions, next)) return;
-      const configuration = resolveConfiguration(next);
+      const configuration = resolveConfiguration(next, () => currentQuantum);
       appliedOptions = { ...next };
       ({
         vtkFrameFraction,
@@ -488,12 +495,6 @@ export const createViewGovernor = (
         quality,
         emergencyCooldownMs,
       } = configuration);
-      // The display did not change because the targets did: hand the new
-      // tracks what this one has already been measured to refresh at, or the
-      // first frames after every settings change steer to a target the panel
-      // cannot reach.
-      const quantum = believedQuantumMs();
-      if (quantum !== null) quality.setDisplayQuantumMs(quantum);
       emergencyStreak = 0;
       emergencyCooldownUntil = Number.NEGATIVE_INFINITY;
       lastEmergencyCutAt = Number.NEGATIVE_INFINITY;
