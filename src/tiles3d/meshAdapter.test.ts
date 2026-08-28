@@ -331,6 +331,10 @@ describe("vtk mesh adapter", () => {
         expect(renderer.addActor).not.toHaveBeenCalled();
     }
     expect(renderer.addActor).toHaveBeenCalledTimes(6);
+    // A split primitive is charged the deindexed per-triangle cost the
+    // scheduler admitted its chunks under -- 112 bytes a triangle here -- so
+    // residency and the submission budget agree on what the tile costs.
+    expect(adapter.stats().residentGeometryBytes).toBe(triangleCount * 112);
   });
 
   it("submits a whole primitive on its own indices rather than as triangle soup", () => {
