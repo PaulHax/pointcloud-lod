@@ -249,17 +249,11 @@ const retainedGeometryBytes = (
   maxJobBytes: number,
 ): number => {
   const triangles = trianglesIn(primitive);
-  const cells = triangles * 4 * Uint32Array.BYTES_PER_ELEMENT;
   if (splits(primitive, maxJobBytes)) {
-    return (
-      cells +
-      triangles *
-        (9 + (primitive.normals ? 9 : 0) + (primitive.uvs ? 6 : 0)) *
-        Float32Array.BYTES_PER_ELEMENT
-    );
+    return triangles * bytesPerTriangle(primitive);
   }
   return (
-    cells +
+    triangles * 4 * Uint32Array.BYTES_PER_ELEMENT +
     primitive.positions.byteLength +
     (primitive.normals?.byteLength ?? 0) +
     (primitive.uvs?.byteLength ?? 0)
