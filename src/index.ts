@@ -179,7 +179,6 @@ export {
   parsePct1,
   RevisionGoneError,
   PCT1_HEADER_BYTES,
-  PCT1_FLAG_PROGRESSIVE_ORDER,
   type HttpTileSourceOptions,
 } from "./httpTileSource";
 

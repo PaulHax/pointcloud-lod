@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   PCT1_HEADER_BYTES,
-  PCT1_FLAG_PROGRESSIVE_ORDER,
   RevisionGoneError,
   createHttpTileSource,
   parsePct1,
@@ -15,7 +14,8 @@ type Pct1Spec = {
   positions: number[];
   rgb?: number[];
   magic?: string;
-  progressiveOrder?: boolean;
+  /** Extra header flag bits beyond bit 0 (RGB present). */
+  extraFlags?: number;
 };
 
 const makePct1 = ({
@@ -23,7 +23,7 @@ const makePct1 = ({
   positions,
   rgb,
   magic = "PCT1",
-  progressiveOrder = false,
+  extraFlags = 0,
 }: Pct1Spec): ArrayBuffer => {
   const pointCount = positions.length / 3;
   const bytes =
@@ -32,11 +32,7 @@ const makePct1 = ({
   const view = new DataView(buffer);
   for (let i = 0; i < 4; i += 1) view.setUint8(i, magic.charCodeAt(i));
   view.setUint32(4, pointCount, true);
-  view.setUint32(
-    8,
-    (rgb ? 1 : 0) | (progressiveOrder ? PCT1_FLAG_PROGRESSIVE_ORDER : 0),
-    true,
-  );
+  view.setUint32(8, (rgb ? 1 : 0) | extraFlags, true);
   view.setUint32(12, 0, true);
   view.setFloat64(16, origin[0], true);
   view.setFloat64(24, origin[1], true);
@@ -216,13 +212,15 @@ describe("createHttpTileSource", () => {
     }
   });
 
-  it("keeps a producer-ordered payload zero-copy and in its declared order", async () => {
+  it("orders a payload whose header carries flag bits it does not know", async () => {
+    // Only bit 0 (RGB present) is part of the format; the parser ignores the
+    // rest, and no header bit can excuse a payload from progressive order.
     const points = Array.from({ length: 300 }, (_, index) => index);
     const payload = makePct1({
       origin: [0, 0, 0],
       positions: points.flatMap((point) => [point, point * 2, point * 3]),
       rgb: points.flatMap((point) => [point % 256, 0, 0]),
-      progressiveOrder: true,
+      extraFlags: 2,
     });
     const source = sourceOn(
       "/pc/a/rev1",
@@ -230,10 +228,9 @@ describe("createHttpTileSource", () => {
     );
 
     const tile = await source.loadTile({ level: 1, x: 1, y: 0, z: 0 });
-    expect(tile.positions.buffer.byteLength).toBe(payload.byteLength);
-    expect(points.map((_, index) => tile.positions[index * 3]!)).toEqual(
-      points,
-    );
+    const delivered = points.map((_, index) => tile.positions[index * 3]!);
+    expect([...delivered].sort((a, b) => a - b)).toEqual(points);
+    expect(delivered).not.toEqual(points);
   });
 
   it("maps HTTP 410 to RevisionGoneError", async () => {
