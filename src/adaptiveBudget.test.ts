@@ -99,7 +99,11 @@ describe("createAdaptiveQuality", () => {
   });
 
   it("raises a target the display can never beat", () => {
-    const quality = createAdaptiveQuality({ ...options, hysteresis: 0.2 });
+    let quantumMs: number | null = null;
+    const quality = createAdaptiveQuality(
+      { ...options, hysteresis: 0.2 },
+      () => quantumMs,
+    );
     // 60 Hz: a frame that draws nothing still waits for the refresh, so 16.7
     // is both the floor of the measurement and, at a 16 ms target, inside the
     // hysteresis band — the interaction track can never be told it has room.
@@ -109,7 +113,7 @@ describe("createAdaptiveQuality", () => {
       lastAdjustment: { reason: "within-hysteresis" },
     });
 
-    quality.setDisplayQuantumMs(16.7);
+    quantumMs = 16.7;
     expect(quality.stats().interaction.targetMs).toBe(16);
     expect(quality.stats().interaction.effectiveTargetMs).toBeCloseTo(24, 1);
     expect(quality.target(true)).toBeCloseTo(24, 1);
@@ -122,8 +126,10 @@ describe("createAdaptiveQuality", () => {
   });
 
   it("leaves a target the display can already beat alone", () => {
-    const quality = createAdaptiveQuality({ ...options, hysteresis: 0.2 });
-    quality.setDisplayQuantumMs(16.7);
+    const quality = createAdaptiveQuality(
+      { ...options, hysteresis: 0.2 },
+      () => 16.7,
+    );
     // 32 ms is nearly two refreshes away: its increase threshold at 25.6 is
     // reachable as it stands, so the quantum has nothing to say about it.
     expect(quality.stats().stationary.effectiveTargetMs).toBe(32);
@@ -135,12 +141,12 @@ describe("createAdaptiveQuality", () => {
     });
   });
 
-  it("ignores a display quantum that is not a duration", () => {
-    const quality = createAdaptiveQuality(options);
-    quality.setDisplayQuantumMs(Number.NaN);
-    quality.setDisplayQuantumMs(0);
-    quality.setDisplayQuantumMs(-16);
+  it("steers to the configured targets while the quantum is unknown", () => {
+    // Tracks are built before the first frame is measured, so the supplier
+    // has nothing to say yet and must not distort a target on the way past.
+    const quality = createAdaptiveQuality(options, () => null);
     expect(quality.stats().displayQuantumMs).toBeNull();
     expect(quality.stats().interaction.effectiveTargetMs).toBe(16);
+    expect(quality.target(true)).toBe(16);
   });
 });
