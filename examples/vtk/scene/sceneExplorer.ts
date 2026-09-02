@@ -70,6 +70,7 @@ const fire = (target: HTMLElement, type: "input" | "change"): void => {
 type ViewTarget = {
   readonly center: [number, number, number];
   readonly distance: number;
+  readonly bounds?: readonly number[];
 };
 
 type DatasetLocation = {
@@ -136,9 +137,7 @@ const tilesEndpoint = (value: string): string => {
   return url.href.replace(/\/$/, "");
 };
 
-const boundsView = (
-  source: TileSource,
-): { center: [number, number, number]; distance: number } | null => {
+const boundsView = (source: TileSource): ViewTarget | null => {
   const bounds = source.metadata().bounds;
   if (!bounds) return null;
   const center: [number, number, number] = [
@@ -152,7 +151,20 @@ const boundsView = (
       bounds.max[1] - bounds.min[1],
       bounds.max[2] - bounds.min[2],
     ) / 2;
-  return radius > 0 ? { center, distance: radius * 2.8 } : null;
+  return radius > 0
+    ? {
+        center,
+        distance: radius * 2.8,
+        bounds: [
+          bounds.min[0],
+          bounds.max[0],
+          bounds.min[1],
+          bounds.max[1],
+          bounds.min[2],
+          bounds.max[2],
+        ],
+      }
+    : null;
 };
 
 const makeCard = (
@@ -446,7 +458,12 @@ export const startSceneExplorer = (preset: ExplorerPreset): void => {
 
   const frameDataset = (dataset: Dataset): boolean =>
     dataset.view
-      ? (host.lookAt(dataset.view.center, dataset.view.distance), true)
+      ? (host.lookAt(
+          dataset.view.center,
+          dataset.view.distance,
+          dataset.view.bounds,
+        ),
+        true)
       : host.frameVisible();
 
   const removeDataset = (dataset: Dataset, frameRemaining = true): void => {

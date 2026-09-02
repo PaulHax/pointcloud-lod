@@ -8,8 +8,10 @@
  */
 
 import { afterAll, describe, expect, it } from "vitest";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 
-import { closeBenchmarkBrowser, openScene } from "./sceneHarness";
+import { closeBenchmarkBrowser, openScene, FIXTURES } from "./sceneHarness";
 
 afterAll(closeBenchmarkBrowser);
 
@@ -21,6 +23,92 @@ const VIEW_QUALITY_HELP = [
 ];
 
 describe("explorer controls", () => {
+  it("loads a kilometre-scale cloud from the URL and after replacing a distant dataset", async () => {
+    // Scale the small COPC fixture's coordinate system, including its info
+    // VLR, without changing compressed point integers or hierarchy offsets.
+    const large = await readFile(join(FIXTURES, "fixture.copc.laz"));
+    for (let offset = 131; offset < 227; offset += 8) {
+      large.writeDoubleLE(large.readDoubleLE(offset) * 100, offset);
+    }
+    const infoOffset = large.readUInt16LE(94) + 54;
+    for (let offset = infoOffset; offset < infoOffset + 40; offset += 8) {
+      large.writeDoubleLE(large.readDoubleLE(offset) * 100, offset);
+    }
+    const session = await openScene({ path: "/index.html", headless: true });
+    try {
+      await session.page.context().route(
+        (url) => url.pathname === "/large.copc.laz",
+        async (route) => {
+          const range = route
+            .request()
+            .headers()
+            .range?.match(/bytes=(\d+)-(\d+)/);
+          const start = range ? Number(range[1]) : 0;
+          const end = range
+            ? Math.min(Number(range[2]), large.length - 1)
+            : large.length - 1;
+          await route.fulfill({
+            status: range ? 206 : 200,
+            headers: {
+              "content-type": "application/octet-stream",
+              "accept-ranges": "bytes",
+              ...(range
+                ? { "content-range": `bytes ${start}-${end}/${large.length}` }
+                : {}),
+            },
+            body: large.subarray(start, end + 1),
+          });
+        },
+      );
+      const waitForPoints = async () => {
+        await expect
+          .poll(
+            async () => {
+              const stats = await session.stats();
+              const renderer = stats.members[0]?.stats.renderer as
+                | { drawnPoints: number }
+                | undefined;
+              return (
+                stats.loading === 0 &&
+                stats.members.length === 1 &&
+                (renderer?.drawnPoints ?? 0) > 0
+              );
+            },
+            { timeout: 15_000 },
+          )
+          .toBe(true);
+      };
+      await session.page.goto(
+        `${session.origin}/?harness=1&url=/large.copc.laz`,
+      );
+      await waitForPoints();
+      await session.page.reload();
+      await waitForPoints();
+
+      // Start elsewhere with visible actors, then use the actual replacement
+      // dialog. The old actors must not dictate the new cloud's clip planes.
+      await session.page.goto(
+        `${session.origin}/?harness=1&url=/fixtures/fixture.copc.laz`,
+      );
+      await waitForPoints();
+      await session.page
+        .locator(".dataset-heading select")
+        .selectOption("custom");
+      await session.page.locator("#source-type").selectOption("url");
+      await session.page
+        .locator("#dataset-url")
+        .fill(`${session.origin}/large.copc.laz`);
+      await session.page.locator("#submit-dataset").click();
+      await expect
+        .poll(async () => (await session.datasets())[0]?.label)
+        .toBe("large.copc.laz");
+      await waitForPoints();
+      expect(session.failures).toEqual([]);
+    } finally {
+      await session.close();
+    }
+  });
+
   it("explains every view-quality control, by pointer and by keyboard", async () => {
     const session = await openScene({ path: "/index.html", headless: true });
     try {
