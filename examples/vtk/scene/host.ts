@@ -97,6 +97,7 @@ export type SceneHost = {
   lookAt(
     center: readonly [number, number, number],
     distanceMeters: number,
+    bounds?: readonly number[],
   ): void;
   /** Frame every currently visible prop; false while the scene is empty. */
   frameVisible(): boolean;
@@ -226,8 +227,23 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
    * metres in front of a city that is kilometres deep, and the view shows a
    * strip of ground with everything behind it clipped away.
    */
+  let framingBounds: readonly number[] | null = null;
   const refreshClippingRange = (): void => {
-    if (!sceneIsEmpty()) renderer.resetCameraClippingRange();
+    const visible = sceneIsEmpty()
+      ? null
+      : (renderer.computeVisiblePropBounds() as number[]);
+    const bounds = framingBounds ? [...framingBounds] : visible;
+    if (!bounds) return;
+    if (visible && framingBounds) {
+      for (let axis = 0; axis < 3; axis += 1) {
+        bounds[axis * 2] = Math.min(bounds[axis * 2]!, visible[axis * 2]!);
+        bounds[axis * 2 + 1] = Math.max(
+          bounds[axis * 2 + 1]!,
+          visible[axis * 2 + 1]!,
+        );
+      }
+    }
+    renderer.resetCameraClippingRange(bounds);
   };
 
   /**
@@ -284,6 +300,7 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
       // A gesture's own animation loop is already painting, and it drains
       // admission itself; a second paint here would double the drain.
       if (interactor.isAnimating()) return;
+      refreshClippingRange();
       const view = cameraView();
       for (const listener of beforeFrameListeners)
         listener(view, currentDevicePixelRatio);
@@ -413,6 +430,7 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
   interactor.onStartAnimation(() => coordinator.beginInteraction());
   interactor.onAnimation(() => {
     // Fires before the gesture frame paints, which is where its drain belongs.
+    refreshClippingRange();
     const view = cameraView();
     for (const listener of beforeFrameListeners)
       listener(view, currentDevicePixelRatio);
@@ -450,7 +468,14 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
       gpuGroupByQuery.clear();
     },
     gpuTimingSupported: () => gpuTimer.supported,
-    lookAt(center, distanceMeters) {
+    lookAt(center, distanceMeters, bounds) {
+      // Selection needs a frustum containing the requested scene before any
+      // tiles exist. Visible props alone describe the old dataset on replacement.
+      const radius =
+        distanceMeters * Math.tan((camera.getViewAngle() * Math.PI) / 360);
+      framingBounds = bounds
+        ? [...bounds]
+        : center.flatMap((value) => [value - radius, value + radius]);
       const [x, y, z] = center;
       camera.setFocalPoint(x, y, z);
       // From the north-east, tilted enough to show facades rather than roofs,
@@ -491,6 +516,7 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
           bounds[5]! - bounds[4]!,
         ) / 2;
       if (!(radius > 0)) return false;
+      framingBounds = [...bounds];
       const distance =
         (radius / Math.tan((camera.getViewAngle() * Math.PI) / 360)) * 1.25;
       const [x, y, z] = center;
