@@ -109,6 +109,13 @@ export type MeshAdapter = {
   tileState(id: string): MeshTileState;
   /** All admitted resources, including fallbacks not in the drawn frontier. */
   submittedTileIds(): readonly string[];
+  /**
+   * Changes on every change to the admitted set, and only then.
+   *
+   * Lets a caller index `submittedTileIds()` once and reuse the index across a
+   * batch of admissions instead of rescanning per tile.
+   */
+  submissionRevision(): number;
   /** Drawn geometry used for picking; excludes hidden admitted resources. */
   submittedTiles(): readonly SubmittedMeshTile[];
   stats(): MeshAdapterStats;
@@ -437,7 +444,21 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
   let disposed = false;
   let workRevision = 0;
   const pending = new Map<string, PendingTile>();
+  // Every write goes through `admit`/`withdraw`, which is what keeps
+  // `submissionRevision` an exact record of the admitted set changing.
   const submitted = new Map<string, TileResources>();
+  let submissionRevision = 0;
+  const admit = (id: string, tile: TileResources): void => {
+    submitted.set(id, tile);
+    submissionRevision += 1;
+  };
+  const withdraw = (id: string): TileResources | undefined => {
+    const tile = submitted.get(id);
+    if (!tile) return undefined;
+    submitted.delete(id);
+    submissionRevision += 1;
+    return tile;
+  };
   const pooled = new Map<string, TileResources>();
   const failed = new Set<string>();
   const replacementClaims = new Map<string, string>();
@@ -690,7 +711,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
     if (entry.cancelled || disposed || pending.get(entry.id) !== entry) return;
     attach(entry.resources);
     pending.delete(entry.id);
-    submitted.set(entry.id, entry.resources);
+    admit(entry.id, entry.resources);
     workRevision += 1;
     options.scheduleRender();
     try {
@@ -712,6 +733,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
     for (const tile of pooled.values()) release(tile);
     pending.clear();
     submitted.clear();
+    submissionRevision += 1;
     pooled.clear();
     drawn.clear();
     failed.clear();
@@ -742,7 +764,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
           return "failed";
         }
         pooled.delete(id);
-        submitted.set(id, reusable);
+        admit(id, reusable);
         workRevision += 1;
         options.scheduleRender();
         try {
@@ -1034,9 +1056,8 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
           // can observe the gap, and replacement residency is released before
           // any child becomes submitted.
           for (const id of normalizedReplacements) {
-            const tile = submitted.get(id);
+            const tile = withdraw(id);
             if (!tile) continue;
-            submitted.delete(id);
             drawn.delete(id);
             release(tile);
           }
@@ -1067,9 +1088,8 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         options.scheduleRender();
         return true;
       }
-      const tile = submitted.get(id);
+      const tile = withdraw(id);
       if (!tile) return failed.delete(id);
-      submitted.delete(id);
       drawn.delete(id);
       detach(tile);
       pooled.set(id, tile);
@@ -1150,6 +1170,8 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
             ? "failed"
             : "absent";
     },
+
+    submissionRevision: () => submissionRevision,
 
     submittedTileIds() {
       return [...submitted.keys()];

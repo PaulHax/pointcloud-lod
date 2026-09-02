@@ -547,6 +547,46 @@ describe("vtk mesh adapter", () => {
     adapter.dispose();
   });
 
+  it("moves its submission revision exactly when the admitted set changes", () => {
+    // Callers index `submittedTileIds()` against this revision and reuse the
+    // index until it moves, so a change it fails to report is read as a stale
+    // admitted set — a tile that silently keeps its resources through a
+    // replacement, or one missing from a replacement list.
+    const scheduler = createSubmissionScheduler({
+      scheduleRender: vi.fn(),
+      maxBytesPerFrame: 1024,
+    });
+    const adapter = createMeshAdapter({
+      renderer: { addActor: vi.fn(), removeActor: vi.fn() },
+      scheduleRender: vi.fn(),
+      submissions: scheduler,
+    });
+    const seen: number[] = [];
+    const note = () => seen.push(adapter.submissionRevision());
+
+    note();
+    adapter.submitTile("root", content());
+    // Queued, not yet admitted.
+    note();
+    scheduler.prepareFrame();
+    note();
+    adapter.submitTile("root/0", content());
+    scheduler.prepareFrame();
+    note();
+    adapter.retireTile("root");
+    note();
+    // Retiring what is already gone changes nothing.
+    adapter.retireTile("root");
+    note();
+    expect(adapter.submittedTileIds()).toEqual(["root/0"]);
+    adapter.clearTiles();
+    note();
+
+    const moved = seen.slice(1).map((value, index) => value !== seen[index]);
+    expect(moved).toEqual([false, true, true, true, false, true]);
+    adapter.dispose();
+  });
+
   it("clears submitted actors even when they are outside the exact drawn pick set", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
     const scheduler = createSubmissionScheduler({

@@ -54,6 +54,21 @@ import {
   type TilesetTraversalResult,
 } from "./traversal";
 
+/**
+ * Proper ancestor ids of a tile, deepest first.
+ *
+ * Tile ids are `/`-joined child indices under the tileset root, so an ancestor
+ * is exactly a `/`-prefix. Walking them costs the tile's depth, where asking
+ * which of a set of ids is an ancestor costs the size of that set.
+ */
+const ancestorIds = (id: string): string[] => {
+  const ancestors: string[] = [];
+  for (let cut = id.indexOf("/"); cut !== -1; cut = id.indexOf("/", cut + 1)) {
+    ancestors.push(id.slice(0, cut));
+  }
+  return ancestors.reverse();
+};
+
 const errorMessage = (error: unknown): string => {
   if (!(error instanceof Error)) return String(error);
   const messages = [error.message];
@@ -252,22 +267,60 @@ export const createTiles3dMember = (
     return result;
   };
 
+  /**
+   * Ids grouped under every ancestor prefix, so "the subtree under x" is one
+   * lookup instead of a prefix scan of the whole list.
+   */
+  const indexByAncestor = (ids: readonly string[]): Map<string, string[]> => {
+    const index = new Map<string, string[]>();
+    for (const id of ids) {
+      for (const ancestor of ancestorIds(id)) {
+        const bucket = index.get(ancestor);
+        if (bucket) bucket.push(id);
+        else index.set(ancestor, [id]);
+      }
+    }
+    return index;
+  };
+
+  // The desired set changes only with the selection that produced it, and the
+  // admitted set only when the adapter says so, so each index is rebuilt once
+  // per change rather than once per admission. Both are read many times per
+  // admission and once per blocked tile across a whole selection refresh,
+  // which is where scanning instead used to cost O(tiles^2).
+  let desiredIndex = new Map<string, string[]>();
+  let desiredIndexOf: TilesetTraversalResult | null = null;
+  let submittedIndex = new Map<string, string[]>();
+  let submittedIndexRevision: number | null = null;
+
+  const desiredDescendants = (id: string): readonly string[] => {
+    if (!traversal) return [];
+    if (desiredIndexOf !== traversal) {
+      desiredIndex = indexByAncestor(traversal.desiredTileIds);
+      desiredIndexOf = traversal;
+    }
+    return desiredIndex.get(id) ?? [];
+  };
+
   /** Submitted descendants a newly admitted tile replaces under REPLACE. */
-  const replacedDescendants = (id: string): string[] =>
-    adapter
-      .submittedTileIds()
-      .filter((submittedId) => submittedId.startsWith(`${id}/`));
+  const replacedDescendants = (id: string): string[] => {
+    const revision = adapter.submissionRevision();
+    if (submittedIndexRevision !== revision) {
+      submittedIndex = indexByAncestor(adapter.submittedTileIds());
+      submittedIndexRevision = revision;
+    }
+    return [...(submittedIndex.get(id) ?? [])];
+  };
+
+  /** Submitted ancestors of a tile, deepest first. */
+  const submittedAncestors = (id: string): string[] =>
+    ancestorIds(id).filter(
+      (candidate) => adapter.tileState(candidate) === "submitted",
+    );
 
   const submittedAncestorReplacement = (id: string): string | null => {
-    if (!traversal) return null;
-    const ancestors = adapter
-      .submittedTileIds()
-      .filter((candidate) => id.startsWith(`${candidate}/`))
-      .sort((left, right) => right.length - left.length);
-    for (const ancestor of ancestors) {
-      const desired = traversal.desiredTileIds.filter((candidate) =>
-        candidate.startsWith(`${ancestor}/`),
-      );
+    for (const ancestor of submittedAncestors(id)) {
+      const desired = desiredDescendants(ancestor);
       if (
         desired.length > 0 &&
         desired.every(
@@ -287,29 +340,21 @@ export const createTiles3dMember = (
     return ancestor === null ? replacements : [...replacements, ancestor];
   };
 
-  const waitingForSiblingBeforeReplacement = (id: string): boolean => {
-    if (!traversal) return false;
-    return adapter.submittedTileIds().some((ancestor) => {
-      if (!id.startsWith(`${ancestor}/`)) return false;
-      const siblings = traversal!.desiredTileIds.filter(
-        (candidate) => candidate !== id && candidate.startsWith(`${ancestor}/`),
-      );
-      return siblings.some((candidate) => {
+  const waitingForSiblingBeforeReplacement = (id: string): boolean =>
+    submittedAncestors(id).some((ancestor) =>
+      desiredDescendants(ancestor).some((candidate) => {
+        if (candidate === id) return false;
         const state = adapter.tileState(candidate);
         return (
           state === "queued" ||
           decoded.has(candidate) ||
           (requested.has(candidate) && readiness(candidate) !== "failed")
         );
-      });
-    });
-  };
+      }),
+    );
 
   const coveredSoonByDesiredDescendants = (id: string): boolean => {
-    if (!traversal) return false;
-    const descendants = traversal.desiredTileIds.filter((candidate) =>
-      candidate.startsWith(`${id}/`),
-    );
+    const descendants = desiredDescendants(id);
     return (
       descendants.length > 0 &&
       descendants.every((candidate) => {
@@ -323,14 +368,9 @@ export const createTiles3dMember = (
 
   const trySubmitDesiredGroup = (id: string) => {
     if (!traversal || !queue) return null;
-    const ancestor = adapter
-      .submittedTileIds()
-      .filter((candidate) => id.startsWith(`${candidate}/`))
-      .sort((left, right) => right.length - left.length)[0];
+    const ancestor = submittedAncestors(id)[0];
     if (!ancestor) return null;
-    const desired = traversal.desiredTileIds.filter((candidate) =>
-      candidate.startsWith(`${ancestor}/`),
-    );
+    const desired = desiredDescendants(ancestor);
     if (
       desired.length < 2 ||
       desired.some(
