@@ -332,9 +332,24 @@ export const createViewGovernor = (
     let held = !disposed;
     if (held) {
       const wasInteracting = interacting();
+      // A fresh gesture reseeds even while the previous one's settle window is
+      // still open, but only while an emergency cut is actually holding the
+      // track under its seed floor. Otherwise a gesture begun inside
+      // `interactionSettleMs` inherits that floor and only rest can lift it: no
+      // capacity sample is eligible while tiles are streaming, so the very
+      // gestures that trigger cuts are the ones that cannot undo them.
+      //
+      // Reseeding unconditionally would instead clear the sample window and the
+      // emergency streak on every nudge, and a user making many gestures each
+      // shorter than the window could never adapt downward at all.
+      const newGesture =
+        kind === "explicit" &&
+        explicitMotion === 0 &&
+        quality.fraction(true) <
+          INTERACTION_SEED_OF_STATIONARY * quality.fraction(false);
       if (kind === "explicit") explicitMotion += 1;
       else inferredMotion += 1;
-      if (!wasInteracting) enterInteraction();
+      if (!wasInteracting || newGesture) enterInteraction();
     }
     return {
       release() {
