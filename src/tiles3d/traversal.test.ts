@@ -238,6 +238,10 @@ describe("traverseTileset", () => {
           [0, 0, 0],
           Array.from({ length: 16 }, () => 0),
         ),
+        // Below any tile's error, so refinement runs to the finest level the
+        // fixture offers rather than to whatever the fixture's absolute scale
+        // happens to make it worth. Zero is rejected by contract.
+        maximumScreenSpaceErrorPx: 1e-6,
       },
     );
 
