@@ -2,8 +2,7 @@ import { integerAtLeast } from "../numeric";
 import {
   DEFAULT_MAXIMUM_SCREEN_SPACE_ERROR_PX,
   DEFAULT_TILES3D_CACHE_BYTES,
-  DEFAULT_TILES3D_MAX_CONCURRENCY,
-  DEFAULT_TILES3D_MIN_CONCURRENCY,
+  DEFAULT_TILES3D_CONCURRENCY,
   DEFAULT_VERTICAL_EXAGGERATION,
   DEFAULT_VERTICAL_PIVOT_Z,
   type Tiles3dMemberConfig,
@@ -65,15 +64,10 @@ export const validateTiles3dMemberConfig = (
   if (!Number.isFinite(maximum) || maximum <= 0) {
     throw new RangeError("maximumScreenSpaceErrorPx must be finite and > 0");
   }
-  const minimumConcurrency = integerAtLeast(
-    "minConcurrency",
-    config.minConcurrency ?? DEFAULT_TILES3D_MIN_CONCURRENCY,
+  const concurrency = integerAtLeast(
+    "concurrency",
+    config.concurrency ?? DEFAULT_TILES3D_CONCURRENCY,
     1,
-  );
-  const maximumConcurrency = integerAtLeast(
-    "maxConcurrency",
-    config.maxConcurrency ?? DEFAULT_TILES3D_MAX_CONCURRENCY,
-    minimumConcurrency,
   );
   const cacheBytes = config.cacheBytes ?? DEFAULT_TILES3D_CACHE_BYTES;
   if (!Number.isFinite(cacheBytes) || cacheBytes < 0) {
@@ -104,8 +98,7 @@ export const validateTiles3dMemberConfig = (
   }
   return {
     ...config,
-    minConcurrency: minimumConcurrency,
-    maxConcurrency: maximumConcurrency,
+    concurrency,
     cacheBytes,
     verticalExaggeration,
     verticalPivotZ,

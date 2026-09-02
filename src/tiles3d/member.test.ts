@@ -119,8 +119,7 @@ const harness = (withChildren = false, schedulerBytes = 1024) => {
     revision: "r1",
     tilesetToScene: identity,
     maximumScreenSpaceErrorPx: 4,
-    minConcurrency: 1,
-    maxConcurrency: 3,
+    concurrency: 3,
     fetchTileset: async () => ({
       ok: true,
       status: 200,
@@ -650,7 +649,7 @@ describe("createTiles3dMember", () => {
     member.dispose();
   });
 
-  it("maps quality to SSE and bounded concurrency and contains source errors", async () => {
+  it("maps quality to SSE and contains source errors", async () => {
     const h = harness();
     const onError = vi.fn();
     const member = createTiles3dMember(h.context, {

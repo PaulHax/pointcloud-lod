@@ -26,8 +26,7 @@ import { createMeshPickSet } from "./meshPicking";
 import {
   DEFAULT_MAXIMUM_SCREEN_SPACE_ERROR_PX,
   DEFAULT_TILES3D_CACHE_BYTES,
-  DEFAULT_TILES3D_MAX_CONCURRENCY,
-  DEFAULT_TILES3D_MIN_CONCURRENCY,
+  DEFAULT_TILES3D_CONCURRENCY,
   DEFAULT_TILES3D_SUBTREE_CACHE_BYTES,
   DEFAULT_VERTICAL_EXAGGERATION,
   DEFAULT_VERTICAL_PIVOT_Z,
@@ -223,13 +222,8 @@ export const createTiles3dMember = (
   const traversalQualityFraction = (): number =>
     memoryConstrained ? 1 : allocation.qualityFraction;
 
-  const concurrency = (): number => {
-    const minimum = config.minConcurrency ?? DEFAULT_TILES3D_MIN_CONCURRENCY;
-    const maximum = config.maxConcurrency ?? DEFAULT_TILES3D_MAX_CONCURRENCY;
-    return Math.round(
-      minimum + (maximum - minimum) * allocation.qualityFraction,
-    );
-  };
+  const concurrency = (): number =>
+    config.concurrency ?? DEFAULT_TILES3D_CONCURRENCY;
 
   const setQueueSnapshot = (snapshot: ContentQueueSnapshot | null): void => {
     queueSnapshot = snapshot;
@@ -909,11 +903,6 @@ export const createTiles3dMember = (
       )) {
         if (requested.has(id)) admissionBlocked.add(id);
       }
-      queue?.configure({
-        maxConcurrency: concurrency(),
-        maxDecodedBytes: config.cacheBytes ?? DEFAULT_TILES3D_CACHE_BYTES,
-      });
-      subtreeStore?.configure({ maxConcurrency: concurrency() });
       refreshSelection();
       // An oversize decoded value is deliberately not cached by ContentQueue.
       // If it was blocked by the previous GPU allowance, deselect/reselect it
