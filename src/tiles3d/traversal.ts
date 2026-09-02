@@ -72,6 +72,11 @@ type WorldBox = {
   readonly axes: readonly [Vec3, Vec3, Vec3];
 };
 
+type TilePlacement = {
+  transform: readonly number[];
+  bounds: WorldBox;
+};
+
 const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 
 const transformPoint = (matrix: readonly number[], point: Vec3): Vec3 => [
@@ -383,8 +388,72 @@ const implicitHierarchy = (
 const hasContent = (tile: TilesetTile): boolean =>
   tile.contentUrl !== undefined;
 
+const sameHierarchy = (
+  left: SubtreeStoreSnapshot | null | undefined,
+  right: SubtreeStoreSnapshot | null | undefined,
+): boolean => {
+  if (left === right) return true;
+  if (
+    !left ||
+    !right ||
+    left.revision !== right.revision ||
+    left.configGeneration !== right.configGeneration ||
+    left.subtreeById.size !== right.subtreeById.size
+  )
+    return false;
+  for (const [id, subtree] of left.subtreeById) {
+    if (right.subtreeById.get(id) !== subtree) return false;
+  }
+  const failed = (snapshot: SubtreeStoreSnapshot) =>
+    new Set(
+      snapshot.entries
+        .filter((entry) => entry.status === "failed")
+        .map((entry) => entry.id),
+    );
+  const a = failed(left),
+    b = failed(right);
+  return a.size === b.size && [...a].every((id) => b.has(id));
+};
+
+/** Per-member cache of one hierarchy, bounded by the current subtree store.
+ * Camera, readiness and quality are still evaluated on every traversal.
+ */
+export const createTilesetTraversal = () => {
+  let root: TilesetTile | undefined;
+  let snapshot: SubtreeStoreSnapshot | null | undefined;
+  let hierarchy: MaterializedHierarchy | undefined;
+  let modelMatrix: readonly number[] | undefined;
+  const placements = new Map<TilesetTile, TilePlacement>();
+  return (options: TilesetTraversalOptions): TilesetTraversalResult => {
+    if (root !== options.root || !sameHierarchy(snapshot, options.subtrees)) {
+      hierarchy = undefined;
+      placements.clear();
+    }
+    const nextMatrix = options.modelMatrix ?? IDENTITY;
+    if (
+      !modelMatrix ||
+      nextMatrix.some((value, i) => value !== modelMatrix![i])
+    ) {
+      modelMatrix = Array.from(nextMatrix);
+      placements.clear();
+    }
+    root = options.root;
+    snapshot = options.subtrees;
+    hierarchy ??= root.implicitTiling
+      ? implicitHierarchy(root, snapshot)
+      : explicitHierarchy(root);
+    return traverseHierarchy(options, hierarchy, placements);
+  };
+};
+
 export const traverseTileset = (
   options: TilesetTraversalOptions,
+): TilesetTraversalResult => traverseHierarchy(options);
+
+const traverseHierarchy = (
+  options: TilesetTraversalOptions,
+  materialized?: MaterializedHierarchy,
+  placements?: Map<TilesetTile, TilePlacement>,
 ): TilesetTraversalResult => {
   if (
     !Number.isFinite(options.maximumScreenSpaceErrorPx) ||
@@ -405,9 +474,11 @@ export const traverseTileset = (
   const effective = options.maximumScreenSpaceErrorPx / Math.max(quality, 0.05);
   const planes = frustumPlanes(options.camera.viewProj);
   const culled: string[] = [];
-  const hierarchy = options.root.implicitTiling
-    ? implicitHierarchy(options.root, options.subtrees)
-    : explicitHierarchy(options.root);
+  const hierarchy =
+    materialized ??
+    (options.root.implicitTiling
+      ? implicitHierarchy(options.root, options.subtrees)
+      : explicitHierarchy(options.root));
   const neededSubtrees = new Map<string, SubtreeRequest>();
 
   const hasSubmittedDescendant = (tile: TilesetTile): boolean =>
@@ -421,11 +492,19 @@ export const traverseTileset = (
     tile: TilesetTile,
     parentTransform: readonly number[],
   ): VisitResult => {
-    const accumulated = multiplyTilesetMatrices(
-      parentTransform,
-      tile.transform,
-    );
-    const bounds = worldBox(tile.boundingVolume, accumulated);
+    let placement = placements?.get(tile);
+    if (!placement) {
+      const transform = multiplyTilesetMatrices(
+        parentTransform,
+        tile.transform,
+      );
+      placement = {
+        transform,
+        bounds: worldBox(tile.boundingVolume, transform),
+      };
+      placements?.set(tile, placement);
+    }
+    const { transform: accumulated, bounds } = placement;
     if (!boxIntersectsFrustum(bounds, planes)) {
       culled.push(tile.id);
       return {

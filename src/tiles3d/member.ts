@@ -50,7 +50,10 @@ import {
   type SubtreeStore,
   type SubtreeStoreSnapshot,
 } from "./subtreeStore";
-import { traverseTileset, type TilesetTraversalResult } from "./traversal";
+import {
+  createTilesetTraversal,
+  type TilesetTraversalResult,
+} from "./traversal";
 
 const errorMessage = (error: unknown): string => {
   if (!(error instanceof Error)) return String(error);
@@ -108,6 +111,7 @@ export const createTiles3dMember = (
   context: StreamedMemberContext,
   initialConfig: Tiles3dMemberConfig,
 ): StreamedMember => {
+  let traverseTileset = createTilesetTraversal();
   let config = validateTiles3dMemberConfig(initialConfig);
   let active = true;
   let disposed = false;
@@ -257,15 +261,13 @@ export const createTiles3dMember = (
   /** Submitted descendants a newly admitted tile replaces under REPLACE. */
   const replacedDescendants = (id: string): string[] =>
     adapter
-      .submittedTiles()
-      .map((tile) => tile.id)
+      .submittedTileIds()
       .filter((submittedId) => submittedId.startsWith(`${id}/`));
 
   const submittedAncestorReplacement = (id: string): string | null => {
     if (!traversal) return null;
     const ancestors = adapter
-      .submittedTiles()
-      .map((tile) => tile.id)
+      .submittedTileIds()
       .filter((candidate) => id.startsWith(`${candidate}/`))
       .sort((left, right) => right.length - left.length);
     for (const ancestor of ancestors) {
@@ -293,10 +295,10 @@ export const createTiles3dMember = (
 
   const waitingForSiblingBeforeReplacement = (id: string): boolean => {
     if (!traversal) return false;
-    return adapter.submittedTiles().some((tile) => {
-      if (!id.startsWith(`${tile.id}/`)) return false;
+    return adapter.submittedTileIds().some((ancestor) => {
+      if (!id.startsWith(`${ancestor}/`)) return false;
       const siblings = traversal!.desiredTileIds.filter(
-        (candidate) => candidate !== id && candidate.startsWith(`${tile.id}/`),
+        (candidate) => candidate !== id && candidate.startsWith(`${ancestor}/`),
       );
       return siblings.some((candidate) => {
         const state = adapter.tileState(candidate);
@@ -328,8 +330,7 @@ export const createTiles3dMember = (
   const trySubmitDesiredGroup = (id: string) => {
     if (!traversal || !queue) return null;
     const ancestor = adapter
-      .submittedTiles()
-      .map((tile) => tile.id)
+      .submittedTileIds()
       .filter((candidate) => id.startsWith(`${candidate}/`))
       .sort((left, right) => right.length - left.length)[0];
     if (!ancestor) return null;
@@ -418,8 +419,10 @@ export const createTiles3dMember = (
     pickSet.replaceDrawn([]);
   };
 
-  const updateDrawSet = (): void => {
-    if (!drawSetDirty) return;
+  const updateDrawSet = (selectionComplete = false): void => {
+    // Cached-content callbacks can run synchronously inside setSelection.
+    // Publish coverage once that batch has finished, not once per callback.
+    if (!drawSetDirty || (refreshing && !selectionComplete)) return;
     drawSetDirty = false;
     if (!source || !camera || !active || disposed) {
       adapter.setDrawnTiles([]);
@@ -446,7 +449,7 @@ export const createTiles3dMember = (
         subtreeStore?.setSelection([]);
         for (const id of requested) adapter.cancelTile(id);
         requested.clear();
-        updateDrawSet();
+        updateDrawSet(true);
         return;
       }
       selectionPasses += 1;
@@ -493,7 +496,7 @@ export const createTiles3dMember = (
           }
         }
       }
-      updateDrawSet();
+      updateDrawSet(true);
     } finally {
       refreshing = false;
       context.onWorkChange?.();
@@ -794,6 +797,7 @@ export const createTiles3dMember = (
       config = next;
       if (placementChanged) applyPlacement();
       if (sourceChanged || decodeChanged) {
+        traverseTileset = createTilesetTraversal();
         configGeneration += 1;
         queue?.dispose();
         queue = null;
@@ -996,6 +1000,7 @@ export const createTiles3dMember = (
       disposed = true;
       active = false;
       sourceState = "disposed";
+      traverseTileset = createTilesetTraversal();
       loadGeneration += 1;
       loadController?.abort();
       queue?.dispose();

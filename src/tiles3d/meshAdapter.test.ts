@@ -562,8 +562,10 @@ describe("vtk mesh adapter", () => {
     scheduler.prepareFrame();
     adapter.setDrawnTiles([]);
     expect(adapter.submittedTiles()).toEqual([]);
+    expect(adapter.submittedTileIds()).toEqual(["hidden-fallback"]);
     expect(adapter.stats().submittedTiles).toBe(1);
     adapter.clearTiles();
+    expect(adapter.submittedTileIds()).toEqual([]);
     expect(adapter.stats()).toMatchObject({
       submittedTiles: 0,
       residentBytes: 0,

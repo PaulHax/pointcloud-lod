@@ -107,6 +107,9 @@ export type MeshAdapter = {
   /** Retire every queued/submitted tile, including currently hidden fallbacks. */
   clearTiles(): void;
   tileState(id: string): MeshTileState;
+  /** All admitted resources, including fallbacks not in the drawn frontier. */
+  submittedTileIds(): readonly string[];
+  /** Drawn geometry used for picking; excludes hidden admitted resources. */
   submittedTiles(): readonly SubmittedMeshTile[];
   stats(): MeshAdapterStats;
   dispose(): void;
@@ -1146,6 +1149,10 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
           : failed.has(id)
             ? "failed"
             : "absent";
+    },
+
+    submittedTileIds() {
+      return [...submitted.keys()];
     },
 
     submittedTiles() {

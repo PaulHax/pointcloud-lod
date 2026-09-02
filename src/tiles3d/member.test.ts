@@ -151,6 +151,112 @@ const harness = (withChildren = false, schedulerBytes = 1024) => {
 describe("createTiles3dMember", () => {
   beforeEach(resetStubs);
 
+  it.each([104, 110])(
+    "recovers mixed pooled and GPU-evicted children within a %i-byte budget",
+    async (budget) => {
+      const h = harness(true, 1024);
+      const member = createTiles3dMember(h.context, h.config);
+      const drain = async () => {
+        for (let i = 0; i < 15; i++) {
+          await settle();
+          while (h.submissions.hasPending()) h.submissions.prepareFrame();
+          if (member.governorInputs().work.operations === 0) break;
+        }
+      };
+      member.applyAllocation({
+        qualityFraction: 1,
+        memoryBudgetBytes: 4096,
+        regime: "stationary",
+      });
+      member.setCamera(view);
+      await drain();
+      expect(member.stats()).toMatchObject({
+        memoryConstrained: false,
+        renderer: { drawnTiles: 2 },
+      });
+      member.setCamera({ ...view, position: [0, 0, -1000] });
+      await drain();
+      expect(member.stats()).toMatchObject({
+        memoryConstrained: false,
+        renderer: { drawnTiles: 1 },
+      });
+      member.applyAllocation({
+        qualityFraction: 1,
+        memoryBudgetBytes: budget,
+        regime: "stationary",
+      });
+      await drain();
+      const away = [...identity];
+      away[12] = 10;
+      member.setCamera({ ...view, viewProj: away });
+      await drain();
+      expect(member.stats()).toMatchObject({
+        memoryConstrained: false,
+        renderer: { drawnTiles: 0 },
+      });
+      member.setCamera(view);
+      await drain();
+      expect(member.stats()).toMatchObject({
+        memoryConstrained: false,
+        renderer: { drawnTiles: 2, drawnTileIds: ["root/0", "root/1"] },
+      });
+      expect(member.pick(view, 50, 50)?.status).toBe("hit");
+      member.dispose();
+    },
+  );
+
+  it("batches drawn coverage when many pooled tiles are selected again", async () => {
+    const h = harness();
+    const manifest = {
+      ...document(),
+      root: tile(
+        "root.glb",
+        8,
+        Array.from({ length: 24 }, (_, i) => tile(`${i}.glb`, 0)),
+      ),
+    };
+    const member = createTiles3dMember(h.context, {
+      ...h.config,
+      fetchTileset: async () => ({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => manifest,
+      }),
+    });
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    for (
+      let i = 0;
+      i < 30 &&
+      (member.stats() as Tiles3dMemberStats).renderer.drawnTiles !== 24;
+      i++
+    ) {
+      await settle();
+      while (h.submissions.hasPending()) h.submissions.prepareFrame();
+    }
+    expect(member.stats()).toMatchObject({ renderer: { drawnTiles: 24 } });
+    member.setCamera({ ...view, position: [0, 0, -1000] });
+    expect(member.stats()).toMatchObject({ renderer: { drawnTiles: 1 } });
+    const before = (member.stats() as Tiles3dMemberStats).selectionPasses;
+    const decodeCount = h.decodedRequests.length;
+    member.setCamera(view);
+    expect(member.stats()).toMatchObject({ renderer: { drawnTiles: 24 } });
+    expect(member.pick(view, 50, 50)?.status).toBe("hit");
+    expect(h.decodedRequests).toHaveLength(decodeCount);
+    expect(h.submissions.hasPending()).toBe(false);
+    // One request-selection pass and one coverage pass per refresh, including
+    // the follow-up that releases the ancestor after pooled admissions.
+    expect(
+      (member.stats() as Tiles3dMemberStats).selectionPasses - before,
+    ).toBeLessThanOrEqual(4);
+    member.dispose();
+  });
+
   it("drives implicit subtree arrival into full quadrant content selection", async () => {
     const h = harness();
     const directory = new URL(
