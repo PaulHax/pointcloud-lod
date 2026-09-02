@@ -29,7 +29,6 @@ import {
 } from "./camera";
 import { selectNodes } from "./budget";
 import { scenePoint } from "./frames";
-import { allocatePointPrefixes } from "./drawPlan";
 import { createLruCache } from "./lru";
 import {
   finiteAtLeast,
@@ -340,7 +339,6 @@ export type LodSelectionStats = {
     readonly hierarchyBlockedNodes: number;
     readonly tileBlockedNodes: number;
     readonly budgetBlockedNodes: number;
-    readonly drawBlockedNodes: number;
     readonly projectedSpacingCssPx: {
       readonly p25: number | null;
       readonly p50: number | null;
@@ -354,12 +352,10 @@ export type LodSelectionStats = {
 export type LodDrawPlanStats = {
   /** Increments only when at least one tile prefix changes. */
   readonly revision: number;
-  /** Exact point allowance supplied to the per-tile allocator. */
+  /** The selection's points scaled by the density fraction. */
   readonly pointBudget: number;
+  /** Points the per-tile prefixes actually draw, after rounding. */
   readonly plannedPoints: number;
-  readonly fullTiles: number;
-  readonly partialTiles: number;
-  readonly skippedTiles: number;
 };
 
 /**
@@ -643,7 +639,6 @@ const emptyReadyTerminalFrontier =
     hierarchyBlockedNodes: 0,
     tileBlockedNodes: 0,
     budgetBlockedNodes: 0,
-    drawBlockedNodes: 0,
     projectedSpacingCssPx: spacingQuantiles([]),
   });
 
@@ -1067,9 +1062,6 @@ export const createLodController = (
     revision: 0,
     pointBudget: 0,
     plannedPoints: 0,
-    fullTiles: 0,
-    partialTiles: 0,
-    skippedTiles: 0,
   };
 
   /**
@@ -1319,42 +1311,33 @@ export const createLodController = (
   };
 
   /**
-   * Allocate the governor's exact draw allowance over the selected tree.
-   * Selection and residency stay unchanged: this only chooses progressive VBO
-   * prefixes, with a complete parent required before any child can draw.
+   * Thin every selected tile to the governor's draw allowance.
+   *
+   * Selection and residency stay unchanged: only the progressive VBO prefixes
+   * move, and they move together. Every tile keeps the same fraction of its
+   * points, so a reduced allowance reads as a uniformly sparser cloud rather
+   * than as whole tiles dropping out of the deepest levels while their
+   * neighbours stay dense.
    */
   const updateDrawPlan = (): void => {
-    const pointBudget = Math.floor(
-      selectionStats.targetPoints * densityFraction,
-    );
-    const allocation = allocatePointPrefixes({
-      root: ROOT_KEY_STRING,
-      pointBudget,
-      getCandidate: (keyString) => {
-        if (!target.has(keyString)) return undefined;
-        const entry = hierarchy.get(keyString);
-        if (entry === undefined) return undefined;
-        const key = keyFromString(keyString);
-        return {
-          key: keyString,
-          pointCount: entry.pointCount,
-          priority: -centerOffsetFor(keyString),
-          secondaryPriority: sseFor(keyString),
-          children: childrenOf(key, entry)
-            .map(keyToString)
-            .filter((child) => target.has(child)),
-        };
-      },
-    });
-    const changed = !samePrefixes(drawPrefixes, allocation.prefixes);
-    drawPrefixes = allocation.prefixes;
+    const prefixes = new Map<string, number>();
+    let plannedPoints = 0;
+    for (const keyString of target) {
+      const entry = hierarchy.get(keyString);
+      if (entry === undefined || entry.pointCount === 0) continue;
+      const prefix = Math.min(
+        entry.pointCount,
+        Math.ceil(entry.pointCount * densityFraction),
+      );
+      prefixes.set(keyString, prefix);
+      plannedPoints += prefix;
+    }
+    const changed = !samePrefixes(drawPrefixes, prefixes);
+    drawPrefixes = prefixes;
     drawPlanStats = {
       revision: drawPlanStats.revision + (changed ? 1 : 0),
-      pointBudget,
-      plannedPoints: allocation.plannedPoints,
-      fullTiles: allocation.fullTiles,
-      partialTiles: allocation.partialTiles,
-      skippedTiles: allocation.skippedTiles,
+      pointBudget: Math.floor(selectionStats.targetPoints * densityFraction),
+      plannedPoints,
     };
     if (!changed) return;
     onDrawPlan({
@@ -1375,7 +1358,6 @@ export const createLodController = (
     hierarchy?: boolean;
     tile?: boolean;
     budget?: boolean;
-    draw?: boolean;
   };
 
   /**
@@ -1421,12 +1403,6 @@ export const createLodController = (
       if (entry === undefined) return;
       if (requireReady && !isEntryReady(keyString, entry)) return;
 
-      const prefix = drawPrefixes.get(keyString) ?? 0;
-      if (entry.pointCount > 0 && prefix < entry.pointCount) {
-        onTerminal(keyString, entry, { draw: true });
-        return;
-      }
-
       const children = childrenOf(key, entry);
       if (children.length === 0) {
         onTerminal(keyString, entry, { leaf: true });
@@ -1440,7 +1416,6 @@ export const createLodController = (
       let hierarchyBlocked = false;
       let tileBlocked = false;
       let budgetBlocked = false;
-      let drawBlocked = false;
       const openChildren: VoxelKey[] = [];
       for (const child of children) {
         const childString = keyToString(child);
@@ -1462,13 +1437,6 @@ export const createLodController = (
           budgetBlocked = budgetSkipped.has(childString) || budgetBlocked;
           continue;
         }
-        if (
-          childEntry.pointCount > 0 &&
-          (drawPrefixes.get(childString) ?? 0) === 0
-        ) {
-          drawBlocked = true;
-          continue;
-        }
         if (requireReady && !isEntryReady(childString, childEntry)) {
           tileBlocked = true;
           continue;
@@ -1476,12 +1444,11 @@ export const createLodController = (
         openChildren.push(child);
       }
 
-      if (hierarchyBlocked || tileBlocked || budgetBlocked || drawBlocked) {
+      if (hierarchyBlocked || tileBlocked || budgetBlocked) {
         onTerminal(keyString, entry, {
           hierarchy: hierarchyBlocked,
           tile: tileBlocked,
           budget: budgetBlocked,
-          draw: drawBlocked,
         });
       }
       for (const child of openChildren) walk(child);
@@ -1573,7 +1540,6 @@ export const createLodController = (
       let hierarchyBlockedNodes = 0;
       let tileBlockedNodes = 0;
       let budgetBlockedNodes = 0;
-      let drawBlockedNodes = 0;
 
       walkTerminals(
         frustumPlanes(currentView.viewProj),
@@ -1591,7 +1557,6 @@ export const createLodController = (
           if (reasons.hierarchy) hierarchyBlockedNodes += 1;
           if (reasons.tile) tileBlockedNodes += 1;
           if (reasons.budget) budgetBlockedNodes += 1;
-          if (reasons.draw) drawBlockedNodes += 1;
         },
       );
 
@@ -1602,7 +1567,6 @@ export const createLodController = (
         hierarchyBlockedNodes,
         tileBlockedNodes,
         budgetBlockedNodes,
-        drawBlockedNodes,
         projectedSpacingCssPx: spacingQuantiles(values),
       };
       return frontierCache;

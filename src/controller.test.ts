@@ -424,12 +424,16 @@ describe("createLodController", () => {
     expect(loadCalls).toEqual(beforeLoads);
     expect(batches).toHaveLength(beforeBatches);
     expect(onDrawPlan).toHaveBeenLastCalledWith({
-      entries: [{ key: ROOT_KEY, pointCount: 55 }],
+      entries: [
+        { key: ROOT_KEY, pointCount: 25 },
+        { key: keyFromString("1-0-0-0"), pointCount: 15 },
+        { key: keyFromString("1-1-0-0"), pointCount: 15 },
+      ],
     });
     controller.dispose();
   });
 
-  it("keeps coarse peripheral coverage when moving density reduces the draw budget", async () => {
+  it("thins every selected tile by the same fraction when moving density reduces the draw budget", async () => {
     const tree: Record<string, FakeEntry> = {
       "0-0-0-0": {
         pointCount: 10,
@@ -442,7 +446,7 @@ describe("createLodController", () => {
         children: ["2-0-0-0"],
       },
       "1-1-0-0": {
-        pointCount: 10,
+        pointCount: 7,
         bounds: { min: [0.5, -0.1, -2], max: [0.7, 0.1, -1] },
       },
       "2-0-0-0": {
@@ -459,15 +463,20 @@ describe("createLodController", () => {
     controller.setCamera(FRAMED_VIEW);
     await settle();
 
-    controller.setDensityFraction(0.875);
+    controller.setDensityFraction(0.4);
 
+    // Every tile keeps the same fraction; a partial point rounds up.
     expect(onDrawPlan).toHaveBeenLastCalledWith({
       entries: [
-        { key: keyFromString("0-0-0-0"), pointCount: 10 },
-        { key: keyFromString("1-0-0-0"), pointCount: 10 },
-        { key: keyFromString("1-1-0-0"), pointCount: 10 },
-        { key: keyFromString("2-0-0-0"), pointCount: 5 },
+        { key: keyFromString("0-0-0-0"), pointCount: 4 },
+        { key: keyFromString("1-0-0-0"), pointCount: 4 },
+        { key: keyFromString("1-1-0-0"), pointCount: 3 },
+        { key: keyFromString("2-0-0-0"), pointCount: 4 },
       ],
+    });
+    expect(controller.stats().drawPlan).toMatchObject({
+      pointBudget: 14,
+      plannedPoints: 15,
     });
     controller.dispose();
   });
