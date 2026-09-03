@@ -30,6 +30,7 @@ export type QualityAdjustmentReason =
   | "insufficient-samples"
   | "clamped"
   | "emergency-cut"
+  | "emergency-restore"
   | "seeded";
 
 export type QualityAdjustment = {
@@ -57,6 +58,11 @@ export type AdaptiveQualityOptions = {
 
 export type AdaptiveQualityTrackStats = {
   readonly fraction: number;
+  /**
+   * Fraction an emergency cut took this track down from, while it still owes
+   * that quality back; null when nothing is outstanding.
+   */
+  readonly emergencyCeiling: number | null;
   readonly samples: number;
   readonly estimateMs: number | null;
   /** The configured target, as given. */
@@ -101,6 +107,10 @@ export type AdaptiveQuality = {
   target(interacting: boolean): number;
   restartAt(interacting: boolean, fraction: number, now: number): number;
   reduceNow(interacting: boolean, now: number): number;
+  /** Gives back one emergency cut, never past what the cut took away. */
+  restoreNow(interacting: boolean, now: number): number;
+  /** The estimate below which `recordFrame` would argue for more quality. */
+  increaseThresholdMs(interacting: boolean): number;
   stats(): AdaptiveQualityStats;
 };
 
@@ -145,6 +155,17 @@ type Track = {
   readonly targetMs: number;
   lastAdjust: number;
   lastAdjustment: QualityAdjustment | null;
+  /**
+   * What an emergency cut took this track down from, until it is given back.
+   *
+   * A cut answers a frame the sampling loop is not allowed to answer: it needs
+   * no eligible capacity sample, so it fires while tiles stream. The restore
+   * has to be reachable under those same conditions or quality only ratchets
+   * down for as long as a gesture keeps work pending. This ceiling is what
+   * keeps the restore honest — it can undo a cut and no more, so it can never
+   * stand in for the eligible increase that actually measures capacity.
+   */
+  emergencyCeiling: number | null;
 };
 
 export const createAdaptiveQuality = (
@@ -219,6 +240,7 @@ export const createAdaptiveQuality = (
     targetMs,
     lastAdjust: Number.NEGATIVE_INFINITY,
     lastAdjustment: null,
+    emergencyCeiling: null,
   });
   const stationary = makeTrack(stationaryTargetMs);
   const interaction = makeTrack(interactionTargetMs);
@@ -286,6 +308,7 @@ export const createAdaptiveQuality = (
     }
     track.fraction = next;
     track.lastAdjust = now;
+    track.emergencyCeiling = null;
     record(
       track,
       now,
@@ -324,6 +347,7 @@ export const createAdaptiveQuality = (
       track.fraction = clamp(fraction);
       track.samples.length = 0;
       track.lastAdjust = Number.NEGATIVE_INFINITY;
+      track.emergencyCeiling = null;
       record(track, now, "none", "seeded", from, null);
       return track.fraction;
     },
@@ -335,6 +359,9 @@ export const createAdaptiveQuality = (
       if (next !== from) {
         track.fraction = next;
         track.samples.length = 0;
+        // Successive cuts owe back to the first one's starting point, not to
+        // the step before them.
+        track.emergencyCeiling = Math.max(track.emergencyCeiling ?? 0, from);
       }
       record(
         track,
@@ -347,9 +374,38 @@ export const createAdaptiveQuality = (
       return track.fraction;
     },
 
+    restoreNow(interacting, now) {
+      const track = trackFor(interacting);
+      const ceiling = track.emergencyCeiling;
+      const from = track.fraction;
+      if (ceiling === null) return from;
+      const next = Math.min(ceiling, clamp(from / EMERGENCY_CUT));
+      if (next > from) {
+        track.fraction = next;
+        // The samples behind the cut described a slower machine than the one
+        // measuring now; keeping them would argue the fraction straight back
+        // down on the next eligible adjustment.
+        track.samples.length = 0;
+      }
+      if (next >= ceiling) track.emergencyCeiling = null;
+      record(
+        track,
+        Number.isFinite(now) ? now : (track.lastAdjustment?.atMs ?? 0),
+        next > from ? "increase" : "none",
+        next > from ? "emergency-restore" : "clamped",
+        from,
+        null,
+      );
+      return track.fraction;
+    },
+
+    increaseThresholdMs: (interacting) =>
+      effectiveTargetMs(trackFor(interacting)) * (1 - hysteresis),
+
     stats() {
       const stats = (track: Track): AdaptiveQualityTrackStats => ({
         fraction: track.fraction,
+        emergencyCeiling: track.emergencyCeiling,
         samples: track.samples.length,
         estimateMs: percentileOrNull(track.samples, percentileP),
         targetMs: track.targetMs,
