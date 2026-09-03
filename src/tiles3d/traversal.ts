@@ -38,6 +38,16 @@ export type TilesetTraversalOptions = {
   /** Maximum-axis 3D Tiles convention, or local XY for terrain-derived error. */
   readonly geometricErrorScale?: GeometricErrorScale;
   readonly readiness: (tileId: string) => TileReadiness;
+  /**
+   * Whether a contentful tile may still be refined past, default true.
+   *
+   * Answers "is there any point asking for this tile's children", which is a
+   * different question from whether they have arrived. A caller that knows a
+   * tile's replacement set can never be drawn — it does not fit the memory
+   * allowance — says so here, and the tile is selected as the frontier instead
+   * of being refined past into content that will be requested forever.
+   */
+  readonly refinable?: (tileId: string) => boolean;
   /** Immutable hierarchy state sampled at the beginning of this pass. */
   readonly subtrees?: SubtreeStoreSnapshot | null;
 };
@@ -70,6 +80,11 @@ type Vec3 = readonly [number, number, number];
 type WorldBox = {
   readonly center: Vec3;
   readonly axes: readonly [Vec3, Vec3, Vec3];
+};
+
+type TilePlacement = {
+  transform: readonly number[];
+  bounds: WorldBox;
 };
 
 const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
@@ -383,8 +398,72 @@ const implicitHierarchy = (
 const hasContent = (tile: TilesetTile): boolean =>
   tile.contentUrl !== undefined;
 
+const sameHierarchy = (
+  left: SubtreeStoreSnapshot | null | undefined,
+  right: SubtreeStoreSnapshot | null | undefined,
+): boolean => {
+  if (left === right) return true;
+  if (
+    !left ||
+    !right ||
+    left.revision !== right.revision ||
+    left.configGeneration !== right.configGeneration ||
+    left.subtreeById.size !== right.subtreeById.size
+  )
+    return false;
+  for (const [id, subtree] of left.subtreeById) {
+    if (right.subtreeById.get(id) !== subtree) return false;
+  }
+  const failed = (snapshot: SubtreeStoreSnapshot) =>
+    new Set(
+      snapshot.entries
+        .filter((entry) => entry.status === "failed")
+        .map((entry) => entry.id),
+    );
+  const a = failed(left),
+    b = failed(right);
+  return a.size === b.size && [...a].every((id) => b.has(id));
+};
+
+/** Per-member cache of one hierarchy, bounded by the current subtree store.
+ * Camera, readiness and quality are still evaluated on every traversal.
+ */
+export const createTilesetTraversal = () => {
+  let root: TilesetTile | undefined;
+  let snapshot: SubtreeStoreSnapshot | null | undefined;
+  let hierarchy: MaterializedHierarchy | undefined;
+  let modelMatrix: readonly number[] | undefined;
+  const placements = new Map<TilesetTile, TilePlacement>();
+  return (options: TilesetTraversalOptions): TilesetTraversalResult => {
+    if (root !== options.root || !sameHierarchy(snapshot, options.subtrees)) {
+      hierarchy = undefined;
+      placements.clear();
+    }
+    const nextMatrix = options.modelMatrix ?? IDENTITY;
+    if (
+      !modelMatrix ||
+      nextMatrix.some((value, i) => value !== modelMatrix![i])
+    ) {
+      modelMatrix = Array.from(nextMatrix);
+      placements.clear();
+    }
+    root = options.root;
+    snapshot = options.subtrees;
+    hierarchy ??= root.implicitTiling
+      ? implicitHierarchy(root, snapshot)
+      : explicitHierarchy(root);
+    return traverseHierarchy(options, hierarchy, placements);
+  };
+};
+
 export const traverseTileset = (
   options: TilesetTraversalOptions,
+): TilesetTraversalResult => traverseHierarchy(options);
+
+const traverseHierarchy = (
+  options: TilesetTraversalOptions,
+  materialized?: MaterializedHierarchy,
+  placements?: Map<TilesetTile, TilePlacement>,
 ): TilesetTraversalResult => {
   if (
     !Number.isFinite(options.maximumScreenSpaceErrorPx) ||
@@ -405,9 +484,11 @@ export const traverseTileset = (
   const effective = options.maximumScreenSpaceErrorPx / Math.max(quality, 0.05);
   const planes = frustumPlanes(options.camera.viewProj);
   const culled: string[] = [];
-  const hierarchy = options.root.implicitTiling
-    ? implicitHierarchy(options.root, options.subtrees)
-    : explicitHierarchy(options.root);
+  const hierarchy =
+    materialized ??
+    (options.root.implicitTiling
+      ? implicitHierarchy(options.root, options.subtrees)
+      : explicitHierarchy(options.root));
   const neededSubtrees = new Map<string, SubtreeRequest>();
 
   const hasSubmittedDescendant = (tile: TilesetTile): boolean =>
@@ -421,11 +502,19 @@ export const traverseTileset = (
     tile: TilesetTile,
     parentTransform: readonly number[],
   ): VisitResult => {
-    const accumulated = multiplyTilesetMatrices(
-      parentTransform,
-      tile.transform,
-    );
-    const bounds = worldBox(tile.boundingVolume, accumulated);
+    let placement = placements?.get(tile);
+    if (!placement) {
+      const transform = multiplyTilesetMatrices(
+        parentTransform,
+        tile.transform,
+      );
+      placement = {
+        transform,
+        bounds: worldBox(tile.boundingVolume, transform),
+      };
+      placements?.set(tile, placement);
+    }
+    const { transform: accumulated, bounds } = placement;
     if (!boxIntersectsFrustum(bounds, planes)) {
       culled.push(tile.id);
       return {
@@ -452,17 +541,20 @@ export const traverseTileset = (
 
     const contentful = hasContent(tile);
     // Contentless tiles are hierarchy nodes, not drawable levels of detail.
-    // Their descendants remain reachable regardless of the node's own SSE.
+    // Their descendants remain reachable regardless of the node's own SSE, and
+    // regardless of `refinable` — such a node has no content of its own to
+    // stand as a frontier, so refusing to descend would draw nothing at all.
     const refine =
       tile.children.length > 0 &&
       (!contentful ||
-        screenSpaceError(
+        (screenSpaceError(
           tile,
           accumulated,
           bounds,
           options.camera,
           errorScale,
-        ) > effective);
+        ) > effective &&
+          (options.refinable?.(tile.id) ?? true)));
     const childResults = refine
       ? tile.children.map((child) => visit(child, accumulated))
       : [];

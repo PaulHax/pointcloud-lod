@@ -260,6 +260,7 @@ export const createViewGovernor = (
   let emergencyCooldownUntil = Number.NEGATIVE_INFINITY;
   let lastEmergencyCutAt = Number.NEGATIVE_INFINITY;
   let emergencyStreak = 0;
+  let reliefStreak = 0;
   let eligibleCapacitySamples = 0;
   let rejectedCapacitySamples = 0;
   let lastCapacitySampleEligible: boolean | null = null;
@@ -297,6 +298,7 @@ export const createViewGovernor = (
 
   const enterInteraction = (): void => {
     emergencyStreak = 0;
+    reliefStreak = 0;
     quality.restartAt(
       true,
       Math.max(
@@ -332,9 +334,24 @@ export const createViewGovernor = (
     let held = !disposed;
     if (held) {
       const wasInteracting = interacting();
+      // A fresh gesture reseeds even while the previous one's settle window is
+      // still open, but only while an emergency cut is actually holding the
+      // track under its seed floor. Otherwise a gesture begun inside
+      // `interactionSettleMs` inherits that floor and only rest can lift it: no
+      // capacity sample is eligible while tiles are streaming, so the very
+      // gestures that trigger cuts are the ones that cannot undo them.
+      //
+      // Reseeding unconditionally would instead clear the sample window and the
+      // emergency streak on every nudge, and a user making many gestures each
+      // shorter than the window could never adapt downward at all.
+      const newGesture =
+        kind === "explicit" &&
+        explicitMotion === 0 &&
+        quality.fraction(true) <
+          INTERACTION_SEED_OF_STATIONARY * quality.fraction(false);
       if (kind === "explicit") explicitMotion += 1;
       else inferredMotion += 1;
-      if (!wasInteracting) enterInteraction();
+      if (!wasInteracting || newGesture) enterInteraction();
     }
     return {
       release() {
@@ -443,9 +460,33 @@ export const createViewGovernor = (
       ++emergencyStreak >= EMERGENCY_CONSECUTIVE_FRAMES
     ) {
       emergencyStreak = 0;
+      reliefStreak = 0;
       quality.reduceNow(true, now);
       lastEmergencyCutAt = now;
       emergencyCooldownUntil = now + emergencyCooldownMs;
+    }
+    // The cut above answers a frame no capacity sample is allowed to answer:
+    // it fires while work is pending, which is exactly when eligibility is
+    // withheld. Without a relief that reads the same frames under the same
+    // conditions, a gesture long enough to keep tiles streaming can only
+    // ratchet quality down, and recovers no earlier than the next gesture or
+    // rest. Relief hands back one cut and stops at what the cuts took, so the
+    // eligible loop still owns every fraction above that.
+    const relief =
+      moving() &&
+      !severeInput &&
+      observedMs <= quality.increaseThresholdMs(interacting());
+    if (!relief) reliefStreak = 0;
+    if (
+      relief &&
+      now >= emergencyCooldownUntil &&
+      ++reliefStreak >= EMERGENCY_CONSECUTIVE_FRAMES
+    ) {
+      reliefStreak = 0;
+      const before = quality.fraction(true);
+      if (quality.restoreNow(true, now) !== before) {
+        emergencyCooldownUntil = now + emergencyCooldownMs;
+      }
     }
     return observedMs;
   };
@@ -496,6 +537,7 @@ export const createViewGovernor = (
         emergencyCooldownMs,
       } = configuration);
       emergencyStreak = 0;
+      reliefStreak = 0;
       emergencyCooldownUntil = Number.NEGATIVE_INFINITY;
       lastEmergencyCutAt = Number.NEGATIVE_INFINITY;
       eligibleCapacitySamples = 0;

@@ -7,8 +7,7 @@ import type { MeshAdapterStats } from "./meshAdapter";
 
 export const DEFAULT_MAXIMUM_SCREEN_SPACE_ERROR_PX = 16;
 export const DEFAULT_TILES3D_CACHE_BYTES = 128 * 1024 * 1024;
-export const DEFAULT_TILES3D_MIN_CONCURRENCY = 1;
-export const DEFAULT_TILES3D_MAX_CONCURRENCY = 4;
+export const DEFAULT_TILES3D_CONCURRENCY = 4;
 export const DEFAULT_TILES3D_SUBTREE_CACHE_BYTES = 8 * 1024 * 1024;
 export const DEFAULT_VERTICAL_EXAGGERATION = 1;
 export const DEFAULT_VERTICAL_PIVOT_Z = 0;
@@ -28,8 +27,8 @@ export type Tiles3dMemberConfig = {
   readonly maximumScreenSpaceErrorPx?: number;
   readonly wasm?: DecodeWasmUrls;
   readonly cacheBytes?: number;
-  readonly minConcurrency?: number;
-  readonly maxConcurrency?: number;
+  /** Simultaneous content and subtree fetches. */
+  readonly concurrency?: number;
   readonly maxAttempts?: number;
   readonly retryBackoffMs?: (failedAttempt: number) => number;
   readonly fetchTileset?: TilesetFetch;
@@ -62,6 +61,8 @@ export type Tiles3dMemberStats = {
   readonly effectiveScreenSpaceErrorPx: number;
   readonly sseMultiplier: number;
   readonly memoryConstrained: boolean;
+  /** Submitted tiles whose replacement group did not fit the allowance. */
+  readonly blockedGroups: number;
   readonly selectedTiles: number;
   readonly requestedTiles: number;
   /** Traversal passes, exposed so hosts can verify stationary frame idempotence. */

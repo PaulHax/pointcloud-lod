@@ -26,8 +26,7 @@ import { createMeshPickSet } from "./meshPicking";
 import {
   DEFAULT_MAXIMUM_SCREEN_SPACE_ERROR_PX,
   DEFAULT_TILES3D_CACHE_BYTES,
-  DEFAULT_TILES3D_MAX_CONCURRENCY,
-  DEFAULT_TILES3D_MIN_CONCURRENCY,
+  DEFAULT_TILES3D_CONCURRENCY,
   DEFAULT_TILES3D_SUBTREE_CACHE_BYTES,
   DEFAULT_VERTICAL_EXAGGERATION,
   DEFAULT_VERTICAL_PIVOT_Z,
@@ -50,7 +49,25 @@ import {
   type SubtreeStore,
   type SubtreeStoreSnapshot,
 } from "./subtreeStore";
-import { traverseTileset, type TilesetTraversalResult } from "./traversal";
+import {
+  createTilesetTraversal,
+  type TilesetTraversalResult,
+} from "./traversal";
+
+/**
+ * Proper ancestor ids of a tile, deepest first.
+ *
+ * Tile ids are `/`-joined child indices under the tileset root, so an ancestor
+ * is exactly a `/`-prefix. Walking them costs the tile's depth, where asking
+ * which of a set of ids is an ancestor costs the size of that set.
+ */
+const ancestorIds = (id: string): string[] => {
+  const ancestors: string[] = [];
+  for (let cut = id.indexOf("/"); cut !== -1; cut = id.indexOf("/", cut + 1)) {
+    ancestors.push(id.slice(0, cut));
+  }
+  return ancestors.reverse();
+};
 
 const errorMessage = (error: unknown): string => {
   if (!(error instanceof Error)) return String(error);
@@ -108,6 +125,7 @@ export const createTiles3dMember = (
   context: StreamedMemberContext,
   initialConfig: Tiles3dMemberConfig,
 ): StreamedMember => {
+  let traverseTileset = createTilesetTraversal();
   let config = validateTiles3dMemberConfig(initialConfig);
   let active = true;
   let disposed = false;
@@ -123,6 +141,16 @@ export const createTiles3dMember = (
   };
   let interactionDepth = 0;
   let memoryConstrained = false;
+  /**
+   * Submitted tiles whose complete replacement group did not fit.
+   *
+   * Distinct from `memoryConstrained`, which says the member's whole desired
+   * frontier is unaffordable and answers by falling back to the root. A
+   * blocked group is a fact about one branch: the rest of the tileset is still
+   * affordable at full quality, so refinement stops at this tile and nowhere
+   * else.
+   */
+  const blockedGroupAncestors = new Set<string>();
   let irreducibleBudget = false;
   let constrainedDesiredSignature: string | null = null;
   let configGeneration = 1;
@@ -219,13 +247,8 @@ export const createTiles3dMember = (
   const traversalQualityFraction = (): number =>
     memoryConstrained ? 1 : allocation.qualityFraction;
 
-  const concurrency = (): number => {
-    const minimum = config.minConcurrency ?? DEFAULT_TILES3D_MIN_CONCURRENCY;
-    const maximum = config.maxConcurrency ?? DEFAULT_TILES3D_MAX_CONCURRENCY;
-    return Math.round(
-      minimum + (maximum - minimum) * allocation.qualityFraction,
-    );
-  };
+  const concurrency = (): number =>
+    config.concurrency ?? DEFAULT_TILES3D_CONCURRENCY;
 
   const setQueueSnapshot = (snapshot: ContentQueueSnapshot | null): void => {
     queueSnapshot = snapshot;
@@ -237,6 +260,7 @@ export const createTiles3dMember = (
   const select = (
     maximumScreenSpaceErrorPx: number,
     qualityFraction: number,
+    honourBlockedGroups = true,
   ): TilesetTraversalResult => {
     const result = traverseTileset({
       root: source!.root,
@@ -246,6 +270,9 @@ export const createTiles3dMember = (
       modelMatrix: traversalModelMatrix(),
       geometricErrorScale: config.geometricErrorScale,
       readiness,
+      ...(honourBlockedGroups && blockedGroupAncestors.size > 0
+        ? { refinable: (id: string) => !blockedGroupAncestors.has(id) }
+        : {}),
       subtrees: subtreeSnapshot,
     });
     // This hierarchy is derived from the bounded subtree snapshot. Replacing
@@ -254,24 +281,60 @@ export const createTiles3dMember = (
     return result;
   };
 
+  /**
+   * Ids grouped under every ancestor prefix, so "the subtree under x" is one
+   * lookup instead of a prefix scan of the whole list.
+   */
+  const indexByAncestor = (ids: readonly string[]): Map<string, string[]> => {
+    const index = new Map<string, string[]>();
+    for (const id of ids) {
+      for (const ancestor of ancestorIds(id)) {
+        const bucket = index.get(ancestor);
+        if (bucket) bucket.push(id);
+        else index.set(ancestor, [id]);
+      }
+    }
+    return index;
+  };
+
+  // The desired set changes only with the selection that produced it, and the
+  // admitted set only when the adapter says so, so each index is rebuilt once
+  // per change rather than once per admission. Both are read many times per
+  // admission and once per blocked tile across a whole selection refresh,
+  // which is where scanning instead used to cost O(tiles^2).
+  let desiredIndex = new Map<string, string[]>();
+  let desiredIndexOf: TilesetTraversalResult | null = null;
+  let submittedIndex = new Map<string, string[]>();
+  let submittedIndexRevision: number | null = null;
+
+  const desiredDescendants = (id: string): readonly string[] => {
+    if (!traversal) return [];
+    if (desiredIndexOf !== traversal) {
+      desiredIndex = indexByAncestor(traversal.desiredTileIds);
+      desiredIndexOf = traversal;
+    }
+    return desiredIndex.get(id) ?? [];
+  };
+
   /** Submitted descendants a newly admitted tile replaces under REPLACE. */
-  const replacedDescendants = (id: string): string[] =>
-    adapter
-      .submittedTiles()
-      .map((tile) => tile.id)
-      .filter((submittedId) => submittedId.startsWith(`${id}/`));
+  const replacedDescendants = (id: string): string[] => {
+    const revision = adapter.submissionRevision();
+    if (submittedIndexRevision !== revision) {
+      submittedIndex = indexByAncestor(adapter.submittedTileIds());
+      submittedIndexRevision = revision;
+    }
+    return [...(submittedIndex.get(id) ?? [])];
+  };
+
+  /** Submitted ancestors of a tile, deepest first. */
+  const submittedAncestors = (id: string): string[] =>
+    ancestorIds(id).filter(
+      (candidate) => adapter.tileState(candidate) === "submitted",
+    );
 
   const submittedAncestorReplacement = (id: string): string | null => {
-    if (!traversal) return null;
-    const ancestors = adapter
-      .submittedTiles()
-      .map((tile) => tile.id)
-      .filter((candidate) => id.startsWith(`${candidate}/`))
-      .sort((left, right) => right.length - left.length);
-    for (const ancestor of ancestors) {
-      const desired = traversal.desiredTileIds.filter((candidate) =>
-        candidate.startsWith(`${ancestor}/`),
-      );
+    for (const ancestor of submittedAncestors(id)) {
+      const desired = desiredDescendants(ancestor);
       if (
         desired.length > 0 &&
         desired.every(
@@ -291,29 +354,21 @@ export const createTiles3dMember = (
     return ancestor === null ? replacements : [...replacements, ancestor];
   };
 
-  const waitingForSiblingBeforeReplacement = (id: string): boolean => {
-    if (!traversal) return false;
-    return adapter.submittedTiles().some((tile) => {
-      if (!id.startsWith(`${tile.id}/`)) return false;
-      const siblings = traversal!.desiredTileIds.filter(
-        (candidate) => candidate !== id && candidate.startsWith(`${tile.id}/`),
-      );
-      return siblings.some((candidate) => {
+  const waitingForSiblingBeforeReplacement = (id: string): boolean =>
+    submittedAncestors(id).some((ancestor) =>
+      desiredDescendants(ancestor).some((candidate) => {
+        if (candidate === id) return false;
         const state = adapter.tileState(candidate);
         return (
           state === "queued" ||
           decoded.has(candidate) ||
           (requested.has(candidate) && readiness(candidate) !== "failed")
         );
-      });
-    });
-  };
+      }),
+    );
 
   const coveredSoonByDesiredDescendants = (id: string): boolean => {
-    if (!traversal) return false;
-    const descendants = traversal.desiredTileIds.filter((candidate) =>
-      candidate.startsWith(`${id}/`),
-    );
+    const descendants = desiredDescendants(id);
     return (
       descendants.length > 0 &&
       descendants.every((candidate) => {
@@ -327,15 +382,9 @@ export const createTiles3dMember = (
 
   const trySubmitDesiredGroup = (id: string) => {
     if (!traversal || !queue) return null;
-    const ancestor = adapter
-      .submittedTiles()
-      .map((tile) => tile.id)
-      .filter((candidate) => id.startsWith(`${candidate}/`))
-      .sort((left, right) => right.length - left.length)[0];
+    const ancestor = submittedAncestors(id)[0];
     if (!ancestor) return null;
-    const desired = traversal.desiredTileIds.filter((candidate) =>
-      candidate.startsWith(`${ancestor}/`),
-    );
+    const desired = desiredDescendants(ancestor);
     if (
       desired.length < 2 ||
       desired.some(
@@ -365,23 +414,43 @@ export const createTiles3dMember = (
     return outcome;
   };
 
+  const blockGroupUnder = (id: string): void => {
+    const ancestor = submittedAncestors(id)[0];
+    if (ancestor === undefined) {
+      // No submitted frontier to fall back to: the member as a whole cannot
+      // afford what it wants, which is what `memoryConstrained` is for.
+      memoryConstrained = true;
+      irreducibleBudget = false;
+    } else {
+      blockedGroupAncestors.add(ancestor);
+      for (const candidate of desiredDescendants(ancestor)) {
+        admissionBlocked.add(candidate);
+      }
+    }
+    constrainedDesiredSignature = unconstrainedDesiredSignature();
+    refreshSelection();
+  };
+
   const unconstrainedDesiredSignature = (): string | null => {
     if (!source || !camera) return null;
     selectionPasses += 1;
-    return select(maximumSse(), allocation.qualityFraction).desiredTileIds.join(
-      "\n",
-    );
+    // Deliberately blind to both backoffs: this is the frontier the camera
+    // would ask for if nothing were blocked, and it is the only thing that can
+    // tell a genuinely new view from the one that was already refused.
+    return select(
+      maximumSse(),
+      allocation.qualityFraction,
+      false,
+    ).desiredTileIds.join("\n");
   };
 
   const retryIfDesiredSelectionChanged = (): void => {
-    if (
-      memoryConstrained &&
-      constrainedDesiredSignature !== unconstrainedDesiredSignature()
-    ) {
-      memoryConstrained = false;
-      irreducibleBudget = false;
-      constrainedDesiredSignature = null;
-    }
+    if (!memoryConstrained && blockedGroupAncestors.size === 0) return;
+    if (constrainedDesiredSignature === unconstrainedDesiredSignature()) return;
+    memoryConstrained = false;
+    blockedGroupAncestors.clear();
+    irreducibleBudget = false;
+    constrainedDesiredSignature = null;
   };
 
   const readiness = (id: string) => {
@@ -418,8 +487,10 @@ export const createTiles3dMember = (
     pickSet.replaceDrawn([]);
   };
 
-  const updateDrawSet = (): void => {
-    if (!drawSetDirty) return;
+  const updateDrawSet = (selectionComplete = false): void => {
+    // Cached-content callbacks can run synchronously inside setSelection.
+    // Publish coverage once that batch has finished, not once per callback.
+    if (!drawSetDirty || (refreshing && !selectionComplete)) return;
     drawSetDirty = false;
     if (!source || !camera || !active || disposed) {
       adapter.setDrawnTiles([]);
@@ -446,7 +517,7 @@ export const createTiles3dMember = (
         subtreeStore?.setSelection([]);
         for (const id of requested) adapter.cancelTile(id);
         requested.clear();
-        updateDrawSet();
+        updateDrawSet(true);
         return;
       }
       selectionPasses += 1;
@@ -493,7 +564,7 @@ export const createTiles3dMember = (
           }
         }
       }
-      updateDrawSet();
+      updateDrawSet(true);
     } finally {
       refreshing = false;
       context.onWorkChange?.();
@@ -564,10 +635,11 @@ export const createTiles3dMember = (
           return;
         }
         if (groupOutcome === "budget-blocked") {
-          memoryConstrained = true;
-          constrainedDesiredSignature = unconstrainedDesiredSignature();
-          irreducibleBudget = false;
-          refreshSelection();
+          // The whole replacement set is decoded and it did not fit, so
+          // nothing further is coming for this branch and neither patience
+          // guard below applies. Stop refining past the ancestor it would have
+          // replaced and leave the rest of the tileset at full quality.
+          blockGroupUnder(request.id);
           return;
         }
         const replacements = replacementsForAdmission(request.id);
@@ -761,6 +833,7 @@ export const createTiles3dMember = (
         admissionBlocked.clear();
         admissionFailed.clear();
         memoryConstrained = false;
+        blockedGroupAncestors.clear();
         irreducibleBudget = false;
         constrainedDesiredSignature = null;
         updateDrawSet();
@@ -794,6 +867,7 @@ export const createTiles3dMember = (
       config = next;
       if (placementChanged) applyPlacement();
       if (sourceChanged || decodeChanged) {
+        traverseTileset = createTilesetTraversal();
         configGeneration += 1;
         queue?.dispose();
         queue = null;
@@ -812,6 +886,7 @@ export const createTiles3dMember = (
         admissionBlocked.clear();
         admissionFailed.clear();
         memoryConstrained = false;
+        blockedGroupAncestors.clear();
         irreducibleBudget = false;
         constrainedDesiredSignature = null;
         if (active) beginLoad();
@@ -891,6 +966,7 @@ export const createTiles3dMember = (
       };
       if (allocation.memoryBudgetBytes > previousMemoryBudgetBytes) {
         memoryConstrained = false;
+        blockedGroupAncestors.clear();
         irreducibleBudget = false;
         constrainedDesiredSignature = null;
       } else if (adapter.stats().residentBytes > allocation.memoryBudgetBytes) {
@@ -905,11 +981,6 @@ export const createTiles3dMember = (
       )) {
         if (requested.has(id)) admissionBlocked.add(id);
       }
-      queue?.configure({
-        maxConcurrency: concurrency(),
-        maxDecodedBytes: config.cacheBytes ?? DEFAULT_TILES3D_CACHE_BYTES,
-      });
-      subtreeStore?.configure({ maxConcurrency: concurrency() });
       refreshSelection();
       // An oversize decoded value is deliberately not cached by ContentQueue.
       // If it was blocked by the previous GPU allowance, deselect/reselect it
@@ -966,6 +1037,7 @@ export const createTiles3dMember = (
         effectiveScreenSpaceErrorPx: effectiveSse,
         sseMultiplier: effectiveSse / maximumSse(),
         memoryConstrained,
+        blockedGroups: blockedGroupAncestors.size,
         selectedTiles: traversal?.desiredTileIds.length ?? 0,
         requestedTiles: traversal?.requestedTileIds.length ?? 0,
         selectionPasses,
@@ -996,6 +1068,7 @@ export const createTiles3dMember = (
       disposed = true;
       active = false;
       sourceState = "disposed";
+      traverseTileset = createTilesetTraversal();
       loadGeneration += 1;
       loadController?.abort();
       queue?.dispose();
@@ -1006,6 +1079,7 @@ export const createTiles3dMember = (
       requested.clear();
       decoded.clear();
       admissionBlocked.clear();
+      blockedGroupAncestors.clear();
       admissionFailed.clear();
       adapter.dispose();
       pickSet.dispose();

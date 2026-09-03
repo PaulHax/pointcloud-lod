@@ -120,6 +120,129 @@ describe("createViewGovernor", () => {
     motion.release();
   });
 
+  it("gives an emergency cut back inside the gesture that caused it", () => {
+    const governor = createViewGovernor({ minSamples: 30, cooldownMs: 0 });
+    // Tiles are streaming, which is what withholds eligibility: the sampling
+    // loop that would otherwise raise quality back is shut off for as long as
+    // this holds, while the emergency cut below is not.
+    governor.setWorkState({
+      workPending: true,
+      physicalTileOperations: 4,
+      physicalHierarchyOperations: 0,
+    });
+    const motion = governor.beginMotion("explicit");
+    expect(governor.stats().activity).toMatchObject({
+      workPending: true,
+      measurementEligible: false,
+    });
+
+    governor.recordHostFrame({ hostFrameMs: 40, now: 0 });
+    governor.recordHostFrame({ hostFrameMs: 40, now: 1 });
+    expect(governor.qualityFraction()).toBe(0.5);
+    expect(governor.stats().lastAdjustment?.reason).toBe("emergency-cut");
+    expect(governor.stats().capacitySamples).toMatchObject({ eligible: 0 });
+
+    // The same frames the cut reads, now comfortably inside the target.
+    governor.recordHostFrame({ hostFrameMs: 10, now: 2 });
+    expect(governor.qualityFraction()).toBe(0.5);
+    governor.recordHostFrame({ hostFrameMs: 10, now: 3 });
+    expect(governor.qualityFraction()).toBe(1);
+    expect(governor.stats().lastAdjustment).toMatchObject({
+      reason: "emergency-restore",
+      direction: "increase",
+      fromFraction: 0.5,
+      toFraction: 1,
+    });
+    // Still no eligible sample anywhere: the recovery came from the frames
+    // themselves, not from the loop that was shut off.
+    expect(governor.stats().capacitySamples).toMatchObject({ eligible: 0 });
+    motion.release();
+  });
+
+  it("restores no more quality than the emergency cuts took away", () => {
+    const governor = createViewGovernor({
+      minSamples: 30,
+      cooldownMs: 0,
+      initialFraction: 0.4,
+    });
+    governor.setWorkState({
+      workPending: true,
+      physicalTileOperations: 1,
+      physicalHierarchyOperations: 0,
+    });
+    const motion = governor.beginMotion("explicit");
+    governor.recordHostFrame({ hostFrameMs: 40, now: 0 });
+    governor.recordHostFrame({ hostFrameMs: 40, now: 1 });
+    expect(governor.qualityFraction()).toBeCloseTo(0.2);
+
+    for (let at = 2; at < 40; at += 1) {
+      governor.recordHostFrame({ hostFrameMs: 10, now: at });
+      // Back to where the cut started and never past it: quality above that
+      // has to be earned by an eligible capacity sample.
+      expect(governor.qualityFraction()).toBeLessThanOrEqual(0.4);
+    }
+    expect(governor.qualityFraction()).toBeCloseTo(0.4);
+    motion.release();
+  });
+
+  it("reseeds a gesture that begins inside the previous settle window", () => {
+    vi.useFakeTimers();
+    const governor = createViewGovernor({
+      minSamples: 30,
+      cooldownMs: 0,
+      interactionSettleMs: 1000,
+    });
+    const first = governor.beginMotion("explicit");
+    governor.recordCameraChange();
+    // Two consecutive severe frames per cut, spaced past the emergency
+    // cooldown so all three land.
+    for (const at of [0, 1, 500, 501, 1000, 1001]) {
+      governor.recordTransientFrame({ hostFrameMs: 200, now: at });
+    }
+    expect(governor.qualityFraction()).toBeCloseTo(0.125);
+
+    first.release();
+    // The settle timer is still pending, so the governor never left the
+    // interaction regime and the cut floor is still in force.
+    expect(governor.stats().regime).toBe("interaction");
+
+    const second = governor.beginMotion("explicit");
+    expect(governor.qualityFraction()).toBeCloseTo(0.25);
+    expect(governor.stats().lastAdjustment?.reason).toBe("seeded");
+    second.release();
+  });
+
+  it("leaves an uncut interaction track alone when a gesture repeats", () => {
+    vi.useFakeTimers();
+    const governor = createViewGovernor({
+      minSamples: 2,
+      cooldownMs: 0,
+      hysteresis: 0,
+      interactionSettleMs: 1000,
+    });
+    const sample = (now: number) =>
+      governor.recordCapacitySample({
+        frameMs: 66,
+        regime: "interaction",
+        eligible: true,
+        now,
+      });
+
+    const first = governor.beginMotion("explicit");
+    governor.recordCameraChange();
+    sample(10);
+    first.release();
+
+    // Nothing cut the track, so a repeated nudge must not clear the window it
+    // is still filling. Otherwise a user making many gestures each shorter than
+    // `minSamples` could never accumulate the samples that argue for less
+    // quality, and the emergency streak could never reach two frames either.
+    const second = governor.beginMotion("explicit");
+    sample(11);
+    expect(governor.stats().lastAdjustment?.reason).toBe("above-target");
+    second.release();
+  });
+
   it("infers rendered-camera motion and schedules one stationary frame", () => {
     vi.useFakeTimers();
     const scheduleRender = vi.fn();

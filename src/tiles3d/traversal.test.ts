@@ -4,7 +4,11 @@ import { readFileSync } from "node:fs";
 import type { PerspectiveCameraView } from "../camera";
 import { parseTileset, type TilesetTile } from "./tilesetSource";
 import { createVerticalExaggerationTransform } from "./rtc";
-import { traverseTileset, type TileReadiness } from "./traversal";
+import {
+  createTilesetTraversal,
+  traverseTileset,
+  type TileReadiness,
+} from "./traversal";
 import { parseSubtree } from "./subtree";
 import type { SubtreeStoreSnapshot } from "./subtreeStore";
 import {
@@ -136,6 +140,67 @@ const select = (
   });
 
 describe("traverseTileset", () => {
+  it("reuses hierarchy across camera changes and invalidates replaced or evicted subtrees", () => {
+    const root = implicitRoot();
+    const parsed = parseSubtree(
+      makeSubtreeFixture(),
+      2,
+      SUBTREE_METADATA_SCHEMA,
+    );
+    const snapshot = subtreeSnapshot(parsed);
+    const cached = createTilesetTraversal();
+    const options = {
+      root,
+      subtrees: snapshot,
+      camera: view([0, 0, 10]),
+      maximumScreenSpaceErrorPx: 4,
+      readiness: (_id: string): TileReadiness => "unloaded",
+    };
+    const first = cached(options);
+    const submitted = {
+      ...options,
+      readiness: (_id: string): TileReadiness => "submitted",
+    };
+    const ready = cached(submitted);
+    expect(ready.tileById).toBe(first.tileById);
+    expect(first.drawnTileIds).toEqual([]);
+    expect(ready.drawnTileIds.length).toBeGreaterThan(0);
+    expect(ready).toEqual(traverseTileset(submitted));
+    const coarser = { ...submitted, qualityFraction: 0.05 };
+    expect(cached(coarser)).toEqual(traverseTileset(coarser));
+    const relocated = { ...submitted, modelMatrix: matrix(100) };
+    expect(cached(relocated)).toEqual(traverseTileset(relocated));
+    relocated.modelMatrix[12] = 0;
+    expect(cached(relocated)).toEqual(ready);
+    const moved = {
+      ...options,
+      subtrees: subtreeSnapshot(parsed),
+      camera: view([0, 0, 10], lookAway),
+      readiness: (_id: string): TileReadiness => "submitted",
+    };
+    const second = cached(moved);
+    expect(second.tileById).toBe(first.tileById);
+    expect(second).toEqual(traverseTileset(moved));
+    for (const subtrees of [
+      subtreeSnapshot(
+        parseSubtree(makeSubtreeFixture(), 2, SUBTREE_METADATA_SCHEMA),
+      ),
+      { ...snapshot, entries: [], subtreeById: new Map() },
+      {
+        ...snapshot,
+        entries: snapshot.entries.map((entry) => ({
+          ...entry,
+          status: "failed" as const,
+        })),
+      },
+      snapshot,
+    ]) {
+      const next = { ...options, subtrees };
+      const result = cached(next);
+      expect(result.tileById).not.toBe(second.tileById);
+      expect(result).toEqual(traverseTileset(next));
+    }
+  });
   it("traverses the checked-in producer fixture to its four quadrant contents", () => {
     const directory = new URL(
       "../../test/fixtures/tiles3d-implicit/",
@@ -173,6 +238,10 @@ describe("traverseTileset", () => {
           [0, 0, 0],
           Array.from({ length: 16 }, () => 0),
         ),
+        // Below any tile's error, so refinement runs to the finest level the
+        // fixture offers rather than to whatever the fixture's absolute scale
+        // happens to make it worth. Zero is rejected by contract.
+        maximumScreenSpaceErrorPx: 1e-6,
       },
     );
 
@@ -518,6 +587,17 @@ describe("traverseTileset", () => {
     expect(select(root, {}, { modelMatrix: matrix(4) }).desiredTileIds).toEqual(
       ["root"],
     );
+    const cached = createTilesetTraversal();
+    for (const modelMatrix of [matrix(0), matrix(4), matrix(0)]) {
+      const options = {
+        root,
+        camera: view([0, 0, 10]),
+        maximumScreenSpaceErrorPx: 4,
+        readiness: (_id: string): TileReadiness => "submitted",
+        modelMatrix,
+      };
+      expect(cached(options)).toEqual(traverseTileset(options));
+    }
   });
 
   it("applies pivoted vertical exaggeration to traversal bounds and SSE", () => {

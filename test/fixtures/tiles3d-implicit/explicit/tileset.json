@@ -1,6 +1,6 @@
 {
   "asset": { "version": "1.1" },
-  "geometricError": 2346072.100815429,
+  "geometricError": 18328.688287620538,
   "root": {
     "boundingVolume": {
       "box": [
@@ -8,7 +8,7 @@
         0.0, 0.0, 2115804.7518513715, 0.0, 0.0, 0.0, 407247.98371191416
       ]
     },
-    "geometricError": 2346072.100815429,
+    "geometricError": 18328.688287620538,
     "refine": "REPLACE",
     "content": { "uri": "content/0/0/0.glb" },
     "children": [
@@ -20,7 +20,7 @@
             312657.7674879183
           ]
         },
-        "geometricError": 1173036.0504077144,
+        "geometricError": 9164.344143810269,
         "refine": "REPLACE",
         "content": { "uri": "content/1/0/0.glb" }
       },
@@ -32,7 +32,7 @@
             312657.7674879183
           ]
         },
-        "geometricError": 1173036.0504077144,
+        "geometricError": 9164.344143810269,
         "refine": "REPLACE",
         "content": { "uri": "content/1/1/0.glb" }
       },
@@ -44,7 +44,7 @@
             373110.53291987156
           ]
         },
-        "geometricError": 1173036.0504077144,
+        "geometricError": 9164.344143810269,
         "refine": "REPLACE",
         "content": { "uri": "content/1/0/1.glb" }
       },
@@ -56,7 +56,7 @@
             373110.5329198716
           ]
         },
-        "geometricError": 1173036.0504077144,
+        "geometricError": 9164.344143810269,
         "refine": "REPLACE",
         "content": { "uri": "content/1/1/1.glb" }
       }
