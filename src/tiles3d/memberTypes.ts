@@ -61,6 +61,8 @@ export type Tiles3dMemberStats = {
   readonly effectiveScreenSpaceErrorPx: number;
   readonly sseMultiplier: number;
   readonly memoryConstrained: boolean;
+  /** Submitted tiles whose replacement group did not fit the allowance. */
+  readonly blockedGroups: number;
   readonly selectedTiles: number;
   readonly requestedTiles: number;
   /** Traversal passes, exposed so hosts can verify stationary frame idempotence. */

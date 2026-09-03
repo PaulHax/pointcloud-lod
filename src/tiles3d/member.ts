@@ -141,6 +141,16 @@ export const createTiles3dMember = (
   };
   let interactionDepth = 0;
   let memoryConstrained = false;
+  /**
+   * Submitted tiles whose complete replacement group did not fit.
+   *
+   * Distinct from `memoryConstrained`, which says the member's whole desired
+   * frontier is unaffordable and answers by falling back to the root. A
+   * blocked group is a fact about one branch: the rest of the tileset is still
+   * affordable at full quality, so refinement stops at this tile and nowhere
+   * else.
+   */
+  const blockedGroupAncestors = new Set<string>();
   let irreducibleBudget = false;
   let constrainedDesiredSignature: string | null = null;
   let configGeneration = 1;
@@ -250,6 +260,7 @@ export const createTiles3dMember = (
   const select = (
     maximumScreenSpaceErrorPx: number,
     qualityFraction: number,
+    honourBlockedGroups = true,
   ): TilesetTraversalResult => {
     const result = traverseTileset({
       root: source!.root,
@@ -259,6 +270,9 @@ export const createTiles3dMember = (
       modelMatrix: traversalModelMatrix(),
       geometricErrorScale: config.geometricErrorScale,
       readiness,
+      ...(honourBlockedGroups && blockedGroupAncestors.size > 0
+        ? { refinable: (id: string) => !blockedGroupAncestors.has(id) }
+        : {}),
       subtrees: subtreeSnapshot,
     });
     // This hierarchy is derived from the bounded subtree snapshot. Replacing
@@ -400,23 +414,43 @@ export const createTiles3dMember = (
     return outcome;
   };
 
+  const blockGroupUnder = (id: string): void => {
+    const ancestor = submittedAncestors(id)[0];
+    if (ancestor === undefined) {
+      // No submitted frontier to fall back to: the member as a whole cannot
+      // afford what it wants, which is what `memoryConstrained` is for.
+      memoryConstrained = true;
+      irreducibleBudget = false;
+    } else {
+      blockedGroupAncestors.add(ancestor);
+      for (const candidate of desiredDescendants(ancestor)) {
+        admissionBlocked.add(candidate);
+      }
+    }
+    constrainedDesiredSignature = unconstrainedDesiredSignature();
+    refreshSelection();
+  };
+
   const unconstrainedDesiredSignature = (): string | null => {
     if (!source || !camera) return null;
     selectionPasses += 1;
-    return select(maximumSse(), allocation.qualityFraction).desiredTileIds.join(
-      "\n",
-    );
+    // Deliberately blind to both backoffs: this is the frontier the camera
+    // would ask for if nothing were blocked, and it is the only thing that can
+    // tell a genuinely new view from the one that was already refused.
+    return select(
+      maximumSse(),
+      allocation.qualityFraction,
+      false,
+    ).desiredTileIds.join("\n");
   };
 
   const retryIfDesiredSelectionChanged = (): void => {
-    if (
-      memoryConstrained &&
-      constrainedDesiredSignature !== unconstrainedDesiredSignature()
-    ) {
-      memoryConstrained = false;
-      irreducibleBudget = false;
-      constrainedDesiredSignature = null;
-    }
+    if (!memoryConstrained && blockedGroupAncestors.size === 0) return;
+    if (constrainedDesiredSignature === unconstrainedDesiredSignature()) return;
+    memoryConstrained = false;
+    blockedGroupAncestors.clear();
+    irreducibleBudget = false;
+    constrainedDesiredSignature = null;
   };
 
   const readiness = (id: string) => {
@@ -601,10 +635,11 @@ export const createTiles3dMember = (
           return;
         }
         if (groupOutcome === "budget-blocked") {
-          memoryConstrained = true;
-          constrainedDesiredSignature = unconstrainedDesiredSignature();
-          irreducibleBudget = false;
-          refreshSelection();
+          // The whole replacement set is decoded and it did not fit, so
+          // nothing further is coming for this branch and neither patience
+          // guard below applies. Stop refining past the ancestor it would have
+          // replaced and leave the rest of the tileset at full quality.
+          blockGroupUnder(request.id);
           return;
         }
         const replacements = replacementsForAdmission(request.id);
@@ -798,6 +833,7 @@ export const createTiles3dMember = (
         admissionBlocked.clear();
         admissionFailed.clear();
         memoryConstrained = false;
+        blockedGroupAncestors.clear();
         irreducibleBudget = false;
         constrainedDesiredSignature = null;
         updateDrawSet();
@@ -850,6 +886,7 @@ export const createTiles3dMember = (
         admissionBlocked.clear();
         admissionFailed.clear();
         memoryConstrained = false;
+        blockedGroupAncestors.clear();
         irreducibleBudget = false;
         constrainedDesiredSignature = null;
         if (active) beginLoad();
@@ -929,6 +966,7 @@ export const createTiles3dMember = (
       };
       if (allocation.memoryBudgetBytes > previousMemoryBudgetBytes) {
         memoryConstrained = false;
+        blockedGroupAncestors.clear();
         irreducibleBudget = false;
         constrainedDesiredSignature = null;
       } else if (adapter.stats().residentBytes > allocation.memoryBudgetBytes) {
@@ -999,6 +1037,7 @@ export const createTiles3dMember = (
         effectiveScreenSpaceErrorPx: effectiveSse,
         sseMultiplier: effectiveSse / maximumSse(),
         memoryConstrained,
+        blockedGroups: blockedGroupAncestors.size,
         selectedTiles: traversal?.desiredTileIds.length ?? 0,
         requestedTiles: traversal?.requestedTileIds.length ?? 0,
         selectionPasses,
@@ -1040,6 +1079,7 @@ export const createTiles3dMember = (
       requested.clear();
       decoded.clear();
       admissionBlocked.clear();
+      blockedGroupAncestors.clear();
       admissionFailed.clear();
       adapter.dispose();
       pickSet.dispose();

@@ -1207,4 +1207,88 @@ describe("createTiles3dMember", () => {
     expect(h.decodedRequests[0]?.tilesetToScene[12]).toBe(10);
     member.dispose();
   });
+
+  it("stops refining only the branch whose replacement group cannot fit", async () => {
+    const h = harness(true, 4096);
+    (h.context.workers as any).decode = (request: DecodeTileRequest) => {
+      h.decodedRequests.push(request);
+      const value = decoded();
+      if (/\/l[ab]\.glb$/.test(request.contentUrl)) {
+        const vertices = 300;
+        const primitive = value.primitives[0]!;
+        primitive.positions = new Float32Array(vertices * 3).map(
+          (_unused, index) => (index % 7) / 10,
+        );
+        primitive.indices = new Uint16Array(vertices).map(
+          (_unused, index) => index,
+        );
+        value.byteEstimate = { geometry: vertices * 16, textures: 0 };
+      }
+      return { promise: Promise.resolve(value), cancel: vi.fn() };
+    };
+    const fetchContent = h.config.fetchContent!;
+    const member = createTiles3dMember(h.context, {
+      ...h.config,
+      cacheBytes: 1 << 20,
+      // Two sibling branches under one root. The left branch's children are
+      // far too big for the allowance; the right branch's are ordinary.
+      fetchTileset: async () =>
+        ({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: async () => ({
+            asset: { version: "1.1" },
+            geometricError: 16,
+            root: tile("root.glb", 16, [
+              tile("left.glb", 8, [tile("la.glb", 0), tile("lb.glb", 0)]),
+              tile("right.glb", 8, [tile("ra.glb", 0), tile("rb.glb", 0)]),
+            ]),
+          }),
+        }) as any,
+      // Leaf content arrives after its parent has been presented, which is
+      // what puts a submitted ancestor above the pair and so makes them a
+      // replacement group rather than two unrelated tiles.
+      fetchContent: async (...args) => {
+        if (/\/[lr][ab]\.glb$/.test(args[0])) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        return fetchContent(...args);
+      },
+    });
+    member.applyAllocation({
+      qualityFraction: 1,
+      // Room for the root and both branch frontiers at the ordinary size, and
+      // nowhere near the 4000 bytes the left branch's pair would need.
+      memoryBudgetBytes: 600,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    for (let pass = 0; pass < 40; pass += 1) {
+      await settle();
+      while (h.submissions.hasPending()) h.submissions.prepareFrame();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      while (h.submissions.hasPending()) h.submissions.prepareFrame();
+      if (member.governorInputs().work.operations === 0) break;
+    }
+
+    const stats = member.stats() as Tiles3dMemberStats;
+    expect(stats).toMatchObject({
+      // The unaffordable pair is a fact about one branch, not about the
+      // member: falling back to the root here would throw away the right
+      // branch's detail, which is affordable and already drawn.
+      memoryConstrained: false,
+      blockedGroups: 1,
+    });
+    // The left branch holds at its own content; the right branch is refined
+    // to its leaves, which a collapse to the root would have thrown away.
+    expect([...stats.renderer.drawnTileIds].sort()).toEqual([
+      "root/0",
+      "root/1/0",
+      "root/1/1",
+    ]);
+    expect(h.contentRequests).toContain("/tiles/ra.glb");
+    expect(h.contentRequests).toContain("/tiles/rb.glb");
+    member.dispose();
+  });
 });

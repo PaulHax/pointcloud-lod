@@ -38,6 +38,16 @@ export type TilesetTraversalOptions = {
   /** Maximum-axis 3D Tiles convention, or local XY for terrain-derived error. */
   readonly geometricErrorScale?: GeometricErrorScale;
   readonly readiness: (tileId: string) => TileReadiness;
+  /**
+   * Whether a contentful tile may still be refined past, default true.
+   *
+   * Answers "is there any point asking for this tile's children", which is a
+   * different question from whether they have arrived. A caller that knows a
+   * tile's replacement set can never be drawn — it does not fit the memory
+   * allowance — says so here, and the tile is selected as the frontier instead
+   * of being refined past into content that will be requested forever.
+   */
+  readonly refinable?: (tileId: string) => boolean;
   /** Immutable hierarchy state sampled at the beginning of this pass. */
   readonly subtrees?: SubtreeStoreSnapshot | null;
 };
@@ -531,17 +541,20 @@ const traverseHierarchy = (
 
     const contentful = hasContent(tile);
     // Contentless tiles are hierarchy nodes, not drawable levels of detail.
-    // Their descendants remain reachable regardless of the node's own SSE.
+    // Their descendants remain reachable regardless of the node's own SSE, and
+    // regardless of `refinable` — such a node has no content of its own to
+    // stand as a frontier, so refusing to descend would draw nothing at all.
     const refine =
       tile.children.length > 0 &&
       (!contentful ||
-        screenSpaceError(
+        (screenSpaceError(
           tile,
           accumulated,
           bounds,
           options.camera,
           errorScale,
-        ) > effective);
+        ) > effective &&
+          (options.refinable?.(tile.id) ?? true)));
     const childResults = refine
       ? tile.children.map((child) => visit(child, accumulated))
       : [];
