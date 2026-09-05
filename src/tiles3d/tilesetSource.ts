@@ -3,7 +3,7 @@
  * by the streamed-scene mesh member.
  */
 
-import { multiplyMat4Values } from "./rtc";
+import { IDENTITY, multiply4 } from "../camera";
 
 export type TilesetFetchResponse = {
   readonly ok: boolean;
@@ -136,10 +136,6 @@ export class TilesetFetchError extends Error {
   }
 }
 
-const IDENTITY = Object.freeze([
-  1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
-]);
-
 const objectAt = (value: unknown, path: string): Record<string, unknown> => {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new TilesetValidationError(path, "expected an object");
@@ -154,7 +150,7 @@ const finiteAtLeastZero = (value: unknown, path: string): number => {
   return value;
 };
 
-const integerAtLeast = (
+export const integerAtLeast = (
   value: unknown,
   minimum: number,
   path: string,
@@ -227,7 +223,7 @@ const affineMatrix = (value: unknown, path: string): readonly number[] => {
 export const multiplyTilesetMatrices = (
   left: readonly number[],
   right: readonly number[],
-): readonly number[] => Object.freeze(multiplyMat4Values(left, right));
+): readonly number[] => Object.freeze(multiply4(left, right));
 
 const normalizeEndpoint = (endpoint: string): string => {
   if (typeof endpoint !== "string" || endpoint.length === 0) {

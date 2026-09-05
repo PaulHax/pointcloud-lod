@@ -14,6 +14,7 @@ import type {
   Tiles3dMemberConfig,
   Tiles3dMemberStats,
 } from "../../../src/tiles3d/memberTypes";
+import { IDENTITY } from "../../../src/camera";
 import { createBag3dTilesetFetch } from "./bag3d";
 import { decodeWasmUrls } from "./decodeAssets";
 import { renderDiagnostics, type MemberRow } from "./diagnostics";
@@ -31,8 +32,6 @@ import {
   type Place,
 } from "./places";
 import { HOSTED_POINT_CLOUDS } from "./sceneCatalog";
-
-const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 
 const element = <T extends Element>(selector: string): T => {
   const found = document.querySelector<T>(selector);

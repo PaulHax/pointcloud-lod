@@ -5,6 +5,7 @@ import {
   type Mat16,
 } from "./camera";
 import type { MemoryPool, MemoryPoolMember } from "./memoryPool";
+import { finiteNonNegative } from "./numeric";
 import { allocateViewQuality } from "./viewBudget";
 import {
   createSubmissionScheduler,
@@ -163,7 +164,7 @@ const EMPTY_INPUTS: GovernorInputs = {
 };
 
 const usableNonNegative = (value: number): number =>
-  Number.isFinite(value) && value >= 0 ? value : 0;
+  finiteNonNegative(value) ? value : 0;
 
 const usableFraction = (value: number): number =>
   Math.min(1, usableNonNegative(value));

@@ -11,6 +11,11 @@ import type { Bounds, Vec3 } from "./octree";
 /** Column-major 4x4 matrix, OpenGL layout (translation in indices 12..14). */
 export type Mat16 = ArrayLike<number>;
 
+/** Frozen: it is handed out as the default placement, not a scratch buffer. */
+export const IDENTITY: readonly number[] = Object.freeze([
+  1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
+]);
+
 type CameraViewCommon = {
   /** Column-major view-projection matrix. */
   readonly viewProj: Mat16;
@@ -551,7 +556,7 @@ const similarityScale = (m: Mat16): number | null => {
 };
 
 /** Column-major product `a × b`. */
-const multiply4 = (a: Mat16, b: Mat16): number[] => {
+export const multiply4 = (a: Mat16, b: Mat16): number[] => {
   // prettier-ignore
   const out: number[] = [
     0, 0, 0, 0,
@@ -656,4 +661,68 @@ export const sameMatrix = (a: Mat16 | null, b: Mat16 | null): boolean => {
     if (a[index] !== b[index]) return false;
   }
   return true;
+};
+
+/**
+ * `base · translate(origin)`: only the last column differs from `base`.
+ *
+ * Tile geometry is stored relative to a tile origin, so every tile actor's
+ * matrix is the member's placement with that origin folded in.
+ */
+export const translatedMatrix = (base: Mat16, origin: Vec3): number[] => {
+  const out = Array.from(base);
+  for (let row = 0; row < 4; row += 1) {
+    out[12 + row] =
+      base[row]! * origin[0] +
+      base[4 + row]! * origin[1] +
+      base[8 + row]! * origin[2] +
+      base[12 + row]!;
+  }
+  return out;
+};
+
+/** Screen-space extent of a projected box, css pixels, y down. */
+export type ScreenAabbCssPx = {
+  readonly minXCssPx: number;
+  readonly minYCssPx: number;
+  readonly maxXCssPx: number;
+  readonly maxYCssPx: number;
+};
+
+/**
+ * Screen AABB of the 8 corners of `bounds`, placed by `matrix` first when one
+ * is given. Null when any corner is unprojectable (behind the camera plane or
+ * non-finite): a pick prefilter must read that as "may be under the cursor",
+ * because a wrong skip is an unpickable visible tile.
+ */
+export const projectedBoundsAabbCssPx = (
+  viewProj: Mat16,
+  bounds: Bounds,
+  viewportWidthCssPx: number,
+  viewportHeightCssPx: number,
+  matrix: Mat16 | null = null,
+): ScreenAabbCssPx | null => {
+  let minXCssPx = Number.POSITIVE_INFINITY;
+  let minYCssPx = Number.POSITIVE_INFINITY;
+  let maxXCssPx = Number.NEGATIVE_INFINITY;
+  let maxYCssPx = Number.NEGATIVE_INFINITY;
+  for (const x of [bounds.min[0], bounds.max[0]]) {
+    for (const y of [bounds.min[1], bounds.max[1]]) {
+      for (const z of [bounds.min[2], bounds.max[2]]) {
+        const corner: Vec3 = [x, y, z];
+        const projected = projectPointToCssPx(
+          viewProj,
+          matrix === null ? corner : transformPointBy(matrix, corner),
+          viewportWidthCssPx,
+          viewportHeightCssPx,
+        );
+        if (projected === null) return null;
+        minXCssPx = Math.min(minXCssPx, projected.xCssPx);
+        minYCssPx = Math.min(minYCssPx, projected.yCssPx);
+        maxXCssPx = Math.max(maxXCssPx, projected.xCssPx);
+        maxYCssPx = Math.max(maxYCssPx, projected.yCssPx);
+      }
+    }
+  }
+  return { minXCssPx, minYCssPx, maxXCssPx, maxYCssPx };
 };

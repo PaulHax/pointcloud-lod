@@ -1,9 +1,11 @@
 /** Pure camera-driven traversal for explicit and implicit REPLACE hierarchies. */
 
 import {
+  IDENTITY,
   frustumPlanes,
   orthographicScreenSpaceError,
   perspectiveScreenSpaceError,
+  transformPointBy,
   type CameraView,
   type Plane,
 } from "../camera";
@@ -87,23 +89,6 @@ type TilePlacement = {
   bounds: WorldBox;
 };
 
-const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
-
-const transformPoint = (matrix: readonly number[], point: Vec3): Vec3 => [
-  matrix[0]! * point[0] +
-    matrix[4]! * point[1] +
-    matrix[8]! * point[2] +
-    matrix[12]!,
-  matrix[1]! * point[0] +
-    matrix[5]! * point[1] +
-    matrix[9]! * point[2] +
-    matrix[13]!,
-  matrix[2]! * point[0] +
-    matrix[6]! * point[1] +
-    matrix[10]! * point[2] +
-    matrix[14]!,
-];
-
 const transformVector = (matrix: readonly number[], vector: Vec3): Vec3 => [
   matrix[0]! * vector[0] + matrix[4]! * vector[1] + matrix[8]! * vector[2],
   matrix[1]! * vector[0] + matrix[5]! * vector[1] + matrix[9]! * vector[2],
@@ -113,7 +98,7 @@ const transformVector = (matrix: readonly number[], vector: Vec3): Vec3 => [
 const worldBox = (box: TilesetBox, matrix: readonly number[]): WorldBox => {
   const h = box.halfAxes;
   return {
-    center: transformPoint(matrix, box.center),
+    center: transformPointBy(matrix, box.center),
     axes: [
       transformVector(matrix, [h[0], h[1], h[2]]),
       transformVector(matrix, [h[3], h[4], h[5]]),

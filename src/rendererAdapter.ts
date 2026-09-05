@@ -29,24 +29,10 @@ import vtkActor from "@kitware/vtk.js/Rendering/Core/Actor";
 import vtkPointGaussianMapper from "@kitware/vtk.js/Rendering/Core/PointGaussianMapper";
 
 import type { TileBatch, TileDrawPlan } from "./controller";
+import { IDENTITY, sameMatrix, translatedMatrix } from "./camera";
 import { finiteAbove, finiteNonNegative } from "./numeric";
-import { keyToString, type Vec3 } from "./octree";
+import { keyToString } from "./octree";
 import { tileBytes, type TileData } from "./tileSource";
-
-const IDENTITY: readonly number[] = [
-  1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
-];
-
-const sameMatrix = (
-  left: ArrayLike<number>,
-  right: ArrayLike<number>,
-): boolean => {
-  if (left.length !== right.length) return false;
-  for (let index = 0; index < left.length; index += 1) {
-    if (left[index] !== right[index]) return false;
-  }
-  return true;
-};
 
 export type RendererAdapterOptions = {
   /** vtk.js renderer the tile actors are added to. */
@@ -284,19 +270,6 @@ export const createRendererAdapter = (
   const acceptsScalar = (next: number, current: number): boolean =>
     !disposed && Number.isFinite(next) && next > 0 && next !== current;
 
-  /** base · translate(origin): only the last column differs from base. */
-  const tileMatrix = (origin: Vec3): number[] => {
-    const out = Array.from(baseMatrix);
-    for (let row = 0; row < 4; row += 1) {
-      out[12 + row] =
-        baseMatrix[row]! * origin[0] +
-        baseMatrix[4 + row]! * origin[1] +
-        baseMatrix[8 + row]! * origin[2] +
-        baseMatrix[12 + row]!;
-    }
-    return out;
-  };
-
   /** Push the adapter's current visual state onto one tile's actor/mapper. */
   const prefixFor = (keyString: string, entry: TileActors): number =>
     pointPrefixes === null
@@ -327,7 +300,7 @@ export const createRendererAdapter = (
     entry.mapper.setMaximumPointCount(entry.drawnPointCount);
     entry.actor.getProperty().setPointSize(diameterCssPx);
     entry.actor.setVisibility(visible);
-    entry.actor.setUserMatrix(tileMatrix(entry.tile.origin));
+    entry.actor.setUserMatrix(translatedMatrix(baseMatrix, entry.tile.origin));
   };
 
   const createTile = (keyString: string, tile: TileData): TileActors => {
@@ -470,7 +443,9 @@ export const createRendererAdapter = (
       // object, and the next update still needs to detect that visual change.
       baseMatrix = Array.from(next);
       for (const entry of tiles.values()) {
-        entry.actor.setUserMatrix(tileMatrix(entry.tile.origin));
+        entry.actor.setUserMatrix(
+          translatedMatrix(baseMatrix, entry.tile.origin),
+        );
       }
       scheduleRender();
     },

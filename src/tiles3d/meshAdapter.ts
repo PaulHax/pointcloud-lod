@@ -10,7 +10,8 @@ import {
   type Submission,
   type SubmissionScheduler,
 } from "../submissionScheduler";
-import type { Mat16 } from "../camera";
+import { IDENTITY, translatedMatrix, type Mat16 } from "../camera";
+import { safeCall } from "../observers";
 import type { Bounds } from "../octree";
 import type {
   DecodedPrimitive,
@@ -165,7 +166,6 @@ type VtkShaderReplacement = {
   readonly replaceFirst: true;
 };
 
-const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 const VTK_LIGHT_IMPLEMENTATION = "//VTK::Light::Impl";
 
 const glslFloat = (value: number): string => {
@@ -195,17 +195,6 @@ const alphaShaderReplacement = (
     replaceAll: false,
     replaceFirst: true,
   };
-};
-
-const report = (
-  callback: ((error: unknown) => void) | undefined,
-  error: unknown,
-): void => {
-  try {
-    callback?.(error);
-  } catch {
-    // Renderer cleanup and scheduler accounting must survive observers.
-  }
 };
 
 const rgbaAlphaIsUniform = (
@@ -498,23 +487,11 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
   let logicalTextureUploadBytes = 0;
   const budgetPreapproved = new Set<string>();
 
-  const tileMatrix = (origin: readonly [number, number, number]): number[] => {
-    const result = Array.from(baseMatrix);
-    for (let row = 0; row < 4; row += 1) {
-      result[12 + row] =
-        baseMatrix[row]! * origin[0] +
-        baseMatrix[4 + row]! * origin[1] +
-        baseMatrix[8 + row]! * origin[2] +
-        baseMatrix[12 + row]!;
-    }
-    return result;
-  };
-
   const setActorState = (
     tile: TileResources,
     entry: PrimitiveResources,
   ): void => {
-    entry.actor.setUserMatrix(tileMatrix(tile.origin));
+    entry.actor.setUserMatrix(translatedMatrix(baseMatrix, tile.origin));
     entry.actor.setVisibility(visible && drawn.has(tile.id));
   };
 
@@ -737,7 +714,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
     try {
       entry.onSubmitted?.();
     } catch (error) {
-      report(options.onError, error);
+      safeCall(() => options.onError?.(error));
     } finally {
       for (const id of entry.replacementIds) {
         if (replacementClaims.get(id) === entry.id)
@@ -782,7 +759,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
           unpool(id, reusable);
           failed.add(id);
           release(reusable);
-          report(options.onError, error);
+          safeCall(() => options.onError?.(error));
           return "failed";
         }
         unpool(id, reusable);
@@ -792,7 +769,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         try {
           onSubmitted?.();
         } catch (error) {
-          report(options.onError, error);
+          safeCall(() => options.onError?.(error));
         }
         return "queued";
       }
@@ -845,7 +822,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         }
       } catch (error) {
         failed.add(id);
-        report(options.onError, error);
+        safeCall(() => options.onError?.(error));
         return "failed";
       }
       const resources: TileResources = {
@@ -927,7 +904,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
             }
             cancelPending(entry);
             failed.add(entry.id);
-            report(options.onError, error);
+            safeCall(() => options.onError?.(error));
           },
         });
         entry.jobs.push(submission);
@@ -997,7 +974,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
       } catch (error) {
         cancelPending(entry);
         failed.add(id);
-        report(options.onError, error);
+        safeCall(() => options.onError?.(error));
         return "failed";
       }
       if (entry.remainingJobs === 0) finish(entry);
@@ -1069,7 +1046,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
           groupFailed = true;
           for (const entry of groupEntries) cancelPending(entry);
           for (const { id } of entries) failed.add(id);
-          report(options.onError, error);
+          safeCall(() => options.onError?.(error));
         };
         const finishGroup = (): void => {
           if (groupFailed || groupEntries.some((entry) => !entry.ready)) return;
@@ -1137,9 +1114,10 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
       if (disposed) return;
       const next = matrix === null ? IDENTITY : Array.from(matrix);
       if (next.length !== 16 || next.some((value) => !Number.isFinite(value))) {
-        report(
-          options.onError,
-          new TypeError("mesh base matrix must contain 16 finite numbers"),
+        safeCall(() =>
+          options.onError?.(
+            new TypeError("mesh base matrix must contain 16 finite numbers"),
+          ),
         );
         return;
       }

@@ -1,4 +1,5 @@
 import { finiteAtLeast, wholeAtLeast } from "./numeric";
+import { safeCall } from "./observers";
 
 const MiB = 1024 * 1024;
 
@@ -153,12 +154,7 @@ export const createSubmissionScheduler = (
         try {
           next.run();
         } catch (error) {
-          try {
-            next.onError?.(error);
-          } catch {
-            // One consumer's observer must not escape the frame boundary or
-            // strand unrelated queued work behind it.
-          }
+          safeCall(() => next.onError?.(error));
         }
         frameJobs += 1;
         frameBytes += next.bytes;

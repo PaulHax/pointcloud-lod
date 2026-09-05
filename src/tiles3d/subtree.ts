@@ -1,6 +1,7 @@
 /** Strict reader for the binary 3D Tiles 1.1 subtree producer profile. */
 
 import {
+  integerAtLeast,
   TilesetUnsupportedError,
   TilesetValidationError,
   type TilesetBox,
@@ -34,20 +35,6 @@ const arrayAt = (value: unknown, path: string): unknown[] => {
     throw new TilesetValidationError(path, "expected an array");
   }
   return value;
-};
-
-const integerAtLeast = (
-  value: unknown,
-  minimum: number,
-  path: string,
-): number => {
-  if (!Number.isSafeInteger(value) || (value as number) < minimum) {
-    throw new TilesetValidationError(
-      path,
-      `expected a safe integer >= ${minimum}`,
-    );
-  }
-  return value as number;
 };
 
 const uint64 = (view: DataView, offset: number, path: string): number => {
