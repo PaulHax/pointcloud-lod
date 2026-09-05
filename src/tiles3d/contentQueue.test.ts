@@ -327,6 +327,30 @@ describe("content queue", () => {
     });
   });
 
+  it("retries a failed decode rather than failing it terminally", async () => {
+    const timers: Array<() => void> = [];
+    const clock: ContentQueueClock = {
+      now: () => 0,
+      setTimeout: (callback) => timers.push(callback),
+      clearTimeout: () => {},
+    };
+    const onError = vi.fn();
+    const decode = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("malformed"))
+      .mockResolvedValueOnce({ id: "a", bytes: 10 });
+    const { queue } = makeQueue({ clock, decode, maxAttempts: 2, onError });
+
+    queue.setSelection([request("a")]);
+    await flush();
+    expect(queue.snapshot()).toMatchObject({ retrying: 1, failed: 0 });
+
+    timers[0]!();
+    await flush();
+    expect(onError).not.toHaveBeenCalled();
+    expect(queue.snapshot()).toMatchObject({ ready: 1, cached: 1 });
+  });
+
   it("classifies invalid decoded byte accounting as a typed decode failure", async () => {
     const onError = vi.fn();
     const { queue } = makeQueue({
@@ -407,6 +431,7 @@ describe("content queue", () => {
     await flush();
     expect(queue.snapshot()).toMatchObject({ decodedBytes: 20, cached: 2 });
     expect(evicted).toEqual(["b"]);
+    expect([...queue.contents().keys()]).toEqual(["a", "c"]);
     expect(queue.get("b")).toBeUndefined();
     expect(queue.get("a")?.id).toBe("a");
     expect(queue.get("c")?.id).toBe("c");

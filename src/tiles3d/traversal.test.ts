@@ -10,7 +10,7 @@ import {
   type TileReadiness,
 } from "./traversal";
 import { parseSubtree } from "./subtree";
-import type { SubtreeStoreSnapshot } from "./subtreeStore";
+import type { SubtreeHierarchyState } from "./traversal";
 import {
   makeSubtreeFixture,
   SUBTREE_METADATA_SCHEMA,
@@ -102,19 +102,6 @@ const subtreeSnapshot = (subtree: ReturnType<typeof parseSubtree>) =>
   ({
     revision: "r1",
     configGeneration: 1,
-    selected: 1,
-    active: 0,
-    queued: 0,
-    retrying: 0,
-    ready: 1,
-    failed: 0,
-    cached: 1,
-    cachedBytes: subtree.byteLength,
-    cacheHits: 0,
-    cacheMisses: 1,
-    cacheEvictions: 0,
-    workPending: false,
-    disposed: false,
     entries: [
       {
         id: "subtree/0/0/0",
@@ -124,7 +111,7 @@ const subtreeSnapshot = (subtree: ReturnType<typeof parseSubtree>) =>
       },
     ],
     subtreeById: new Map([["subtree/0/0/0", subtree]]),
-  }) satisfies SubtreeStoreSnapshot;
+  }) satisfies SubtreeHierarchyState;
 
 const select = (
   root: TilesetTile,
@@ -226,7 +213,7 @@ describe("traverseTileset", () => {
           attempt: 1,
         },
       ],
-    } satisfies SubtreeStoreSnapshot;
+    } satisfies SubtreeHierarchyState;
     const result = select(
       source.root,
       {},
@@ -386,10 +373,6 @@ describe("traverseTileset", () => {
     );
     const snapshot = {
       ...subtreeSnapshot(rootSubtree),
-      selected: 2,
-      ready: 2,
-      cached: 2,
-      cachedBytes: rootSubtree.byteLength + childSubtree.byteLength,
       entries: [
         {
           id: "subtree/0/0/0",
@@ -408,7 +391,7 @@ describe("traverseTileset", () => {
         ["subtree/0/0/0", rootSubtree],
         ["subtree/2/0/0", childSubtree],
       ]),
-    } satisfies SubtreeStoreSnapshot;
+    } satisfies SubtreeHierarchyState;
     const result = select(
       implicitRoot(),
       { root: "submitted" },
