@@ -38,8 +38,8 @@ import {
   createRendererAdapter,
   type RendererAdapter,
 } from "../../../src/rendererAdapter";
-import { WORLD_UP, installCameraControls } from "../harness/cameraControls";
-import { createGpuFrameTimer, type GpuTimerResult } from "../harness/gpuTimer";
+import { WORLD_UP, installCameraControls } from "../cameraControls";
+import { createGpuFrameTimer, type GpuTimerResult } from "../gpuTimer";
 import {
   captureTelemetryEnvironment,
   createTelemetryRecorder,
