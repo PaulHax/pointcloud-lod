@@ -20,7 +20,7 @@
  * camera. It knows nothing about vtk.js, the coordinator, or the controller.
  */
 
-import type { TelemetryEnvironment } from "../../../src/telemetry";
+import type { TelemetryEnvironment } from "./telemetryRecorder";
 
 export const INPUT_RECORDING_SCHEMA_VERSION = 1;
 

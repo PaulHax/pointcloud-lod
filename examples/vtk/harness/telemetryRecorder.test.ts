@@ -5,7 +5,7 @@ import {
   isSoftwareRenderer,
   type TelemetryEnvironment,
   type TelemetryFrameEvent,
-} from "./telemetry";
+} from "./telemetryRecorder";
 
 const ENVIRONMENT: TelemetryEnvironment = {
   capturedAt: "2026-08-02T00:00:00.000Z",

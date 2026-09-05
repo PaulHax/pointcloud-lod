@@ -21,7 +21,7 @@ import {
   type TelemetryRecorder,
   type TelemetrySummary,
   type TelemetryTrace,
-} from "../../../src";
+} from "./telemetryRecorder";
 import type { PointCloudMemberStats } from "../../../src/pointCloudMember";
 import type { Tiles3dMemberStats } from "../../../src/tiles3d/memberTypes";
 import type {

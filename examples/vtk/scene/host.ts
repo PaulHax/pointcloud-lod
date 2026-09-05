@@ -20,16 +20,15 @@ import vtkFullScreenRenderWindow from "@kitware/vtk.js/Rendering/Misc/FullScreen
 import { getCompressedTextureCapabilities } from "@kitware/vtk.js/Rendering/OpenGL/Texture/compressedFormats";
 
 import {
-  createGpuFrameTimer,
   createMemoryPool,
   createStreamedSceneCoordinator,
-  isSoftwareRenderer,
   type CameraView,
-  type GpuFrameTimer,
   type StreamedSceneCoordinator,
   type TextureCapabilities,
 } from "../../../src";
-import { WORLD_UP, installCameraControls } from "../../../src/vtk";
+import { WORLD_UP, installCameraControls } from "../harness/cameraControls";
+import { createGpuFrameTimer, type GpuFrameTimer } from "../harness/gpuTimer";
+import { isSoftwareRenderer } from "../harness/telemetryRecorder";
 import { createDecodeWorkers } from "./decodeAssets";
 
 /**
