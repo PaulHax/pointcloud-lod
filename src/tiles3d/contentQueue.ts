@@ -104,6 +104,8 @@ export type ContentQueue<T> = {
   configure(configuration: ContentQueueConfiguration): void;
   /** Look up decoded content and mark it most recently used. */
   get(id: string): T | undefined;
+  /** Every cached decode, in least-recently-used order. */
+  contents(): ReadonlyMap<string, T>;
   snapshot(): ContentQueueSnapshot;
   dispose(): void;
 };
@@ -611,6 +613,9 @@ export const createContentQueue = <T>(
       cache.set(id, entry);
       return entry.content;
     },
+
+    contents: () =>
+      new Map([...cache].map(([id, entry]) => [id, entry.content] as const)),
 
     snapshot,
 

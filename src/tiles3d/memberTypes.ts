@@ -1,6 +1,5 @@
 import type { TilesetFetch } from "./tilesetSource";
 import type { ContentQueueFetch } from "./contentQueue";
-import type { SubtreeFetch } from "./subtreeStore";
 import type { DecodeWasmUrls } from "./decode";
 import type { Allocation } from "../streamedMember";
 import type { MeshAdapterStats } from "./meshAdapter";
@@ -11,6 +10,28 @@ export const DEFAULT_TILES3D_CONCURRENCY = 4;
 export const DEFAULT_TILES3D_SUBTREE_CACHE_BYTES = 8 * 1024 * 1024;
 export const DEFAULT_VERTICAL_EXAGGERATION = 1;
 export const DEFAULT_VERTICAL_PIVOT_Z = 0;
+
+export type ContentQueueStats = {
+  readonly selected: number;
+  readonly active: number;
+  readonly queued: number;
+  readonly retrying: number;
+  readonly ready: number;
+  readonly failed: number;
+  readonly cached: number;
+  readonly decodedBytes: number;
+  readonly workPending: boolean;
+  readonly cacheHits: number;
+  readonly cacheMisses: number;
+  readonly cacheEvictions: number;
+  readonly cacheRevisits: number;
+  readonly entries: readonly {
+    readonly id: string;
+    readonly url: string;
+    readonly status: "queued" | "fetching" | "retrying" | "ready" | "failed";
+    readonly attempt: number;
+  }[];
+};
 
 export type GeometricErrorScale = "maximum" | "horizontal";
 
@@ -33,7 +54,7 @@ export type Tiles3dMemberConfig = {
   readonly retryBackoffMs?: (failedAttempt: number) => number;
   readonly fetchTileset?: TilesetFetch;
   readonly fetchContent?: ContentQueueFetch;
-  readonly fetchSubtree?: SubtreeFetch;
+  readonly fetchSubtree?: ContentQueueFetch;
   readonly onError?: (error: unknown) => void;
 };
 
@@ -69,40 +90,10 @@ export type Tiles3dMemberStats = {
   readonly selectionPasses: number;
   readonly errorCount: number;
   readonly lastError: string | null;
-  readonly queue: {
-    readonly selected: number;
-    readonly active: number;
-    readonly queued: number;
-    readonly retrying: number;
-    readonly ready: number;
-    readonly failed: number;
-    readonly decodedBytes: number;
-    readonly workPending: boolean;
-    readonly cacheHits: number;
-    readonly cacheMisses: number;
-    readonly cacheEvictions: number;
-    readonly cacheRevisits: number;
-    readonly entries: readonly {
-      readonly id: string;
-      readonly url: string;
-      readonly status: "queued" | "fetching" | "retrying" | "ready" | "failed";
-      readonly attempt: number;
-    }[];
-  } | null;
-  readonly subtrees: {
-    readonly selected: number;
-    readonly active: number;
-    readonly queued: number;
-    readonly retrying: number;
-    readonly ready: number;
-    readonly failed: number;
-    readonly cached: number;
-    readonly cachedBytes: number;
-    readonly workPending: boolean;
-    readonly cacheHits: number;
-    readonly cacheMisses: number;
-    readonly cacheEvictions: number;
-  } | null;
+  /** Tile content fetch/decode queue. */
+  readonly queue: ContentQueueStats | null;
+  /** Implicit-hierarchy subtree fetch/parse queue, null for explicit tilesets. */
+  readonly subtrees: ContentQueueStats | null;
   readonly decode: ReturnType<
     NonNullable<import("./decode").DecodeWorkerPoolHandle["stats"]>
   > | null;

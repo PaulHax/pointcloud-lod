@@ -17,9 +17,24 @@ import {
   type TilesetImplicitTiling,
   type TilesetTile,
 } from "./tilesetSource";
-import { quadtreeMortonIndex, subtreeTileIndex } from "./subtree";
-import type { SubtreeRequest, SubtreeStoreSnapshot } from "./subtreeStore";
+import {
+  quadtreeMortonIndex,
+  subtreeTileIndex,
+  type ParsedSubtree,
+} from "./subtree";
+import type {
+  ContentQueueEntrySnapshot,
+  TileContentRequest,
+} from "./contentQueue";
 import type { GeometricErrorScale } from "./memberTypes";
+
+/** Immutable implicit-hierarchy state sampled at the start of one pass. */
+export type SubtreeHierarchyState = {
+  readonly revision: string;
+  readonly configGeneration: number;
+  readonly entries: readonly ContentQueueEntrySnapshot[];
+  readonly subtreeById: ReadonlyMap<string, ParsedSubtree>;
+};
 
 export type TileReadiness =
   | "unloaded"
@@ -51,7 +66,7 @@ export type TilesetTraversalOptions = {
    */
   readonly refinable?: (tileId: string) => boolean;
   /** Immutable hierarchy state sampled at the beginning of this pass. */
-  readonly subtrees?: SubtreeStoreSnapshot | null;
+  readonly subtrees?: SubtreeHierarchyState | null;
 };
 
 export type TilesetTraversalResult = {
@@ -72,7 +87,7 @@ export type TilesetTraversalResult = {
    */
   readonly rootScreenSpaceErrorPx: number;
   /** Visible unknown boundaries. The member owns fetching and retry policy. */
-  readonly neededSubtreeRequests: readonly SubtreeRequest[];
+  readonly neededSubtreeRequests: readonly TileContentRequest[];
   /** Explicit source tiles plus implicit tiles materialized for this pass. */
   readonly tileById: ReadonlyMap<string, TilesetTile>;
 };
@@ -195,7 +210,7 @@ type VisitResult = {
 type MaterializedHierarchy = {
   readonly root: TilesetTile;
   readonly tileById: ReadonlyMap<string, TilesetTile>;
-  readonly unknownRequestByTileId: ReadonlyMap<string, SubtreeRequest>;
+  readonly unknownRequestByTileId: ReadonlyMap<string, TileContentRequest>;
 };
 
 const implicitTileId = (address: ImplicitTileAddress): string => {
@@ -220,7 +235,7 @@ const childAddress = (
 const implicitRequest = (
   descriptor: TilesetImplicitTiling,
   address: ImplicitTileAddress,
-): SubtreeRequest =>
+): TileContentRequest =>
   Object.freeze({
     id: `subtree/${address.level}/${address.x}/${address.y}`,
     url: substituteImplicitTemplate(descriptor.subtreeUrlTemplate, address),
@@ -257,11 +272,11 @@ const explicitHierarchy = (root: TilesetTile): MaterializedHierarchy => {
 
 const implicitHierarchy = (
   documentRoot: TilesetTile,
-  snapshot: SubtreeStoreSnapshot | null | undefined,
+  snapshot: SubtreeHierarchyState | null | undefined,
 ): MaterializedHierarchy => {
   const descriptor = documentRoot.implicitTiling!;
   const tileById = new Map<string, TilesetTile>();
-  const unknownRequestByTileId = new Map<string, SubtreeRequest>();
+  const unknownRequestByTileId = new Map<string, TileContentRequest>();
   const entryById = new Map(
     snapshot?.entries.map((entry) => [entry.id, entry]) ?? [],
   );
@@ -384,8 +399,8 @@ const hasContent = (tile: TilesetTile): boolean =>
   tile.contentUrl !== undefined;
 
 const sameHierarchy = (
-  left: SubtreeStoreSnapshot | null | undefined,
-  right: SubtreeStoreSnapshot | null | undefined,
+  left: SubtreeHierarchyState | null | undefined,
+  right: SubtreeHierarchyState | null | undefined,
 ): boolean => {
   if (left === right) return true;
   if (
@@ -399,7 +414,7 @@ const sameHierarchy = (
   for (const [id, subtree] of left.subtreeById) {
     if (right.subtreeById.get(id) !== subtree) return false;
   }
-  const failed = (snapshot: SubtreeStoreSnapshot) =>
+  const failed = (snapshot: SubtreeHierarchyState) =>
     new Set(
       snapshot.entries
         .filter((entry) => entry.status === "failed")
@@ -415,7 +430,7 @@ const sameHierarchy = (
  */
 export const createTilesetTraversal = () => {
   let root: TilesetTile | undefined;
-  let snapshot: SubtreeStoreSnapshot | null | undefined;
+  let snapshot: SubtreeHierarchyState | null | undefined;
   let hierarchy: MaterializedHierarchy | undefined;
   let modelMatrix: readonly number[] | undefined;
   const placements = new Map<TilesetTile, TilePlacement>();
@@ -474,7 +489,7 @@ const traverseHierarchy = (
     (options.root.implicitTiling
       ? implicitHierarchy(options.root, options.subtrees)
       : explicitHierarchy(options.root));
-  const neededSubtrees = new Map<string, SubtreeRequest>();
+  const neededSubtrees = new Map<string, TileContentRequest>();
 
   const hasSubmittedDescendant = (tile: TilesetTile): boolean =>
     tile.children.some(

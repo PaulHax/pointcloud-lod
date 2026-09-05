@@ -185,6 +185,7 @@ export {
 
 export {
   traverseTileset,
+  type SubtreeHierarchyState,
   type TileReadiness,
   type TilesetTraversalOptions,
   type TilesetTraversalResult,
@@ -196,6 +197,7 @@ export {
   DEFAULT_TILES3D_CONCURRENCY,
   DEFAULT_VERTICAL_EXAGGERATION,
   DEFAULT_VERTICAL_PIVOT_Z,
+  type ContentQueueStats,
   type Tiles3dMemberConfig,
   type Tiles3dMemberStats,
 } from "./tiles3d/memberTypes";

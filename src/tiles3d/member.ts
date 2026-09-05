@@ -45,13 +45,10 @@ import {
   type TilesetSource,
   type TilesetTile,
 } from "./tilesetSource";
-import {
-  createSubtreeStore,
-  type SubtreeStore,
-  type SubtreeStoreSnapshot,
-} from "./subtreeStore";
+import { parseSubtree, type ParsedSubtree } from "./subtree";
 import {
   createTilesetTraversal,
+  type SubtreeHierarchyState,
   type TilesetTraversalResult,
 } from "./traversal";
 
@@ -151,8 +148,9 @@ export const createTiles3dMember = (
   // Traversal asks readiness for every tile it visits, so the snapshot is
   // indexed on arrival instead of scanned per tile.
   let queueEntryById = new Map<string, ContentQueueEntrySnapshot>();
-  let subtreeStore: SubtreeStore | null = null;
-  let subtreeSnapshot: SubtreeStoreSnapshot | null = null;
+  let subtreeQueue: ContentQueue<ParsedSubtree> | null = null;
+  let subtreeSnapshot: ContentQueueSnapshot | null = null;
+  let subtreeHierarchy: SubtreeHierarchyState | null = null;
   let materializedTileById = new Map<string, TilesetTile>();
   let traversal: TilesetTraversalResult | null = null;
   let errorCount = 0;
@@ -247,6 +245,19 @@ export const createTiles3dMember = (
     );
   };
 
+  const setSubtreeSnapshot = (snapshot: ContentQueueSnapshot | null): void => {
+    subtreeSnapshot = snapshot;
+    subtreeHierarchy =
+      snapshot && subtreeQueue
+        ? {
+            revision: snapshot.revision,
+            configGeneration: snapshot.configGeneration,
+            entries: snapshot.entries,
+            subtreeById: subtreeQueue.contents(),
+          }
+        : null;
+  };
+
   const select = (
     maximumScreenSpaceErrorPx: number,
     qualityFraction: number,
@@ -263,7 +274,7 @@ export const createTiles3dMember = (
       ...(honourBlockedGroups && blockedGroupAncestors.size > 0
         ? { refinable: (id: string) => !blockedGroupAncestors.has(id) }
         : {}),
-      subtrees: subtreeSnapshot,
+      subtrees: subtreeHierarchy,
     });
     // This hierarchy is derived from the bounded subtree snapshot. Replacing
     // the map keeps camera exploration from retaining every historical tile.
@@ -515,7 +526,7 @@ export const createTiles3dMember = (
     try {
       if (!active || !source || !camera || !queue) {
         queue?.setSelection([]);
-        subtreeStore?.setSelection([]);
+        subtreeQueue?.setSelection([]);
         for (const id of requested) adapter.cancelTile(id);
         requested.clear();
         updateDrawSet(true);
@@ -524,7 +535,7 @@ export const createTiles3dMember = (
       selectionPasses += 1;
       const next = select(traversalMaximumSse(), traversalQualityFraction());
       traversal = next;
-      subtreeStore?.setSelection(next.neededSubtreeRequests);
+      subtreeQueue?.setSelection(next.neededSubtreeRequests);
       const nextContentRequests = contentRequests(
         next.tileById,
         next.requestedTileIds,
@@ -690,19 +701,17 @@ export const createTiles3dMember = (
     });
   };
 
-  const createHierarchyStore = (tileset: TilesetSource): void => {
-    subtreeStore?.dispose();
-    subtreeStore = null;
-    subtreeSnapshot = null;
+  const createHierarchyQueue = (tileset: TilesetSource): void => {
+    subtreeQueue?.dispose();
+    subtreeQueue = null;
+    setSubtreeSnapshot(null);
     const implicit = tileset.root.implicitTiling;
     if (!implicit) return;
-    subtreeStore = createSubtreeStore({
+    subtreeQueue = createContentQueue<ParsedSubtree>({
       revision: config.revision,
       configGeneration,
-      subtreeLevels: implicit.subtreeLevels,
-      metadataSchema: implicit.metadataSchema,
       maxConcurrency: concurrency(),
-      maxBytes: DEFAULT_TILES3D_SUBTREE_CACHE_BYTES,
+      maxDecodedBytes: DEFAULT_TILES3D_SUBTREE_CACHE_BYTES,
       ...(config.fetchSubtree ? { fetch: config.fetchSubtree } : {}),
       ...(config.maxAttempts === undefined
         ? {}
@@ -710,10 +719,13 @@ export const createTiles3dMember = (
       ...(config.retryBackoffMs === undefined
         ? {}
         : { retryBackoffMs: config.retryBackoffMs }),
-      onSubtree: () => {
+      decode: (bytes) =>
+        parseSubtree(bytes, implicit.subtreeLevels, implicit.metadataSchema),
+      decodedByteLength: (subtree) => subtree.byteLength,
+      onContent: () => {
         workProgressSerial += 1;
         if (disposed || !active) return;
-        subtreeSnapshot = subtreeStore?.snapshot() ?? null;
+        setSubtreeSnapshot(subtreeQueue?.snapshot() ?? null);
         refreshSelection();
         context.scheduleRender();
       },
@@ -724,11 +736,11 @@ export const createTiles3dMember = (
       },
       onStateChange: (snapshot) => {
         workProgressSerial += 1;
-        subtreeSnapshot = snapshot;
+        setSubtreeSnapshot(snapshot);
         context.onWorkChange?.();
       },
     });
-    subtreeSnapshot = subtreeStore.snapshot();
+    setSubtreeSnapshot(subtreeQueue.snapshot());
   };
 
   const beginLoad = (): void => {
@@ -760,7 +772,7 @@ export const createTiles3dMember = (
         workProgressSerial += 1;
         sourceState = "ready";
         createQueue(loaded);
-        createHierarchyStore(loaded);
+        createHierarchyQueue(loaded);
         refreshSelection();
         context.scheduleRender();
       },
@@ -825,7 +837,7 @@ export const createTiles3dMember = (
         loadController?.abort();
         loadGeneration += 1;
         queue?.setSelection([]);
-        subtreeStore?.setSelection([]);
+        subtreeQueue?.setSelection([]);
         for (const id of requested) adapter.cancelTile(id);
         adapter.clearTiles();
         pickSet.replaceDrawn([]);
@@ -867,9 +879,9 @@ export const createTiles3dMember = (
         queue?.dispose();
         queue = null;
         setQueueSnapshot(null);
-        subtreeStore?.dispose();
-        subtreeStore = null;
-        subtreeSnapshot = null;
+        subtreeQueue?.dispose();
+        subtreeQueue = null;
+        setSubtreeSnapshot(null);
         adapter.clearTiles();
         pickSet.replaceDrawn([]);
         source = null;
@@ -884,7 +896,7 @@ export const createTiles3dMember = (
           maxConcurrency: concurrency(),
           maxDecodedBytes: config.cacheBytes ?? DEFAULT_TILES3D_CACHE_BYTES,
         });
-        subtreeStore?.configure({ maxConcurrency: concurrency() });
+        subtreeQueue?.configure({ maxConcurrency: concurrency() });
         retryIfDesiredSelectionChanged();
         refreshSelection();
       }
@@ -1059,9 +1071,9 @@ export const createTiles3dMember = (
       loadController?.abort();
       queue?.dispose();
       queue = null;
-      subtreeStore?.dispose();
-      subtreeStore = null;
-      subtreeSnapshot = null;
+      subtreeQueue?.dispose();
+      subtreeQueue = null;
+      setSubtreeSnapshot(null);
       clearAdmissionState();
       blockedGroupAncestors.clear();
       adapter.dispose();
