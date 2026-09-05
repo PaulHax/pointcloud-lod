@@ -141,6 +141,8 @@ describe("vtk mesh adapter", () => {
     const scheduler = createSubmissionScheduler({
       scheduleRender: vi.fn(),
       maxBytesPerFrame: 1024,
+      maxTimeMsPerFrame: 100,
+      now: () => 0,
     });
     const adapter = createMeshAdapter({
       renderer: { addActor: vi.fn(), removeActor: vi.fn() },
@@ -181,6 +183,8 @@ describe("vtk mesh adapter", () => {
     const scheduler = createSubmissionScheduler({
       scheduleRender: vi.fn(),
       maxBytesPerFrame: 1024,
+      maxTimeMsPerFrame: 100,
+      now: () => 0,
     });
     const adapter = createMeshAdapter({
       renderer: { addActor: vi.fn(), removeActor: vi.fn() },
@@ -201,6 +205,8 @@ describe("vtk mesh adapter", () => {
     const scheduler = createSubmissionScheduler({
       scheduleRender: vi.fn(),
       maxBytesPerFrame: 1024,
+      maxTimeMsPerFrame: 100,
+      now: () => 0,
     });
     const adapter = createMeshAdapter({
       renderer: { addActor: vi.fn(), removeActor: vi.fn() },
@@ -235,6 +241,8 @@ describe("vtk mesh adapter", () => {
     const scheduler = createSubmissionScheduler({
       scheduleRender: vi.fn(),
       maxBytesPerFrame: 1024,
+      maxTimeMsPerFrame: 100,
+      now: () => 0,
     });
     const rgba = {
       kind: "rgba" as const,
@@ -272,6 +280,8 @@ describe("vtk mesh adapter", () => {
     const scheduler = createSubmissionScheduler({
       scheduleRender: vi.fn(),
       maxBytesPerFrame: 128,
+      maxTimeMsPerFrame: 100,
+      now: () => 0,
     });
     const adapter = createMeshAdapter({
       renderer,
@@ -339,7 +349,11 @@ describe("vtk mesh adapter", () => {
 
   it("submits a whole primitive on its own indices rather than as triangle soup", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
-    const scheduler = createSubmissionScheduler({ scheduleRender: vi.fn() });
+    const scheduler = createSubmissionScheduler({
+      scheduleRender: vi.fn(),
+      maxTimeMsPerFrame: 100,
+      now: () => 0,
+    });
     const adapter = createMeshAdapter({
       renderer,
       scheduleRender: vi.fn(),
@@ -373,6 +387,8 @@ describe("vtk mesh adapter", () => {
     const scheduler = createSubmissionScheduler({
       scheduleRender,
       maxBytesPerFrame: 1024,
+      maxTimeMsPerFrame: 100,
+      now: () => 0,
     });
     const adapter = createMeshAdapter({
       renderer,
@@ -398,6 +414,8 @@ describe("vtk mesh adapter", () => {
     const scheduler = createSubmissionScheduler({
       scheduleRender: vi.fn(),
       maxBytesPerFrame: 1024,
+      maxTimeMsPerFrame: 100,
+      now: () => 0,
     });
     const adapter = createMeshAdapter({
       renderer,
@@ -446,6 +464,8 @@ describe("vtk mesh adapter", () => {
     const scheduler = createSubmissionScheduler({
       scheduleRender: vi.fn(),
       maxBytesPerFrame: 1024,
+      maxTimeMsPerFrame: 100,
+      now: () => 0,
     });
     const adapter = createMeshAdapter({
       renderer,
@@ -478,6 +498,8 @@ describe("vtk mesh adapter", () => {
     const scheduler = createSubmissionScheduler({
       scheduleRender: vi.fn(),
       maxBytesPerFrame: 1024,
+      maxTimeMsPerFrame: 100,
+      now: () => 0,
     });
     const adapter = createMeshAdapter({
       renderer,
@@ -525,6 +547,8 @@ describe("vtk mesh adapter", () => {
     const scheduler = createSubmissionScheduler({
       scheduleRender: vi.fn(),
       maxBytesPerFrame: 1024,
+      maxTimeMsPerFrame: 100,
+      now: () => 0,
     });
     const adapter = createMeshAdapter({
       renderer,
@@ -555,6 +579,8 @@ describe("vtk mesh adapter", () => {
     const scheduler = createSubmissionScheduler({
       scheduleRender: vi.fn(),
       maxBytesPerFrame: 1024,
+      maxTimeMsPerFrame: 100,
+      now: () => 0,
     });
     const adapter = createMeshAdapter({
       renderer: { addActor: vi.fn(), removeActor: vi.fn() },
@@ -592,6 +618,8 @@ describe("vtk mesh adapter", () => {
     const scheduler = createSubmissionScheduler({
       scheduleRender: vi.fn(),
       maxBytesPerFrame: 1024,
+      maxTimeMsPerFrame: 100,
+      now: () => 0,
     });
     const adapter = createMeshAdapter({
       renderer,
@@ -621,6 +649,8 @@ describe("vtk mesh adapter", () => {
     const scheduler = createSubmissionScheduler({
       scheduleRender: vi.fn(),
       maxBytesPerFrame: 1024,
+      maxTimeMsPerFrame: 100,
+      now: () => 0,
     });
     const adapter = createMeshAdapter({
       renderer,
@@ -661,6 +691,8 @@ describe("vtk mesh adapter", () => {
     const scheduler = createSubmissionScheduler({
       scheduleRender: vi.fn(),
       maxBytesPerFrame: 1024,
+      maxTimeMsPerFrame: 100,
+      now: () => 0,
     });
     const adapter = createMeshAdapter({
       renderer,
@@ -694,6 +726,8 @@ describe("vtk mesh adapter", () => {
     const scheduler = createSubmissionScheduler({
       scheduleRender: vi.fn(),
       maxBytesPerFrame: 1024,
+      maxTimeMsPerFrame: 100,
+      now: () => 0,
     });
     const adapter = createMeshAdapter({
       renderer,

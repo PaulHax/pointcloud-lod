@@ -15,7 +15,11 @@ const context = (): StreamedMemberContext => ({
       throw new Error("unused");
     },
   },
-  submissions: createSubmissionScheduler({ scheduleRender: vi.fn() }),
+  submissions: createSubmissionScheduler({
+    scheduleRender: vi.fn(),
+    maxTimeMsPerFrame: 100,
+    now: () => 0,
+  }),
   textureCapabilities: { capabilityKey: "none", compressedFormats: [] },
   devicePixelRatio: 1,
 });

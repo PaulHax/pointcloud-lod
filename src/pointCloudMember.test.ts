@@ -62,7 +62,11 @@ const makeContext = (memory = createMemoryPool({ totalBytes: 64_000_000 })) => {
         throw new Error("unused");
       },
     },
-    submissions: createSubmissionScheduler({ scheduleRender }),
+    submissions: createSubmissionScheduler({
+      scheduleRender,
+      maxTimeMsPerFrame: 100,
+      now: () => 0,
+    }),
     textureCapabilities: { capabilityKey: "none", compressedFormats: [] },
     devicePixelRatio: 1,
     onWorkChange: vi.fn(),
