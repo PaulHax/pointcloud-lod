@@ -443,23 +443,54 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
   let resourceCeilingBytes = Number.POSITIVE_INFINITY;
   let disposed = false;
   let workRevision = 0;
+  // Running byte totals rather than a walk per question. Trimming asks how
+  // many bytes are held once per evicted pool entry, and the pool is largest
+  // exactly when the ceiling has just dropped, so re-summing there would make
+  // shedding quadratic. Every mutation of the three maps goes through the
+  // helpers below; `admit`/`withdraw` also keep `submissionRevision` an exact
+  // record of the admitted set changing.
   const pending = new Map<string, PendingTile>();
-  // Every write goes through `admit`/`withdraw`, which is what keeps
-  // `submissionRevision` an exact record of the admitted set changing.
   const submitted = new Map<string, TileResources>();
+  const pooled = new Map<string, TileResources>();
+  type ByteTotal = { geometry: number; texture: number };
+  const pendingBytes: ByteTotal = { geometry: 0, texture: 0 };
+  const submittedBytes: ByteTotal = { geometry: 0, texture: 0 };
+  const pooledBytes: ByteTotal = { geometry: 0, texture: 0 };
   let submissionRevision = 0;
+  const tally = (total: ByteTotal, tile: TileResources, sign: 1 | -1): void => {
+    total.geometry += sign * tile.geometryBytes;
+    total.texture += sign * tile.textureBytes;
+  };
+  const sumOf = (total: ByteTotal): number => total.geometry + total.texture;
   const admit = (id: string, tile: TileResources): void => {
     submitted.set(id, tile);
+    tally(submittedBytes, tile, 1);
     submissionRevision += 1;
   };
   const withdraw = (id: string): TileResources | undefined => {
     const tile = submitted.get(id);
     if (!tile) return undefined;
     submitted.delete(id);
+    tally(submittedBytes, tile, -1);
     submissionRevision += 1;
     return tile;
   };
-  const pooled = new Map<string, TileResources>();
+  const pool = (id: string, tile: TileResources): void => {
+    pooled.set(id, tile);
+    tally(pooledBytes, tile, 1);
+  };
+  const unpool = (id: string, tile: TileResources): void => {
+    pooled.delete(id);
+    tally(pooledBytes, tile, -1);
+  };
+  const holdPending = (entry: PendingTile): void => {
+    pending.set(entry.id, entry);
+    tally(pendingBytes, entry.resources, 1);
+  };
+  const dropPending = (entry: PendingTile): void => {
+    pending.delete(entry.id);
+    tally(pendingBytes, entry.resources, -1);
+  };
   const failed = new Set<string>();
   const replacementClaims = new Map<string, string>();
   let drawn = new Set<string>();
@@ -644,25 +675,14 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
     }
   };
 
-  const ownedBytes = (): number =>
-    [...submitted.values(), ...pooled.values()].reduce(
-      (sum, tile) => sum + tile.geometryBytes + tile.textureBytes,
-      0,
-    );
-
   const reservedBytes = (): number =>
-    ownedBytes() +
-    [...pending.values()].reduce(
-      (sum, tile) =>
-        sum + tile.resources.geometryBytes + tile.resources.textureBytes,
-      0,
-    );
+    sumOf(submittedBytes) + sumOf(pooledBytes) + sumOf(pendingBytes);
 
   const cancelPending = (entry: PendingTile): void => {
     if (entry.cancelled) return;
     entry.cancelled = true;
     for (const job of entry.jobs) job.cancel();
-    pending.delete(entry.id);
+    dropPending(entry);
     for (const id of entry.replacementIds) {
       if (replacementClaims.get(id) === entry.id) replacementClaims.delete(id);
     }
@@ -673,7 +693,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
   const trimPool = (additionalBytes = 0): void => {
     for (const [id, tile] of pooled) {
       if (reservedBytes() + additionalBytes <= resourceCeilingBytes) return;
-      pooled.delete(id);
+      unpool(id, tile);
       release(tile);
     }
   };
@@ -710,7 +730,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
   const finish = (entry: PendingTile): void => {
     if (entry.cancelled || disposed || pending.get(entry.id) !== entry) return;
     attach(entry.resources);
-    pending.delete(entry.id);
+    dropPending(entry);
     admit(entry.id, entry.resources);
     workRevision += 1;
     options.scheduleRender();
@@ -729,12 +749,14 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
   /** Drop every pending, submitted and pooled tile back to an empty adapter. */
   const clearAll = (): void => {
     for (const entry of pending.values()) cancelPending(entry);
-    for (const tile of submitted.values()) release(tile);
-    for (const tile of pooled.values()) release(tile);
-    pending.clear();
-    submitted.clear();
-    submissionRevision += 1;
-    pooled.clear();
+    for (const [id, tile] of submitted) {
+      release(tile);
+      withdraw(id);
+    }
+    for (const [id, tile] of pooled) {
+      release(tile);
+      unpool(id, tile);
+    }
     drawn.clear();
     failed.clear();
     replacementClaims.clear();
@@ -757,13 +779,13 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         try {
           attach(reusable);
         } catch (error) {
-          pooled.delete(id);
+          unpool(id, reusable);
           failed.add(id);
           release(reusable);
           report(options.onError, error);
           return "failed";
         }
-        pooled.delete(id);
+        unpool(id, reusable);
         admit(id, reusable);
         workRevision += 1;
         options.scheduleRender();
@@ -849,7 +871,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         ready: false,
         ...(onSubmitted ? { onSubmitted } : {}),
       };
-      pending.set(id, entry);
+      holdPending(entry);
       for (const replacementId of normalizedReplacements)
         replacementClaims.set(replacementId, id);
       const textures = new Map<DecodedTexture, any>();
@@ -1092,7 +1114,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
       if (!tile) return failed.delete(id);
       drawn.delete(id);
       detach(tile);
-      pooled.set(id, tile);
+      pool(id, tile);
       trimPool();
       workRevision += 1;
       options.scheduleRender();
@@ -1226,26 +1248,11 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         logicalTextureUploadBytes,
         logicalUploadBytes:
           logicalGeometryUploadBytes + logicalTextureUploadBytes,
-        residentGeometryBytes: resident.reduce(
-          (sum, tile) => sum + tile.geometryBytes,
-          0,
-        ),
-        submittedTextureBytes: submittedResources.reduce(
-          (sum, tile) => sum + tile.textureBytes,
-          0,
-        ),
-        pooledTextureBytes: [...pooled.values()].reduce(
-          (sum, tile) => sum + tile.textureBytes,
-          0,
-        ),
-        residentTextureBytes: resident.reduce(
-          (sum, tile) => sum + tile.textureBytes,
-          0,
-        ),
-        residentBytes: resident.reduce(
-          (sum, tile) => sum + tile.geometryBytes + tile.textureBytes,
-          0,
-        ),
+        residentGeometryBytes: submittedBytes.geometry + pooledBytes.geometry,
+        submittedTextureBytes: submittedBytes.texture,
+        pooledTextureBytes: pooledBytes.texture,
+        residentTextureBytes: submittedBytes.texture + pooledBytes.texture,
+        residentBytes: sumOf(submittedBytes) + sumOf(pooledBytes),
         resourceCeilingBytes,
         drawnTiles: drawnResources.length,
         drawnTileIds: [...drawn],
