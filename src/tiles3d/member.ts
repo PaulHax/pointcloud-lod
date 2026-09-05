@@ -444,13 +444,24 @@ export const createTiles3dMember = (
     ).desiredTileIds.join("\n");
   };
 
-  const retryIfDesiredSelectionChanged = (): void => {
-    if (!memoryConstrained && blockedGroupAncestors.size === 0) return;
-    if (constrainedDesiredSignature === unconstrainedDesiredSignature()) return;
+  const clearBudgetConstraint = (): void => {
     memoryConstrained = false;
     blockedGroupAncestors.clear();
     irreducibleBudget = false;
     constrainedDesiredSignature = null;
+  };
+
+  const clearAdmissionState = (): void => {
+    requested.clear();
+    decoded.clear();
+    admissionBlocked.clear();
+    admissionFailed.clear();
+  };
+
+  const retryIfDesiredSelectionChanged = (): void => {
+    if (!memoryConstrained && blockedGroupAncestors.size === 0) return;
+    if (constrainedDesiredSignature === unconstrainedDesiredSignature()) return;
+    clearBudgetConstraint();
   };
 
   const readiness = (id: string) => {
@@ -828,14 +839,8 @@ export const createTiles3dMember = (
         for (const id of requested) adapter.cancelTile(id);
         adapter.clearTiles();
         pickSet.replaceDrawn([]);
-        requested.clear();
-        decoded.clear();
-        admissionBlocked.clear();
-        admissionFailed.clear();
-        memoryConstrained = false;
-        blockedGroupAncestors.clear();
-        irreducibleBudget = false;
-        constrainedDesiredSignature = null;
+        clearAdmissionState();
+        clearBudgetConstraint();
         updateDrawSet();
       } else if (!source) beginLoad();
       else {
@@ -881,14 +886,8 @@ export const createTiles3dMember = (
         materializedTileById.clear();
         sourceState = "idle";
         traversal = null;
-        requested.clear();
-        decoded.clear();
-        admissionBlocked.clear();
-        admissionFailed.clear();
-        memoryConstrained = false;
-        blockedGroupAncestors.clear();
-        irreducibleBudget = false;
-        constrainedDesiredSignature = null;
+        clearAdmissionState();
+        clearBudgetConstraint();
         if (active) beginLoad();
       } else {
         queue?.configure({
@@ -965,10 +964,7 @@ export const createTiles3dMember = (
         regime: next.regime,
       };
       if (allocation.memoryBudgetBytes > previousMemoryBudgetBytes) {
-        memoryConstrained = false;
-        blockedGroupAncestors.clear();
-        irreducibleBudget = false;
-        constrainedDesiredSignature = null;
+        clearBudgetConstraint();
       } else if (adapter.stats().residentBytes > allocation.memoryBudgetBytes) {
         memoryConstrained = true;
         irreducibleBudget = false;
@@ -1076,11 +1072,8 @@ export const createTiles3dMember = (
       subtreeStore?.dispose();
       subtreeStore = null;
       subtreeSnapshot = null;
-      requested.clear();
-      decoded.clear();
-      admissionBlocked.clear();
+      clearAdmissionState();
       blockedGroupAncestors.clear();
-      admissionFailed.clear();
       adapter.dispose();
       pickSet.dispose();
       source = null;
