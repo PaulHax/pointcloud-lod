@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   createTelemetryRecorder,
-  isSoftwareRenderer,
   type TelemetryEnvironment,
   type TelemetryFrameEvent,
 } from "./telemetryRecorder";
@@ -30,16 +29,6 @@ const ENVIRONMENT: TelemetryEnvironment = {
 };
 
 describe("example telemetry", () => {
-  it("recognizes common software WebGL renderers without flagging hardware", () => {
-    expect(isSoftwareRenderer("ANGLE (Google, Vulkan SwiftShader)")).toBe(true);
-    expect(isSoftwareRenderer("Mesa/X.org", "llvmpipe (LLVM 19.1.1)")).toBe(
-      true,
-    );
-    expect(isSoftwareRenderer("NVIDIA Corporation", "NVIDIA RTX 4090")).toBe(
-      false,
-    );
-  });
-
   it("classifies the complete interval between presentations by work revision", () => {
     let clock = 0;
     const recorder = createTelemetryRecorder({

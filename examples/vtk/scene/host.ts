@@ -26,9 +26,9 @@ import {
   type StreamedSceneCoordinator,
   type TextureCapabilities,
 } from "../../../src";
-import { WORLD_UP, installCameraControls } from "../harness/cameraControls";
-import { createGpuFrameTimer, type GpuFrameTimer } from "../harness/gpuTimer";
-import { isSoftwareRenderer } from "../harness/telemetryRecorder";
+import { WORLD_UP, installCameraControls } from "../cameraControls";
+import { createGpuFrameTimer, type GpuFrameTimer } from "../gpuTimer";
+import { isSoftwareRenderer } from "../softwareRenderer";
 import { createDecodeWorkers } from "./decodeAssets";
 
 /**

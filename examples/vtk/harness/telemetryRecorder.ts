@@ -9,6 +9,8 @@
  * of anything.
  */
 
+import { isSoftwareRenderer } from "../softwareRenderer";
+
 export type TelemetryEnvironment = {
   readonly capturedAt: string;
   readonly userAgent: string;
@@ -190,15 +192,6 @@ const textParameter = (
     return null;
   }
 };
-
-export const isSoftwareRenderer = (
-  ...descriptions: readonly (string | null)[]
-): boolean =>
-  descriptions.some((description) =>
-    /swiftshader|llvmpipe|softpipe|lavapipe|software rasterizer|software renderer/i.test(
-      description ?? "",
-    ),
-  );
 
 export const captureTelemetryEnvironment = (
   gl: WebGLRenderingContext | WebGL2RenderingContext | null,
