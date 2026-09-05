@@ -37,11 +37,7 @@ import {
   finiteWithin,
   wholeAtLeast,
 } from "./numeric";
-import {
-  createMemoryPool,
-  type MemoryPool,
-  type MemoryPoolMember,
-} from "./memoryPool";
+import { defaultMemoryBudgetBytes } from "./memoryPool";
 import {
   pickPointInTiles,
   type PickTile,
@@ -124,19 +120,11 @@ export type LodControllerOptions = {
   /** Initial fraction of selected points to distribute across tile prefixes. */
   densityFraction?: number;
   /**
-   * GPU-memory budget for resident tile bytes. Pass a `MemoryPool` to share
-   * one byte budget across controllers on the same GPU (each gets an even
-   * share), a number of bytes for a private budget, or omit for a private
-   * budget sized by `defaultMemoryBudgetBytes()`. The controller converts its
-   * byte share into a point ceiling using the measured bytes-per-point of
-   * resident tiles, so the frame-time loop can never climb into an
-   * out-of-memory failure it has no way to sense.
-   */
-  memory?: MemoryPool | number;
-  /**
-   * Coordinator-owned byte allowance. When supplied, the controller does not
-   * register with a memory pool; the coordinator updates the allowance through
-   * `setMemoryBudgetBytes`. Mutually exclusive with `memory`.
+   * GPU-memory budget for resident tile bytes, updated through
+   * `setMemoryBudgetBytes`. Defaults to `defaultMemoryBudgetBytes()`. The
+   * controller converts it into a point ceiling using the measured
+   * bytes-per-point of resident tiles, so the frame-time loop can never climb
+   * into an out-of-memory failure it has no way to sense.
    */
   memoryBudgetBytes?: number;
   /** Parallel tile fetches. Default 6. */
@@ -999,34 +987,12 @@ export const createLodController = (
   // measured bytes-per-point of resident tiles (falling back to an estimate
   // until enough points are resident to measure). Whatever budget the host
   // asks for, this ceiling is what keeps selection inside GPU memory.
-  if (options.memory !== undefined && options.memoryBudgetBytes !== undefined) {
-    throw new Error("memory and memoryBudgetBytes are mutually exclusive");
-  }
   let externalMemoryBudgetBytes =
     options.memoryBudgetBytes === undefined
-      ? null
+      ? defaultMemoryBudgetBytes()
       : Math.floor(
           finiteAtLeast("memoryBudgetBytes", options.memoryBudgetBytes, 0),
         );
-  const memoryPool: MemoryPool | null =
-    externalMemoryBudgetBytes !== null
-      ? null
-      : typeof options.memory === "object"
-        ? options.memory
-        : createMemoryPool(
-            typeof options.memory === "number"
-              ? { totalBytes: wholeAtLeast("memory", options.memory, 1) }
-              : {},
-          );
-  let poolMember: MemoryPoolMember | null = null;
-  const joinMemoryPool = (): void => {
-    if (poolMember !== null || memoryPool === null) return;
-    poolMember = memoryPool.register(() => {
-      if (disposed || !active) return;
-      requestSelection();
-    });
-  };
-  if (active) joinMemoryPool();
 
   const FALLBACK_BYTES_PER_POINT = 16;
   const MEASURE_MIN_POINTS = 100_000;
@@ -1036,16 +1002,10 @@ export const createLodController = (
       ? residentBytes / residentPoints
       : FALLBACK_BYTES_PER_POINT;
 
-  /**
-   * This controller's byte share. A pool handed in by the host is not ours to
-   * trust, and a non-finite share would make every budget comparison and both
-   * memory statistics NaN, so nonsense reads as no memory at all.
-   */
-  const memoryBudgetBytes = (): number => {
-    if (externalMemoryBudgetBytes !== null) return externalMemoryBudgetBytes;
-    const bytes = poolMember?.budgetBytes() ?? 0;
-    return !finitePositive(bytes) ? 0 : bytes;
-  };
+  // An inactive controller holds no share: it has dropped its resident tiles
+  // and must not reselect until reactivated.
+  const memoryBudgetBytes = (): number =>
+    active ? externalMemoryBudgetBytes : 0;
 
   const memoryCeilingPoints = (): number => {
     const bytes = memoryBudgetBytes();
@@ -1934,13 +1894,7 @@ export const createLodController = (
     },
 
     setMemoryBudgetBytes(bytes) {
-      if (
-        disposed ||
-        externalMemoryBudgetBytes === null ||
-        !finiteNonNegative(bytes)
-      ) {
-        return;
-      }
+      if (disposed || !finiteNonNegative(bytes)) return;
       const next = Math.floor(bytes);
       if (next === externalMemoryBudgetBytes) return;
       const previousBudget = currentBudget();
@@ -1997,15 +1951,12 @@ export const createLodController = (
       if (disposed || nextActive === active) return;
       active = nextActive;
       if (active) {
-        joinMemoryPool();
         queueRootPage();
         runSelection();
         return;
       }
 
       clearSelectionTimer();
-      poolMember?.release();
-      poolMember = null;
       // No new work while hidden. Hierarchy pages already in flight are left
       // to land: unlike tiles they survive deactivation in `hierarchy`, so
       // cancelling one only buys a refetch of the same bytes on reactivation.
@@ -2170,8 +2121,6 @@ export const createLodController = (
       const removed = [...submitted.keys()].map(keyFromString);
       dropEverything();
       submitted = new Map();
-      poolMember?.release();
-      poolMember = null;
       disposed = true;
       if (removed.length > 0) {
         onTiles({ added: [], removed });

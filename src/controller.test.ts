@@ -19,7 +19,6 @@ import {
   type LodControllerOptions,
   type TileBatch,
 } from "./controller";
-import { createMemoryPool, type MemoryPool } from "./memoryPool";
 import {
   ROOT_KEY,
   childKeys,
@@ -2047,8 +2046,8 @@ describe("createLodController — budget and memory ceiling", () => {
   const makeBudgeted = (
     tree: Record<string, FakeEntry>,
     pointBudget: number,
-    memory?: number,
-  ) => makeController(tree, { pointBudget, memory });
+    memoryBudgetBytes?: number,
+  ) => makeController(tree, { pointBudget, memoryBudgetBytes });
 
   it("applies a budget drop immediately during interaction", async () => {
     const { controller, deferred } = makeBudgeted(SMALL_TREE, 1000);
@@ -2108,56 +2107,7 @@ describe("createLodController — budget and memory ceiling", () => {
     controller.dispose();
   });
 
-  it("controllers on a shared pool split the byte budget and rebalance", async () => {
-    const pool = createMemoryPool({ totalBytes: 300 * BYTES_PER_POINT });
-    const first = makeFakeSource(SMALL_TREE);
-    const sink = collectBatches();
-    const controller = createLodController({
-      source: first.source,
-      onTiles: sink.onTiles,
-      scheduleRender: sink.scheduleRender,
-      selectionDelayMs: 0,
-      memory: pool,
-    });
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
-    for (const d of first.deferred.values()) d.resolve();
-    await settle();
-    // Alone in the pool: the full 300-point ceiling fits all three tiles.
-    expect(controller.stats().memoryBudgetBytes).toBe(300 * BYTES_PER_POINT);
-    expect(controller.stats().residentTiles).toBe(3);
-
-    // A second cloud joins: shares drop to 150 points each and the first
-    // controller reselects down — N clouds must not multiply GPU memory by N.
-    const second = makeFakeSource(SMALL_TREE);
-    const other = createLodController({
-      source: second.source,
-      onTiles: () => {},
-      scheduleRender: () => {},
-      selectionDelayMs: 0,
-      memory: pool,
-    });
-    await settle();
-    expect(controller.stats().memoryBudgetBytes).toBe(150 * BYTES_PER_POINT);
-    expect(controller.stats().residentTiles).toBe(1);
-
-    // A hidden cloud leaves GPU-budget membership without being disposed: the
-    // visible survivor's share grows and its children are reselected.
-    other.setActive(false);
-    await settle();
-    expect(pool.memberCount()).toBe(1);
-    expect(other.stats().memoryBudgetBytes).toBe(0);
-    for (const d of first.deferred.values()) d.resolve();
-    await settle();
-    expect(controller.stats().memoryBudgetBytes).toBe(300 * BYTES_PER_POINT);
-    expect(controller.stats().residentTiles).toBe(3);
-    other.dispose();
-    controller.dispose();
-  });
-
-  it("accepts a coordinator-owned byte allowance without joining the pool", async () => {
-    const pool = createMemoryPool({ totalBytes: 999 });
+  it("accepts and updates a coordinator-owned byte allowance", async () => {
     const { source, deferred } = makeFakeSource(SMALL_TREE);
     const controller = createLodController({
       source,
@@ -2166,7 +2116,6 @@ describe("createLodController — budget and memory ceiling", () => {
       selectionDelayMs: 0,
       memoryBudgetBytes: 150 * BYTES_PER_POINT,
     });
-    expect(pool.memberCount()).toBe(0);
     controller.setCamera(VIEW);
     await settle();
     for (const d of deferred.values()) d.resolve();
@@ -2177,7 +2126,6 @@ describe("createLodController — budget and memory ceiling", () => {
     for (const d of deferred.values()) d.resolve();
     await settle();
     expect(controller.stats().pointBudget).toBe(300);
-    expect(pool.memberCount()).toBe(0);
     controller.dispose();
   });
 });
@@ -3019,7 +2967,6 @@ describe("createLodController — numeric configuration", () => {
       expect(() => make({ fetchConcurrency: value })).toThrow(
         /fetchConcurrency/,
       );
-      expect(() => make({ memory: value })).toThrow(/memory/);
     }
     for (const value of [...NON_FINITE, -1, -1e9]) {
       expect(() => make({ selectionDelayMs: value })).toThrow(
@@ -3135,27 +3082,6 @@ describe("createLodController — numeric configuration", () => {
       expect(after.residentTiles).toBe(before.residentTiles);
       expect(Number.isFinite(after.selection.projectedImportance)).toBe(true);
     }
-    controller.dispose();
-  });
-
-  it("treats a memory pool that answers nonsense as no memory", async () => {
-    const brokenPool: MemoryPool = {
-      register: () => ({ budgetBytes: () => Number.NaN, release: () => {} }),
-      memberCount: () => 1,
-    };
-    const { controller, loadCalls } = makeController(SMALL_TREE, {
-      memory: brokenPool,
-    });
-    await settle();
-    controller.setCamera(VIEW);
-    await settle();
-
-    const stats = controller.stats();
-    expect(Number.isFinite(stats.pointBudget)).toBe(true);
-    expect(stats.pointBudget).toBe(0);
-    expect(stats.memoryCeilingPoints).toBe(0);
-    expect(stats.memoryBudgetBytes).toBe(0);
-    expect(loadCalls).toEqual([]);
     controller.dispose();
   });
 });

@@ -755,7 +755,7 @@ describe("adapter driven by a live controller", () => {
       scheduleRender: () => {},
       pointBudget: 500,
       selectionDelayMs: 0,
-      memory: 64 * 1024 * 1024,
+      memoryBudgetBytes: 64 * 1024 * 1024,
     });
     const submittedPositions = (): Set<Float32Array> =>
       new Set([...submitted.values()].map((payload) => payload.positions));
