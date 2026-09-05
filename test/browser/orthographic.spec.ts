@@ -26,10 +26,8 @@ import {
 
 const projectedSpacing = async (session: ExampleSession): Promise<number> => {
   const stats = await session.settle();
-  const value =
-    stats.controller?.selection.readyTerminalFrontier.projectedSpacingCssPx
-      .p50 ?? null;
-  expect(value, "the frontier reported no projected spacing").not.toBeNull();
+  const value = stats.controller?.selection.projectedSpacingCssPx ?? null;
+  expect(value, "the selection reported no projected spacing").not.toBeNull();
   return value as number;
 };
 

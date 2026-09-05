@@ -957,7 +957,17 @@ describe("createLodController", () => {
         pageNodes: { "1-0-0-0": { pointCount: 40, spacing: 0.03 } },
       },
     };
-    const { controller, deferred } = makeController(tree);
+    const { controller, deferred } = makeController(tree, {
+      presentation: {
+        mode: "auto",
+        userScale: 1,
+        // Wide enough that the diameter reports the spacing unclamped, so the
+        // superseded placeholder (4 * 50) and the real node (0.03 * 50) are
+        // distinguishable rather than both pinned to the maximum.
+        minDiameterCssPx: 0.1,
+        maxDiameterCssPx: 1000,
+      },
+    });
     await settle();
     // Parallel projection, so a projected spacing is the world spacing times
     // viewportHeight / (2 * parallelScale) = 50, with no distance in it.
@@ -967,9 +977,10 @@ describe("createLodController", () => {
     for (const d of deferred.values()) d.resolve();
     await settle();
 
-    const frontier = controller.stats().selection.readyTerminalFrontier;
-    expect(frontier.leafNodes).toBe(1);
-    expect(frontier.projectedSpacingCssPx.p50).toBeCloseTo(0.03 * 50, 6);
+    expect(controller.stats().presentation.diameterCssPx).toBeCloseTo(
+      0.03 * 50,
+      6,
+    );
     controller.dispose();
   });
 
@@ -1098,107 +1109,26 @@ describe("createLodController — ready frontier and presentation", () => {
     };
   };
 
-  it("reports leaf, tile-readiness, and budget terminal coverage", async () => {
-    const tree: Record<string, FakeEntry> = {
-      "0-0-0-0": {
-        pointCount: 100,
-        spacing: 4,
-        children: ["1-0-0-0", "1-1-0-0"],
-      },
-      "1-0-0-0": { pointCount: 10, spacing: 1 },
-      "1-1-0-0": { pointCount: 10, spacing: 1 },
-    };
-    const { controller, deferred } = makePresented(tree, {
-      pointBudget: 110,
-      presentation: { mode: "fixed", diameterCssPx: 3 },
-    });
-    await settle();
-    controller.setCamera({ ...VIEW, position: [0, 0, 10] });
-    await settle();
+  /**
+   * Auto sizing is the only consumer of terminal spacing. Clamps wide enough
+   * to never bind make the reported diameter the projected spacing itself.
+   */
+  const UNCLAMPED_AUTO = {
+    mode: "auto",
+    userScale: 1,
+    minDiameterCssPx: 0.001,
+    maxDiameterCssPx: 100_000,
+  } as const;
 
-    deferred.get("0-0-0-0")!.resolve();
-    await settle();
-    expect(controller.stats().selection.readyTerminalFrontier).toMatchObject({
-      count: 1,
-      leafNodes: 0,
-      tileBlockedNodes: 1,
-      budgetBlockedNodes: 1,
-    });
-
-    const selectedChild = [...deferred.keys()].find(
-      (key) => key !== "0-0-0-0",
-    )!;
-    deferred.get(selectedChild)!.resolve();
-    await settle();
-    expect(controller.stats().selection.readyTerminalFrontier).toMatchObject({
-      count: 2,
-      leafNodes: 1,
-      tileBlockedNodes: 0,
-      budgetBlockedNodes: 1,
-    });
-    controller.dispose();
-  });
-
-  it("reports cutoff terminals instead of storage-level descendants", async () => {
-    const { controller, deferred } = makePresented(SMALL_TREE, {
-      presentation: { mode: "fixed", diameterCssPx: 2 },
-    });
-    await settle();
-    controller.setRefinementCutoffPx(1_000_000);
-    controller.setCamera({ ...VIEW, position: [0, 0, 10] });
-    await settle();
-    deferred.get("0-0-0-0")!.resolve();
-    await settle();
-
-    expect(controller.stats().selection.readyTerminalFrontier).toMatchObject({
-      count: 1,
-      cutoffNodes: 1,
-      leafNodes: 0,
-    });
-    controller.dispose();
-  });
-
-  it("projects the spacing supplied by each hierarchy node", async () => {
-    const tree: Record<string, FakeEntry> = {
-      "0-0-0-0": {
-        pointCount: 100,
-        spacing: 100,
-        children: ["1-0-0-0"],
-      },
-      "1-0-0-0": { pointCount: 10, spacing: 0.001 },
-    };
-    const { controller, deferred } = makePresented(tree, {
-      presentation: { mode: "fixed", diameterCssPx: 2 },
-    });
-    await settle();
-    controller.setCamera({ ...VIEW, position: [0, 0, 10] });
-    await settle();
-    for (const pending of deferred.values()) pending.resolve();
-    await settle();
-
-    const p75 =
-      controller.stats().selection.readyTerminalFrontier.projectedSpacingCssPx
-        .p75;
-    expect(p75).not.toBeNull();
-    expect(p75!).toBeLessThan(0.01);
-    controller.dispose();
-  });
-
-  /** Projected spacing of the whole ready frontier, the diagnostic hosts read. */
-  const projectedSpacingP75 = (controller: LodController): number | null =>
-    controller.stats().selection.readyTerminalFrontier.projectedSpacingCssPx
-      .p75;
+  const spacing = (controller: LodController): number =>
+    controller.stats().presentation.diameterCssPx;
 
   it("projects spacing from the parallel scale, not the distance, under an orthographic camera", async () => {
     const tree: Record<string, FakeEntry> = {
       "0-0-0-0": { pointCount: 100, spacing: 2 },
     };
-    const near = makePresented(tree, {
-      presentation: { mode: "fixed", diameterCssPx: 2 },
-    });
-    const far = makePresented(tree, {
-      presentation: { mode: "fixed", diameterCssPx: 2 },
-    });
+    const near = makePresented(tree, { presentation: UNCLAMPED_AUTO });
+    const far = makePresented(tree, { presentation: UNCLAMPED_AUTO });
     await settle();
     // Half-height 1 over 100 px = 50 px/m, so a 2 m spacing projects to 100 px
     // whether the camera sits on the node or a kilometre away.
@@ -1209,8 +1139,8 @@ describe("createLodController — ready frontier and presentation", () => {
     for (const pending of far.deferred.values()) pending.resolve();
     await settle();
 
-    expect(projectedSpacingP75(near.controller)).toBeCloseTo(100);
-    expect(projectedSpacingP75(far.controller)).toBeCloseTo(100);
+    expect(spacing(near.controller)).toBeCloseTo(100);
+    expect(spacing(far.controller)).toBeCloseTo(100);
 
     // Zooming a parallel camera in halves the scale and doubles the spacing.
     near.controller.setCamera({
@@ -1219,7 +1149,7 @@ describe("createLodController — ready frontier and presentation", () => {
       parallelScale: 0.5,
     });
     await settle();
-    expect(projectedSpacingP75(near.controller)).toBeCloseTo(200);
+    expect(spacing(near.controller)).toBeCloseTo(200);
 
     near.controller.dispose();
     far.controller.dispose();
@@ -1230,14 +1160,14 @@ describe("createLodController — ready frontier and presentation", () => {
       "0-0-0-0": { pointCount: 100, spacing: 2 },
     };
     const { controller, deferred } = makePresented(tree, {
-      presentation: { mode: "fixed", diameterCssPx: 2 },
+      presentation: UNCLAMPED_AUTO,
     });
     await settle();
     controller.setCamera(VIEW);
     await settle();
     for (const pending of deferred.values()) pending.resolve();
     await settle();
-    const perspectiveSpacing = projectedSpacingP75(controller);
+    const perspectiveSpacing = spacing(controller);
     const generation = controller.stats().selection.generation;
 
     // Same matrix, same position, same viewport: only the projection differs,
@@ -1246,9 +1176,7 @@ describe("createLodController — ready frontier and presentation", () => {
     controller.setCamera(ORTHOGRAPHIC_VIEW);
     await settle();
     expect(controller.stats().selection.generation).toBeGreaterThan(generation);
-    expect(projectedSpacingP75(controller)).not.toBeCloseTo(
-      perspectiveSpacing!,
-    );
+    expect(spacing(controller)).not.toBeCloseTo(perspectiveSpacing);
     controller.dispose();
   });
 
@@ -1276,116 +1204,6 @@ describe("createLodController — ready frontier and presentation", () => {
     });
     await settle();
     expect(controller.stats().selection.generation).toBeGreaterThan(widened);
-    controller.dispose();
-  });
-
-  it("keeps the ready parent terminal while a hierarchy page is unavailable", async () => {
-    let resolveChildPage!: (infos: NodeInfo[]) => void;
-    let resolveRootTile!: (tile: TileData) => void;
-    const source: TileSource = {
-      metadata: () => ({ pointCount: 110 }),
-      async nodes(key) {
-        if (key.level === 0) {
-          return [
-            {
-              key: { level: 0, x: 0, y: 0, z: 0 },
-              pointCount: 100,
-              bounds: { min: [-1, -1, -1], max: [1, 1, 1] },
-              spacing: 1,
-              children: [{ level: 1, x: 0, y: 0, z: 0 }],
-            },
-            {
-              key: { level: 1, x: 0, y: 0, z: 0 },
-              pointCount: 0,
-              bounds: { min: [-1, -1, -1], max: [0, 0, 0] },
-              spacing: 0.5,
-              pageRef: true,
-            },
-          ];
-        }
-        return new Promise<NodeInfo[]>((resolve) => {
-          resolveChildPage = resolve;
-        });
-      },
-      loadTile(key) {
-        if (key.level === 0) {
-          return new Promise<TileData>((resolve) => {
-            resolveRootTile = resolve;
-          });
-        }
-        return new Promise<TileData>(() => {});
-      },
-    };
-    const controller = createLodController({
-      source,
-      onTiles: () => {},
-      scheduleRender: () => {},
-      selectionDelayMs: 0,
-    });
-    await settle();
-    controller.setCamera({ ...VIEW, position: [0, 0, 10] });
-    await settle();
-    resolveRootTile(makeTile(100));
-    await settle();
-    expect(controller.stats().selection.readyTerminalFrontier).toMatchObject({
-      count: 1,
-      hierarchyBlockedNodes: 1,
-    });
-
-    resolveChildPage([
-      {
-        key: { level: 1, x: 0, y: 0, z: 0 },
-        pointCount: 10,
-        bounds: { min: [-1, -1, -1], max: [0, 0, 0] },
-        spacing: 0.5,
-      },
-    ]);
-    await settle();
-    expect(controller.stats().selection.readyTerminalFrontier).toMatchObject({
-      count: 1,
-      hierarchyBlockedNodes: 0,
-      tileBlockedNodes: 1,
-    });
-    controller.dispose();
-  });
-
-  it("keeps a mixed frontier covered by its coarsest terminal spacing", async () => {
-    const tree: Record<string, FakeEntry> = {
-      "0-0-0-0": {
-        pointCount: 100,
-        spacing: 0.08,
-        children: ["1-0-0-0", "1-1-0-0", "1-0-1-0", "1-1-1-0"],
-      },
-      "1-0-0-0": { pointCount: 10, spacing: 0.02 },
-      "1-1-0-0": { pointCount: 10, spacing: 0.02 },
-      "1-0-1-0": { pointCount: 10, spacing: 0.02 },
-      "1-1-1-0": { pointCount: 10, spacing: 0.02 },
-    };
-    const { controller, deferred } = makePresented(tree, {
-      pointBudget: 130,
-      presentation: {
-        mode: "auto",
-        userScale: 1,
-        minDiameterCssPx: 0.5,
-        maxDiameterCssPx: 10,
-      },
-    });
-    await settle();
-    controller.setCamera(ORTHOGRAPHIC_VIEW);
-    await settle();
-    for (const pending of deferred.values()) pending.resolve();
-    await settle();
-
-    const stats = controller.stats();
-    expect(stats.selection.readyTerminalFrontier).toMatchObject({
-      count: 4,
-      budgetBlockedNodes: 1,
-      projectedSpacingCssPx: {
-        p75: 1,
-        max: 4,
-      },
-    });
-    expect(stats.presentation.diameterCssPx).toBe(4);
     controller.dispose();
   });
 
@@ -1430,10 +1248,6 @@ describe("createLodController — ready frontier and presentation", () => {
       expect(controller.stats().presentation.diameterCssPx).toBeCloseTo(1);
     }
     expect(diameters).toEqual([2, 1]);
-    expect(
-      controller.stats().selection.readyTerminalFrontier.projectedSpacingCssPx
-        .max,
-    ).toBeCloseTo(1);
     controller.dispose();
   });
 
@@ -1460,9 +1274,6 @@ describe("createLodController — ready frontier and presentation", () => {
     controller.setDensityFraction(0.25);
     const thinned = controller.stats();
     expect(thinned.presentation.diameterCssPx).toBeCloseTo(8);
-    expect(
-      thinned.selection.readyTerminalFrontier.projectedSpacingCssPx.max,
-    ).toBeCloseTo(8);
     expect(thinned.selection.generation).toBe(generation);
 
     controller.setDensityFraction(1);
@@ -1484,10 +1295,6 @@ describe("createLodController — ready frontier and presentation", () => {
 
     vi.advanceTimersByTime(300);
     await settle();
-    expect(
-      controller.stats().selection.readyTerminalFrontier.projectedSpacingCssPx
-        .p75,
-    ).toBeCloseTo(5);
     expect(controller.stats().presentation.diameterCssPx).toBeCloseTo(4);
 
     controller.beginInteraction();
@@ -2167,9 +1974,6 @@ describe("createLodController — selection stats", () => {
       before.selection.generation,
     );
     expect(cutoff.selection.sseStoppedNodes).toBeGreaterThan(0);
-    expect(cutoff.selection.readyTerminalFrontier.cutoffNodes).toBeGreaterThan(
-      0,
-    );
 
     for (const d of deferred.values()) d.resolve();
     await settle();
