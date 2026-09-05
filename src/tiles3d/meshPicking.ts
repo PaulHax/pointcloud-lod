@@ -1,8 +1,11 @@
 /** Renderer-neutral ray/triangle picking over the exact submitted draw set. */
 
 import {
+  IDENTITY,
   cursorRay,
+  projectedBoundsAabbCssPx,
   projectPointToCssPx,
+  transformPointBy,
   type CameraView,
   type Mat16,
 } from "../camera";
@@ -70,7 +73,6 @@ export type MeshPickSet = {
   dispose(): void;
 };
 
-const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 const TRIANGLE_EPSILON = 1e-10;
 
 type Vec3 = readonly [number, number, number];
@@ -95,21 +97,6 @@ const localPoint = (
   origin[0] + positions[vertexIndex * 3]!,
   origin[1] + positions[vertexIndex * 3 + 1]!,
   origin[2] + positions[vertexIndex * 3 + 2]!,
-];
-
-const transformPoint = (matrix: readonly number[], point: Vec3): Vec3 => [
-  matrix[0]! * point[0] +
-    matrix[4]! * point[1] +
-    matrix[8]! * point[2] +
-    matrix[12]!,
-  matrix[1]! * point[0] +
-    matrix[5]! * point[1] +
-    matrix[9]! * point[2] +
-    matrix[13]!,
-  matrix[2]! * point[0] +
-    matrix[6]! * point[1] +
-    matrix[10]! * point[2] +
-    matrix[14]!,
 ];
 
 const subtract = (left: Vec3, right: Vec3): Vec3 => [
@@ -244,32 +231,20 @@ const projectedBoundsContain = (
   matrix: readonly number[],
 ): boolean => {
   if (!bounds) return true;
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  for (const x of [bounds.min[0], bounds.max[0]]) {
-    for (const y of [bounds.min[1], bounds.max[1]]) {
-      for (const z of [bounds.min[2], bounds.max[2]]) {
-        const projected = projectPointToCssPx(
-          view.viewProj,
-          [
-            matrix[0]! * x + matrix[4]! * y + matrix[8]! * z + matrix[12]!,
-            matrix[1]! * x + matrix[5]! * y + matrix[9]! * z + matrix[13]!,
-            matrix[2]! * x + matrix[6]! * y + matrix[10]! * z + matrix[14]!,
-          ],
-          view.viewportWidthCssPx,
-          view.viewportHeightCssPx,
-        );
-        if (!projected) return true;
-        minX = Math.min(minX, projected.xCssPx);
-        minY = Math.min(minY, projected.yCssPx);
-        maxX = Math.max(maxX, projected.xCssPx);
-        maxY = Math.max(maxY, projected.yCssPx);
-      }
-    }
-  }
-  return cssX >= minX && cssX <= maxX && cssY >= minY && cssY <= maxY;
+  const aabb = projectedBoundsAabbCssPx(
+    view.viewProj,
+    bounds,
+    view.viewportWidthCssPx,
+    view.viewportHeightCssPx,
+    matrix,
+  );
+  if (aabb === null) return true;
+  return (
+    cssX >= aabb.minXCssPx &&
+    cssX <= aabb.maxXCssPx &&
+    cssY >= aabb.minYCssPx &&
+    cssY <= aabb.maxYCssPx
+  );
 };
 
 export const pickSubmittedTriangles = (
@@ -332,9 +307,9 @@ export const pickSubmittedTriangles = (
         const hit = triangleHit(
           ray.origin,
           ray.direction,
-          transformPoint(drawnMatrix, a),
-          transformPoint(drawnMatrix, b),
-          transformPoint(drawnMatrix, c),
+          transformPointBy(drawnMatrix, a),
+          transformPointBy(drawnMatrix, b),
+          transformPointBy(drawnMatrix, c),
         );
         if (hit === null) continue;
         const alpha = alphaAtHit(primitive, triangle, hit.u, hit.v);
@@ -380,7 +355,7 @@ export const pickSubmittedTriangles = (
     return { status: "miss" };
   }
   const { a, b, c, u, v } = bestLocal;
-  const scenePoint = transformPoint(sceneMatrix, [
+  const scenePoint = transformPointBy(sceneMatrix, [
     a[0] + u * (b[0] - a[0]) + v * (c[0] - a[0]),
     a[1] + u * (b[1] - a[1]) + v * (c[1] - a[1]),
     a[2] + u * (b[2] - a[2]) + v * (c[2] - a[2]),

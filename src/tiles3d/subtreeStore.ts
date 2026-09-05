@@ -1,5 +1,7 @@
 /** Revision-scoped bounded fetch/parse store for implicit hierarchy subtrees. */
 
+import { finiteAtLeast } from "../numeric";
+import { safeCall } from "../observers";
 import { parseSubtree, type ParsedSubtree } from "./subtree";
 
 export type SubtreeRequest = {
@@ -144,21 +146,6 @@ const positiveInteger = (value: number, path: string): number => {
   return value;
 };
 
-const nonnegative = (value: number, path: string): number => {
-  if (!Number.isFinite(value) || value < 0) {
-    throw new RangeError(`${path} must be finite and >= 0`);
-  }
-  return value;
-};
-
-const safeCall = (callback: () => void): void => {
-  try {
-    callback();
-  } catch {
-    // Observers cannot corrupt fetch/cache accounting.
-  }
-};
-
 const normalize = (request: SubtreeRequest): SubtreeRequest => {
   if (typeof request.id !== "string" || request.id.length === 0) {
     throw new TypeError("subtree request id must be a non-empty string");
@@ -180,7 +167,7 @@ export const createSubtreeStore = (
     options.maxConcurrency,
     "maxConcurrency",
   );
-  const maxBytes = nonnegative(options.maxBytes, "maxBytes");
+  const maxBytes = finiteAtLeast("maxBytes", options.maxBytes, 0);
   const maxAttempts = positiveInteger(options.maxAttempts ?? 3, "maxAttempts");
   const retryBackoffMs =
     options.retryBackoffMs ?? ((attempt: number) => 250 * 2 ** (attempt - 1));
@@ -300,7 +287,11 @@ export const createSubtreeStore = (
       return;
     }
     try {
-      const delay = nonnegative(retryBackoffMs(entry.attempt), "retry backoff");
+      const delay = finiteAtLeast(
+        "retry backoff",
+        retryBackoffMs(entry.attempt),
+        0,
+      );
       entry.status = "retrying";
       entry.retry = setTimeout(() => {
         if (!current(entry.request.id, entry, operationEpoch)) return;

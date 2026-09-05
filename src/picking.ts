@@ -14,7 +14,7 @@
 import {
   CLIP_W_EPSILON,
   cursorRay,
-  projectPointToCssPx,
+  projectedBoundsAabbCssPx,
   type CameraView,
   type CursorRay,
   type Mat16,
@@ -101,32 +101,18 @@ const tileIsPickCandidate = (
   bounds: Bounds | undefined,
 ): boolean => {
   if (bounds === undefined) return true;
-  let minX = Number.POSITIVE_INFINITY;
-  let minY = Number.POSITIVE_INFINITY;
-  let maxX = Number.NEGATIVE_INFINITY;
-  let maxY = Number.NEGATIVE_INFINITY;
-  for (const x of [bounds.min[0], bounds.max[0]]) {
-    for (const y of [bounds.min[1], bounds.max[1]]) {
-      for (const z of [bounds.min[2], bounds.max[2]]) {
-        const corner = projectPointToCssPx(
-          query.viewProj,
-          [x, y, z],
-          query.viewportWidthCssPx,
-          query.viewportHeightCssPx,
-        );
-        if (corner === null) return true;
-        minX = Math.min(minX, corner.xCssPx);
-        minY = Math.min(minY, corner.yCssPx);
-        maxX = Math.max(maxX, corner.xCssPx);
-        maxY = Math.max(maxY, corner.yCssPx);
-      }
-    }
-  }
+  const aabb = projectedBoundsAabbCssPx(
+    query.viewProj,
+    bounds,
+    query.viewportWidthCssPx,
+    query.viewportHeightCssPx,
+  );
+  if (aabb === null) return true;
   return (
-    query.cursorXCssPx >= minX - WIDEST_PICK_RADIUS_CSS_PX &&
-    query.cursorXCssPx <= maxX + WIDEST_PICK_RADIUS_CSS_PX &&
-    query.cursorYCssPx >= minY - WIDEST_PICK_RADIUS_CSS_PX &&
-    query.cursorYCssPx <= maxY + WIDEST_PICK_RADIUS_CSS_PX
+    query.cursorXCssPx >= aabb.minXCssPx - WIDEST_PICK_RADIUS_CSS_PX &&
+    query.cursorXCssPx <= aabb.maxXCssPx + WIDEST_PICK_RADIUS_CSS_PX &&
+    query.cursorYCssPx >= aabb.minYCssPx - WIDEST_PICK_RADIUS_CSS_PX &&
+    query.cursorYCssPx <= aabb.maxYCssPx + WIDEST_PICK_RADIUS_CSS_PX
   );
 };
 

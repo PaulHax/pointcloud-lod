@@ -6,6 +6,7 @@ import {
   type CameraView,
   type Mat16,
 } from "../camera";
+import { safeCall } from "../observers";
 import {
   CULLED,
   importanceFromRootSseCssPx,
@@ -101,17 +102,6 @@ const decodedBytes = (content: DecodedTileContent): number =>
 const workerUrl = (value: string): string =>
   new URL(value, globalThis.location?.href ?? "http://localhost/").toString();
 
-const safeCallback = (
-  callback: ((error: unknown) => void) | undefined,
-  error: unknown,
-): void => {
-  try {
-    callback?.(error);
-  } catch {
-    // Member state and retry accounting must survive observers.
-  }
-};
-
 const contentRequests = (
   tileById: ReadonlyMap<string, TilesetTile>,
   ids: readonly string[],
@@ -180,7 +170,7 @@ export const createTiles3dMember = (
   const report = (error: unknown): void => {
     errorCount += 1;
     lastError = errorMessage(error);
-    safeCallback(config.onError, error);
+    safeCall(() => config.onError?.(error));
     context.onWorkChange?.();
   };
 

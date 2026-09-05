@@ -1,6 +1,7 @@
 /** Bounded, revision-safe fetch/decode queue for renderer-neutral tile content. */
 
-import { integerAtLeast } from "../numeric";
+import { finiteAtLeast, integerAtLeast } from "../numeric";
+import { safeCall } from "../observers";
 
 const MAX_EVICTION_HISTORY = 4_096;
 
@@ -180,26 +181,6 @@ const systemClock: ContentQueueClock = {
   setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
   clearTimeout: (handle) =>
     globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
-};
-
-const finiteAtLeast = (
-  name: string,
-  value: number,
-  minimum: number,
-): number => {
-  if (!Number.isFinite(value) || value < minimum) {
-    throw new RangeError(`${name} must be finite and >= ${minimum}`);
-  }
-  return value;
-};
-
-const safeCall = (callback: () => void): void => {
-  try {
-    callback();
-  } catch {
-    // Consumer notification cannot break queue accounting or create a rejected
-    // internal task. Applications surface their own callback errors.
-  }
 };
 
 const normalizeRequest = (request: TileContentRequest): TileContentRequest => {

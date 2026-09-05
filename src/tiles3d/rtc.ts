@@ -1,3 +1,5 @@
+import { multiply4 } from "../camera";
+
 export type Vec3 = [number, number, number];
 
 /** Column-major affine matrix, matching 3D Tiles and glTF conventions. */
@@ -54,30 +56,12 @@ const finiteMatrix = (matrix: readonly number[], label: string): Mat4 => {
   return [...matrix] as Mat4;
 };
 
-/** Column-major 4x4 product without validation, shared by the checked paths. */
-export const multiplyMat4Values = (
-  left: readonly number[],
-  right: readonly number[],
-): number[] => {
-  const result = Array.from({ length: 16 }, () => 0);
-  for (let column = 0; column < 4; column += 1) {
-    for (let row = 0; row < 4; row += 1) {
-      let value = 0;
-      for (let inner = 0; inner < 4; inner += 1) {
-        value += left[inner * 4 + row]! * right[column * 4 + inner]!;
-      }
-      result[column * 4 + row] = value;
-    }
-  }
-  return result;
-};
-
 export const multiplyMat4 = (
   leftInput: readonly number[],
   rightInput: readonly number[],
 ): Mat4 =>
   finiteMatrix(
-    multiplyMat4Values(
+    multiply4(
       finiteMatrix(leftInput, "left matrix"),
       finiteMatrix(rightInput, "right matrix"),
     ),

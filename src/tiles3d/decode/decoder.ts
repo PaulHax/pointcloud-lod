@@ -4,6 +4,7 @@ import { BasisLoader } from "@loaders.gl/textures";
 import { loadLibrary } from "@loaders.gl/worker-utils";
 import { read as readKtx2 } from "ktx-parse";
 
+import { IDENTITY } from "../../camera";
 import {
   composeSceneTransform,
   flattenPrimitiveToRtc,
@@ -259,7 +260,6 @@ interface PendingPrimitive {
   materialIndex?: number;
 }
 
-const IDENTITY: Mat4 = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 const GLB_MAGIC = 0x46546c67;
 const GLB_JSON_CHUNK = 0x4e4f534a;
 const COMPONENTS: Readonly<Record<string, number>> = {
@@ -986,7 +986,7 @@ const applySceneRtc = (
   );
   const pending: PendingPrimitive[] = [];
   const visiting = new Set<number>();
-  const visit = (nodeIndex: number, parent: Mat4): void => {
+  const visit = (nodeIndex: number, parent: readonly number[]): void => {
     if (visiting.has(nodeIndex))
       throw new Error("glTF node graph contains a cycle");
     const node = requireIndex(gltf.json.nodes, nodeIndex, "node");
