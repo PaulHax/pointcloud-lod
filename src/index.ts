@@ -149,32 +149,6 @@ export {
 } from "./viewGovernor";
 
 export {
-  createGpuFrameTimer,
-  type GpuFrameTimer,
-  type GpuFrameTimerOptions,
-  type GpuTimerResult,
-} from "./gpuTimer";
-
-export {
-  captureTelemetryEnvironment,
-  createTelemetryRecorder,
-  isSoftwareRenderer,
-  type TelemetryDetail,
-  type TelemetryEnvironment,
-  type TelemetryEvent,
-  type TelemetryFrameEvent,
-  type TelemetryLongTaskEvent,
-  type TelemetryRecorder,
-  type TelemetrySessionEvent,
-  type TelemetryStateEvent,
-  type TelemetrySummary,
-  type TelemetryTrace,
-  type TelemetryWorkEvent,
-  type TelemetryWorkFinish,
-  type TelemetryWorkKind,
-} from "./telemetry";
-
-export {
   createHttpTileSource,
   parsePct1,
   RevisionGoneError,

@@ -20,22 +20,14 @@ import vtkFullScreenRenderWindow from "@kitware/vtk.js/Rendering/Misc/FullScreen
 
 import {
   ROOT_KEY,
-  captureTelemetryEnvironment,
   createCopcWorkerTileSource,
-  createGpuFrameTimer,
   createLodController,
-  createTelemetryRecorder,
   createViewGovernor,
   keyToString,
   type CameraView,
-  type GpuTimerResult,
   type LodController,
   type MotionReference,
   type PointPresentation,
-  type TelemetryEnvironment,
-  type TelemetryFrameEvent,
-  type TelemetryRecorder,
-  type TelemetryTrace,
   type TileSource,
   type ViewGovernor,
   type ViewGovernorOptions,
@@ -46,7 +38,16 @@ import {
   createRendererAdapter,
   type RendererAdapter,
 } from "../../../src/rendererAdapter";
-import { WORLD_UP, installCameraControls } from "../../../src/vtk";
+import { WORLD_UP, installCameraControls } from "../harness/cameraControls";
+import { createGpuFrameTimer, type GpuTimerResult } from "../harness/gpuTimer";
+import {
+  captureTelemetryEnvironment,
+  createTelemetryRecorder,
+  type TelemetryEnvironment,
+  type TelemetryFrameEvent,
+  type TelemetryRecorder,
+  type TelemetryTrace,
+} from "../harness/telemetryRecorder";
 import {
   HOSTED_POINT_CLOUDS,
   installExampleSceneSelect,

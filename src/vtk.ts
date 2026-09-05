@@ -24,9 +24,3 @@ export {
 } from "./tiles3d/meshAdapter";
 
 export { createTiles3dMember } from "./tiles3d/member";
-
-export {
-  installCameraControls,
-  WORLD_UP,
-  type CameraControlsOptions,
-} from "./vtkCameraControls";

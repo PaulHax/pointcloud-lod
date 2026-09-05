@@ -40,7 +40,7 @@ import type {
   TelemetryEnvironment,
   TelemetrySummary,
   TelemetryTrace,
-} from "../../src/telemetry";
+} from "../../examples/vtk/harness/telemetryRecorder";
 import {
   startStaticServer,
   type NetworkProfile,

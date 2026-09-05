@@ -22,7 +22,10 @@ import {
   FIXTURES,
 } from "./browserSession";
 
-import type { TelemetrySummary, TelemetryTrace } from "../../src/telemetry";
+import type {
+  TelemetrySummary,
+  TelemetryTrace,
+} from "../../examples/vtk/harness/telemetryRecorder";
 import type { RecordedPose } from "../../examples/vtk/harness/inputRecorder";
 import {
   createHttpCache,
