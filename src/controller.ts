@@ -319,22 +319,11 @@ export type LodSelectionStats = {
   readonly budgetSkippedPoints: number;
   /** Root projected screen-space error, used for cross-cloud allocation. */
   readonly projectedImportance: number;
-  /** Projected-spacing distribution for the ready terminal coverage frontier. */
-  readonly readyTerminalFrontier: {
-    readonly count: number;
-    readonly leafNodes: number;
-    readonly cutoffNodes: number;
-    readonly hierarchyBlockedNodes: number;
-    readonly tileBlockedNodes: number;
-    readonly budgetBlockedNodes: number;
-    readonly projectedSpacingCssPx: {
-      readonly p25: number | null;
-      readonly p50: number | null;
-      readonly p75: number | null;
-      readonly p95: number | null;
-      readonly max: number | null;
-    };
-  };
+  /**
+   * The coarsest projected spacing any terminal of the selection leaves on
+   * screen, null when nothing is drawn.
+   */
+  readonly projectedSpacingCssPx: number | null;
 };
 
 export type LodDrawPlanStats = {
@@ -471,34 +460,6 @@ type HierarchyEntry = {
 const isAbortError = (error: unknown): boolean =>
   error instanceof Error && error.name === "AbortError";
 
-/**
- * The frontier's five spacing statistics, from one sort of the sample. `at` is
- * the nearest-rank formula and the last element is the maximum, so every
- * reported number matches a per-statistic percentile call — but the walk this
- * feeds reruns on every tile arrival, and sorting once per burst instead of
- * five times per arrival is the difference during a moving camera. Reports
- * null for "nothing measured" rather than NaN.
- */
-const spacingQuantiles = (
-  values: number[],
-): LodSelectionStats["readyTerminalFrontier"]["projectedSpacingCssPx"] => {
-  if (values.length === 0) {
-    return { p25: null, p50: null, p75: null, p95: null, max: null };
-  }
-  const sorted = values.sort((a, b) => a - b);
-  const at = (p: number): number =>
-    sorted[
-      Math.min(Math.max(Math.ceil(p * sorted.length) - 1, 0), sorted.length - 1)
-    ]!;
-  return {
-    p25: at(0.25),
-    p50: at(0.5),
-    p75: at(0.75),
-    p95: at(0.95),
-    max: sorted[sorted.length - 1]!,
-  };
-};
-
 const ROOT_KEY_STRING = keyToString(ROOT_KEY);
 
 const DEFAULT_PRESENTATION: FixedPointPresentation = {
@@ -619,17 +580,6 @@ const samePresentation = (
       left.minDiameterCssPx === right.minDiameterCssPx &&
       left.maxDiameterCssPx === right.maxDiameterCssPx;
 
-const emptyReadyTerminalFrontier =
-  (): LodSelectionStats["readyTerminalFrontier"] => ({
-    count: 0,
-    leafNodes: 0,
-    cutoffNodes: 0,
-    hierarchyBlockedNodes: 0,
-    tileBlockedNodes: 0,
-    budgetBlockedNodes: 0,
-    projectedSpacingCssPx: spacingQuantiles([]),
-  });
-
 /**
  * A selection that has not run, or has been thrown away. The explicit return
  * type is the point: a field added to `LodSelectionStats` becomes one compile
@@ -640,7 +590,7 @@ const emptySelectionStats = (
   targetRevision: number,
 ): Omit<
   LodSelectionStats,
-  "targetUndecodedTiles" | "readyTerminalFrontier"
+  "targetUndecodedTiles" | "projectedSpacingCssPx"
 > => ({
   generation,
   targetRevision,
@@ -1016,7 +966,6 @@ export const createLodController = (
   let targetRevision = 0;
   let selectionGeneration = 0;
   let selectionStats = emptySelectionStats(0, 0);
-  let budgetSkipped: ReadonlySet<string> = new Set<string>();
   let drawPrefixes: ReadonlyMap<string, number> = new Map();
   let drawPlanStats: LodDrawPlanStats = {
     revision: 0,
@@ -1308,18 +1257,6 @@ export const createLodController = (
     });
   };
 
-  const isEntryReady = (keyString: string, entry: HierarchyEntry): boolean =>
-    entry.pointCount === 0 || resident.has(keyString);
-
-  /** Why a selected node is the finest thing drawn on its branch. */
-  type TerminalReasons = {
-    leaf?: boolean;
-    cutoff?: boolean;
-    hierarchy?: boolean;
-    tile?: boolean;
-    budget?: boolean;
-  };
-
   /**
    * The projected spacing a terminal's drawn prefix leaves on screen, null
    * when it draws nothing. Thinning a tile to a prefix spreads its points, so
@@ -1335,82 +1272,57 @@ export const createLodController = (
   };
 
   /**
-   * Walk the selected tree down to its terminals, reporting each with what
-   * stopped the refinement there.
+   * Walk the selected tree down to its terminals — the nodes where refinement
+   * stopped, because they are leaves, fall under the refinement cutoff, or
+   * have a visible child the selection did not take.
    *
-   * `requireReady` chooses which tree is walked. The ready frontier describes
-   * what is on screen now, so an unloaded node ends its branch and is reported
-   * as tile-blocked. Auto sizing follows the selection instead — the density
-   * the frame is converging on — so it walks past arrivals that have not
-   * landed yet, and no terminal there is ever tile-blocked. Everything else
-   * about the two walks, including the order the child blocks are classified
-   * in, is one rule: two walks that disagreed would size the points for a
-   * frontier the diagnostics never described.
+   * The walk follows the selection rather than what has landed. Several fine
+   * tiles arriving under a coarse diameter would otherwise make their parent
+   * cease to be a terminal and shrink every actor at once, producing a
+   * dense -> sparse -> dense sequence under an unchanged selection.
    */
   const walkTerminals = (
     planes: readonly Plane[],
-    requireReady: boolean,
-    onTerminal: (
-      keyString: string,
-      entry: HierarchyEntry,
-      reasons: TerminalReasons,
-    ) => void,
+    onTerminal: (keyString: string, entry: HierarchyEntry) => void,
   ): void => {
     const walk = (key: VoxelKey): void => {
       const keyString = keyToString(key);
       if (!target.has(keyString)) return;
       const entry = hierarchy.get(keyString);
       if (entry === undefined) return;
-      if (requireReady && !isEntryReady(keyString, entry)) return;
 
       const children = childrenOf(key, entry);
-      if (children.length === 0) {
-        onTerminal(keyString, entry, { leaf: true });
-        return;
-      }
-      if (sseFor(keyString) < refinementCutoffPx) {
-        onTerminal(keyString, entry, { cutoff: true });
+      if (children.length === 0 || sseFor(keyString) < refinementCutoffPx) {
+        onTerminal(keyString, entry);
         return;
       }
 
-      let hierarchyBlocked = false;
-      let tileBlocked = false;
-      let budgetBlocked = false;
+      let blocked = false;
       const openChildren: VoxelKey[] = [];
       for (const child of children) {
         const childString = keyToString(child);
         const childEntry = hierarchy.get(childString);
         if (childEntry === undefined) {
-          hierarchyBlocked = true;
+          blocked = true;
           continue;
         }
         if (!boundsIntersectsFrustum(planes, childEntry.bounds)) continue;
         // Matches selection: an invisible page reference is not requested, so
         // it is not blocking anything either.
         if (childEntry.pageRef && !pagesLoaded.has(childString)) {
-          hierarchyBlocked = true;
+          blocked = true;
           continue;
         }
+        // A visible, available child of a selected parent can only be absent
+        // because the breadth-first point budget rejected it.
         if (!target.has(childString)) {
-          // A visible, available child of a selected parent can only be absent
-          // because the breadth-first point budget rejected it.
-          budgetBlocked = budgetSkipped.has(childString) || budgetBlocked;
-          continue;
-        }
-        if (requireReady && !isEntryReady(childString, childEntry)) {
-          tileBlocked = true;
+          blocked = true;
           continue;
         }
         openChildren.push(child);
       }
 
-      if (hierarchyBlocked || tileBlocked || budgetBlocked) {
-        onTerminal(keyString, entry, {
-          hierarchy: hierarchyBlocked,
-          tile: tileBlocked,
-          budget: budgetBlocked,
-        });
-      }
+      if (blocked) onTerminal(keyString, entry);
       for (const child of openChildren) walk(child);
     };
 
@@ -1435,24 +1347,32 @@ export const createLodController = (
    * budget-blocked branches still retain their closest sampled parent because
    * no selected descendant describes a finer density there.
    */
+  /**
+   * The coarsest projected spacing any terminal leaves on screen, or null when
+   * nothing is drawn. Auto sizing derives the point diameter from it, and it
+   * is the one continuous measure of how finely the current view is resolved.
+   */
+  let largestTerminalSpacingCssPx: number | null = null;
+
   const updateAutoDiameter = (): void => {
     if (
-      presentation.mode !== "auto" ||
       view === null ||
       drawPlanStats.plannedPoints <= 0 ||
       !target.has(ROOT_KEY_STRING)
     ) {
+      largestTerminalSpacingCssPx = null;
       return;
     }
 
     let largestSpacing: number | null = null;
-    walkTerminals(frustumPlanes(view.viewProj), false, (keyString, entry) => {
+    walkTerminals(frustumPlanes(view.viewProj), (keyString, entry) => {
       const spacing = terminalSpacing(keyString, entry);
       if (spacing !== null)
         largestSpacing = Math.max(largestSpacing ?? 0, spacing);
     });
+    largestTerminalSpacingCssPx = largestSpacing;
 
-    if (largestSpacing !== null) {
+    if (largestSpacing !== null && presentation.mode === "auto") {
       emitDiameter(
         presentation.userScale *
           Math.min(
@@ -1462,75 +1382,6 @@ export const createLodController = (
       );
     }
   };
-
-  /**
-   * The ready frontier, computed on demand and held until something that can
-   * move it happens.
-   *
-   * It is a diagnostic, and `stats()` is its only reader, so computing it
-   * eagerly would cost a full recursive walk and a quantile sort on every tile
-   * arrival — for a number no frame depends on. A host that reads `stats()` on
-   * every frame pays one walk per invalidation; one that never reads it pays
-   * nothing.
-   */
-  let frontierCache: LodSelectionStats["readyTerminalFrontier"] | null = null;
-
-  const invalidateFrontier = (): void => {
-    frontierCache = null;
-  };
-
-  const readyTerminalFrontier =
-    (): LodSelectionStats["readyTerminalFrontier"] => {
-      const currentView = view;
-      if (
-        currentView === null ||
-        !active ||
-        drawPlanStats.plannedPoints <= 0 ||
-        !target.has(ROOT_KEY_STRING)
-      ) {
-        frontierCache = null;
-        return emptyReadyTerminalFrontier();
-      }
-      if (frontierCache !== null) return frontierCache;
-
-      const values: number[] = [];
-      const terminalKeys = new Set<string>();
-      let leafNodes = 0;
-      let cutoffNodes = 0;
-      let hierarchyBlockedNodes = 0;
-      let tileBlockedNodes = 0;
-      let budgetBlockedNodes = 0;
-
-      walkTerminals(
-        frustumPlanes(currentView.viewProj),
-        true,
-        (keyString, entry, reasons) => {
-          // A structural node has no samples with which to cover a blocked region.
-          if (entry.pointCount === 0 || !resident.has(keyString)) return;
-          if (!terminalKeys.has(keyString)) {
-            terminalKeys.add(keyString);
-            const spacing = terminalSpacing(keyString, entry);
-            if (spacing !== null) values.push(spacing);
-          }
-          if (reasons.leaf) leafNodes += 1;
-          if (reasons.cutoff) cutoffNodes += 1;
-          if (reasons.hierarchy) hierarchyBlockedNodes += 1;
-          if (reasons.tile) tileBlockedNodes += 1;
-          if (reasons.budget) budgetBlockedNodes += 1;
-        },
-      );
-
-      frontierCache = {
-        count: terminalKeys.size,
-        leafNodes,
-        cutoffNodes,
-        hierarchyBlockedNodes,
-        tileBlockedNodes,
-        budgetBlockedNodes,
-        projectedSpacingCssPx: spacingQuantiles(values),
-      };
-      return frontierCache;
-    };
 
   const pump = (): void => {
     while (
@@ -1551,7 +1402,6 @@ export const createLodController = (
       // Reading it again would be pure duplicate I/O, and a failure of that
       // read would settle the cloud with a hole over a payload it already has.
       if (promoteCached(keyString)) {
-        invalidateFrontier();
         scheduleFlush();
         continue;
       }
@@ -1581,7 +1431,6 @@ export const createLodController = (
           // ran, this payload is exactly what the selection is waiting for.
           if (target.has(keyString) && !resident.has(keyString)) {
             takeResident(keyString, loadedTile);
-            invalidateFrontier();
             scheduleFlush();
           } else {
             cacheDecoded(keyString, loadedTile);
@@ -1608,7 +1457,6 @@ export const createLodController = (
             // reselected while the read was cancelled: it needs a fresh one.
             queue.unshift(keyString);
           }
-          invalidateFrontier();
           pump();
         },
       );
@@ -1667,7 +1515,6 @@ export const createLodController = (
     });
 
     target = selection.selected;
-    budgetSkipped = selection.budgetSkipped;
     if (
       previousTarget.size !== target.size ||
       [...target].some((keyString) => !previousTarget.has(keyString))
@@ -1689,7 +1536,6 @@ export const createLodController = (
       budgetSkippedPoints: selection.budgetSkippedPoints,
       projectedImportance: target.size > 0 ? sse(ROOT_KEY) : 0,
     };
-    invalidateFrontier();
     updateDrawPlan();
     updateAutoDiameter();
     // The root page bootstraps the hierarchy, so it can never come back
@@ -1742,7 +1588,6 @@ export const createLodController = (
     }
     queue = byFrontierPriority(toFetch);
 
-    invalidateFrontier();
     scheduleFlush();
     pump();
   };
@@ -1803,7 +1648,6 @@ export const createLodController = (
     cache.clear();
     if (target.size > 0) targetRevision += 1;
     target = new Set();
-    budgetSkipped = new Set();
     selectionStats = emptySelectionStats(
       selectionStats.generation,
       targetRevision,
@@ -1890,7 +1734,6 @@ export const createLodController = (
       densityFraction = nextDensityFraction;
       updateDrawPlan();
       updateAutoDiameter();
-      invalidateFrontier();
     },
 
     setMemoryBudgetBytes(bytes) {
@@ -1943,7 +1786,6 @@ export const createLodController = (
         emitDiameter(presentation.diameterCssPx);
       } else {
         updateAutoDiameter();
-        invalidateFrontier();
       }
     },
 
@@ -2057,7 +1899,7 @@ export const createLodController = (
         refinementCutoffPx,
         selection: {
           ...selectionStats,
-          readyTerminalFrontier: readyTerminalFrontier(),
+          projectedSpacingCssPx: largestTerminalSpacingCssPx,
           // Live, not a selection-time snapshot: how many selected tiles have
           // no decoded payload anywhere (neither resident nor cached). This
           // is the number that distinguishes "the burst issued no reads

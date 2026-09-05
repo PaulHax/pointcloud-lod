@@ -285,4 +285,31 @@ describe("selectNodes", () => {
     expect(result.selected).toEqual(new Set(["0-0-0-0", "1-0-0-0"]));
     expect(result.totalPoints).toBe(100);
   });
+
+  /**
+   * Every child of a selected node is either selected or budget-skipped —
+   * there is no third way for one to be absent. The controller's terminal walk
+   * reads a missing child as budget-blocked without consulting the skip set,
+   * which is only sound while this holds.
+   */
+  it("accounts for every child of a selected node", () => {
+    const counts: Record<string, number> = {
+      "0-0-0-0": 100,
+      "1-0-0-0": 60,
+      "1-1-0-0": 60,
+      "1-0-1-0": 60,
+      "1-1-1-0": 60,
+    };
+    // A budget that takes the root and only some of its children.
+    const result = select(counts, 220);
+
+    expect(result.selected.size).toBeGreaterThan(0);
+    expect(result.budgetSkipped.size).toBeGreaterThan(0);
+    for (const key of Object.keys(counts)) {
+      expect(
+        result.selected.has(key) || result.budgetSkipped.has(key),
+        `${key} is neither selected nor budget-skipped`,
+      ).toBe(true);
+    }
+  });
 });
