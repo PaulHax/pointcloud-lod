@@ -210,16 +210,33 @@ export const table = (rows, columns) => {
 };
 
 /**
- * The detail knob a member actually shows, normalized to "fraction of full".
+ * The detail knob a member shows, normalized to "fraction of full".
  *
- * A point cloud thins to a density fraction; a mesh trades screen-space error.
- * They are different axes, so a scene-wide average of them would mean nothing.
- * Each member is therefore read on its own knob and reported separately.
+ * A point cloud thins to a density fraction. A mesh trades screen-space error,
+ * and its `sseMultiplier` is `1 / max(allocation.qualityFraction, 0.05)` — a
+ * pure restatement of the fraction it was allocated, not an independent
+ * reading. So for a mesh this level says nothing the allocated level did not,
+ * except when the fraction saturates at the 0.05 floor, where the clamp makes
+ * it under-report movement the governor really made. What actually changes on
+ * screen for a mesh is which tiles are drawn, which is counted separately.
  */
 export const detailKnobOf = (member) =>
   member.kind === "pointCloud"
     ? (member.densityFraction ?? null)
     : (member.sseMultiplier ?? null);
+
+/**
+ * Resolution below which two values are the same number.
+ *
+ * Quality fractions arrive through repeated multiplication, so a value can
+ * differ from the previous one in the last bits without anything having moved.
+ * `distinct` has always quantized; comparing raw would let that noise into the
+ * change and reversal counts, which are the numbers the churn table calls the
+ * defect.
+ */
+const SAME_VALUE_EPSILON = 1e-8;
+
+const same = (left, right) => Math.abs(left - right) <= SAME_VALUE_EPSILON;
 
 /**
  * Movement in one scalar over a frame sequence.
@@ -231,7 +248,9 @@ export const detailKnobOf = (member) =>
  * reversals, which is the defect.
  *
  * `turnover` is the summed relative movement — how much of what was on screen
- * was replaced — and is the scale-free companion to a raw change count.
+ * was replaced — and is the scale-free companion to a raw change count. It is
+ * a sum over the sequence, so it grows with how many frames were drawn and is
+ * only comparable between runs of similar length.
  */
 export const movementOf = (values) => {
   let changes = 0;
@@ -241,13 +260,15 @@ export const movementOf = (values) => {
   let turnover = 0;
   let previousDirection = 0;
   let previous = null;
+  let read = 0;
   const distinct = new Set();
   for (const value of values) {
     if (value === null || value === undefined || !Number.isFinite(value)) {
       continue;
     }
+    read += 1;
     distinct.add(value.toFixed(8));
-    if (previous !== null && value !== previous) {
+    if (previous !== null && !same(value, previous)) {
       changes += 1;
       const direction = value > previous ? 1 : -1;
       if (direction > 0) increases += 1;
@@ -262,6 +283,8 @@ export const movementOf = (values) => {
     previous = value;
   }
   return {
+    /** Frames that carried a readable value. Zero means no data, not no churn. */
+    read,
     changes,
     reversals,
     increases,
@@ -274,34 +297,47 @@ export const movementOf = (values) => {
 /**
  * How long a scalar took to stop moving, measured from the first frame given.
  *
- * Null when it never settled inside the window, which is itself the answer:
- * a regime that never reaches a steady state has no time-to-steady-state.
+ * `settled` is false both when the value was still moving at the end and when
+ * there was nothing to read, because neither is evidence that it came to rest.
+ * The two are told apart by `read`.
  */
 export const settleOf = (frames, read) => {
   let lastChangeIndex = -1;
   let previous = null;
+  let readCount = 0;
   for (const [index, frame] of frames.entries()) {
     const value = read(frame);
-    if (value === null || value === undefined) continue;
-    if (previous !== null && value !== previous) lastChangeIndex = index;
+    if (value === null || value === undefined || !Number.isFinite(value)) {
+      continue;
+    }
+    readCount += 1;
+    if (previous !== null && !same(value, previous)) lastChangeIndex = index;
     previous = value;
   }
-  if (frames.length === 0) return { ms: null, frames: null, settled: false };
-  if (lastChangeIndex < 0) return { ms: 0, frames: 0, settled: true };
+  if (readCount === 0) {
+    return { ms: null, frames: null, read: 0, settled: false };
+  }
+  if (lastChangeIndex < 0) {
+    return { ms: 0, frames: 0, read: readCount, settled: true };
+  }
   return {
     ms: frames[lastChangeIndex].atMs - frames[0].atMs,
     frames: lastChangeIndex,
+    read: readCount,
     settled: lastChangeIndex < frames.length - 1,
   };
 };
 
 /**
- * Every distinct governor adjustment the trace saw, in order.
+ * Every distinct governor adjustment record the trace saw, in order.
  *
  * `lastAdjustment` is a snapshot repeated on every frame until the next one,
- * so the same adjustment appears in hundreds of frames. Identity is the
- * timestamp plus what it did, which is what de-duplicates it without assuming
- * adjustments are spaced further apart than a frame.
+ * so identity is the timestamp plus what it did. That collapses the repeats of
+ * a real move, but *not* the no-op outcomes: the loop re-records
+ * `within-hysteresis`, `cooldown`, `insufficient-samples` and `clamped` on
+ * every evaluation with a fresh timestamp, so counts of those are counts of
+ * evaluations, not of adjustments. Only entries with a direction other than
+ * "none" are adjustments in the sense of having moved anything.
  */
 export const adjustmentsOf = (frames) => {
   const seen = new Set();
@@ -321,21 +357,73 @@ export const adjustmentsOf = (frames) => {
 };
 
 /**
+ * Why the loop held still, which is not one reason but several.
+ *
+ * `within-hysteresis` means it judged the view good enough. `clamped` means it
+ * wanted to move and could not, which at the ceiling is contentment and at the
+ * floor is the opposite — the view pinned at minimum quality. Reading either
+ * as convergence without separating them turns a bottomed-out run into a
+ * healthy one.
+ */
+export const holdReasonsOf = (adjustments) => {
+  let withinHysteresis = 0;
+  let clampedAtFloor = 0;
+  let clampedAtCeiling = 0;
+  let clampedInterior = 0;
+  let cooldown = 0;
+  let insufficientSamples = 0;
+  for (const adjustment of adjustments) {
+    if (adjustment.direction !== "none") continue;
+    if (adjustment.reason === "within-hysteresis") withinHysteresis += 1;
+    else if (adjustment.reason === "cooldown") cooldown += 1;
+    else if (adjustment.reason === "insufficient-samples") {
+      insufficientSamples += 1;
+    } else if (adjustment.reason === "clamped") {
+      if (adjustment.fromFraction <= 0.0501) clampedAtFloor += 1;
+      else if (adjustment.fromFraction >= 0.9999) clampedAtCeiling += 1;
+      else clampedInterior += 1;
+    }
+  }
+  return {
+    withinHysteresis,
+    clampedAtFloor,
+    clampedAtCeiling,
+    clampedInterior,
+    cooldown,
+    insufficientSamples,
+  };
+};
+
+/** Members seen anywhere in the sequence, in first-seen order, keyed by id. */
+const memberIdsOf = (frames) => {
+  const ids = [];
+  const seen = new Set();
+  for (const frame of frames) {
+    for (const member of membersOf(frame)) {
+      const id = member.id ?? "";
+      if (seen.has(id)) continue;
+      seen.add(id);
+      ids.push(id);
+    }
+  }
+  return ids;
+};
+
+/**
  * Visual churn over a frame sequence, decomposed by where it enters.
  *
- * Three levels, because a change at one is not a change at the next and the
- * difference is the attribution. The governor's own fraction is what the
- * adaptive loop decided; the allocated fraction is that after demand-capped
- * water filling, which moves with the camera even when the governor holds; the
- * detail knob is what a member finally drew, which is a ratio of two separately
- * clamped budgets and so can hold still while both inputs move, or move while
- * both hold.
+ * Members are followed by id rather than by position, because a scene can gain
+ * or lose a dataset mid-run and comparing one member's knob against another's
+ * would read the swap as an enormous change. Each member is measured on its
+ * own axis and reported separately; the summed `detail` is what a viewer saw
+ * move anywhere in the scene, and is the only figure that does not quietly
+ * describe one dataset while ignoring the rest.
  *
- * Point turnover is read from the drawn totals rather than per-tile prefixes:
- * a trace carries aggregates by design, and every selected tile is thinned to
- * the same fraction, so the drawn total moves with the prefix that produced it.
- * What aggregates cannot see is an add and a remove that cancel, which is why
- * tile adds and removes are counted separately rather than folded in.
+ * Point turnover is read from drawn totals rather than per-tile prefixes: a
+ * trace carries aggregates by design, and every selected tile is thinned to the
+ * same fraction, so the drawn total moves with the prefix that produced it.
+ * Tiles are counted per member, but an add and a remove *within one member on
+ * one frame* still cancel and are invisible — the aggregate cannot see them.
  */
 export const churnMetrics = (frames) => {
   const spanMs =
@@ -350,41 +438,57 @@ export const churnMetrics = (frames) => {
         null,
     ),
   );
-  const allocated = movementOf(
-    frames.map((frame) => {
-      const members = membersOf(frame);
-      return members.length === 0
-        ? null
-        : (members[0].allocation?.qualityFraction ?? null);
-    }),
-  );
-  const detail = movementOf(
-    frames.map((frame) => {
-      const members = membersOf(frame);
-      return members.length === 0 ? null : detailKnobOf(members[0]);
-    }),
-  );
 
-  const drawnPoints = movementOf(
-    frames.map((frame) => detailOf(frame).drawnPoints),
-  );
-  let tileAdds = 0;
-  let tileRemoves = 0;
-  let previousTiles = null;
-  for (const frame of frames) {
-    const tiles = detailOf(frame).drawnTiles;
-    if (previousTiles !== null) {
-      if (tiles > previousTiles) tileAdds += tiles - previousTiles;
-      else if (tiles < previousTiles) tileRemoves += previousTiles - tiles;
+  const members = memberIdsOf(frames).map((id) => {
+    const seriesOf = (read) =>
+      frames.map((frame) => {
+        const member = membersOf(frame).find(
+          (candidate) => (candidate.id ?? "") === id,
+        );
+        return member === undefined ? null : read(member);
+      });
+    const kind =
+      frames
+        .flatMap((frame) => membersOf(frame))
+        .find((member) => (member.id ?? "") === id)?.kind ?? null;
+    let adds = 0;
+    let removes = 0;
+    let previousTiles = null;
+    for (const tiles of seriesOf((member) => member.drawnTiles ?? null)) {
+      if (tiles === null) continue;
+      if (previousTiles !== null) {
+        if (tiles > previousTiles) adds += tiles - previousTiles;
+        else if (tiles < previousTiles) removes += previousTiles - tiles;
+      }
+      previousTiles = tiles;
     }
-    previousTiles = tiles;
-  }
+    return {
+      id,
+      kind,
+      detail: movementOf(seriesOf(detailKnobOf)),
+      allocated: movementOf(
+        seriesOf((member) => member.allocation?.qualityFraction ?? null),
+      ),
+      drawnPoints: movementOf(seriesOf((member) => member.drawnPoints ?? null)),
+      tiles: { adds, removes },
+    };
+  });
+
+  const sum = (read) =>
+    members.reduce((total, member) => total + read(member), 0);
+  const detail = {
+    read: sum((member) => member.detail.read),
+    changes: sum((member) => member.detail.changes),
+    reversals: sum((member) => member.detail.reversals),
+    increases: sum((member) => member.detail.increases),
+    decreases: sum((member) => member.detail.decreases),
+    distinct: sum((member) => member.detail.distinct),
+    turnover: sum((member) => member.detail.turnover),
+  };
+  const tileAdds = sum((member) => member.tiles.adds);
+  const tileRemoves = sum((member) => member.tiles.removes);
 
   const adjustments = adjustmentsOf(frames);
-  const reasons = new Map();
-  for (const adjustment of adjustments) {
-    reasons.set(adjustment.reason, (reasons.get(adjustment.reason) ?? 0) + 1);
-  }
   const moves = adjustments.filter(
     (adjustment) => adjustment.direction !== "none",
   );
@@ -396,14 +500,17 @@ export const churnMetrics = (frames) => {
     }
     previousDirection = move.direction;
   }
+  const reasons = new Map();
+  for (const adjustment of adjustments) {
+    reasons.set(adjustment.reason, (reasons.get(adjustment.reason) ?? 0) + 1);
+  }
 
   return {
     frames: frames.length,
     spanMs,
     governor,
-    allocated,
+    members,
     detail,
-    drawnPoints,
     tiles: {
       adds: tileAdds,
       removes: tileRemoves,
@@ -413,15 +520,19 @@ export const churnMetrics = (frames) => {
     detailReversalsPerSecond: perSecond(detail.reversals),
     settle: {
       detail: settleOf(frames, (frame) => {
-        const members = membersOf(frame);
-        return members.length === 0 ? null : detailKnobOf(members[0]);
+        const scene = membersOf(frame);
+        return scene.length === 0 ? null : detailKnobOf(scene[0]);
       }),
     },
+    held: holdReasonsOf(adjustments),
     governorMoves: {
       count: moves.length,
       reversals: moveReversals,
-      emergencyCuts: reasons.get("emergency-cut") ?? 0,
-      emergencyRestores: reasons.get("emergency-restore") ?? 0,
+      emergencyCuts: moves.filter((move) => move.reason === "emergency-cut")
+        .length,
+      emergencyRestores: moves.filter(
+        (move) => move.reason === "emergency-restore",
+      ).length,
       reasons: [...reasons.entries()].sort((left, right) => right[1] - left[1]),
     },
   };
