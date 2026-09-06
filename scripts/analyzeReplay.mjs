@@ -190,6 +190,8 @@ const CHURN_COLUMNS = [
   { title: "config", value: (row) => row.config },
   { title: "run", value: (row) => String(row.repeat) },
   {
+    // Summed over every member, so a scene whose mesh holds still while its
+    // point cloud thrashes does not report as calm.
     title: "moving detail chg",
     value: (row) => integer(row.movingChurn.detail.changes),
   },
@@ -218,13 +220,13 @@ const CHURN_COLUMNS = [
     value: (row) => integer(row.movingChurn.governorMoves.emergencyRestores),
   },
   {
-    title: "within-hyst",
+    // Evaluations where the loop judged the view good enough, against those
+    // where it wanted to move and could not because the fraction had bottomed
+    // out. A run held at the floor is not a converged run, and one number for
+    // both would say it was.
+    title: "held ok/floor",
     value: (row) =>
-      integer(
-        row.movingChurn.governorMoves.reasons.find(
-          ([reason]) => reason === "within-hysteresis",
-        )?.[1] ?? 0,
-      ),
+      `${integer(row.movingChurn.held.withinHysteresis)}/${integer(row.movingChurn.held.clampedAtFloor)}`,
   },
   {
     title: "tile +/-",
@@ -232,8 +234,14 @@ const CHURN_COLUMNS = [
       `${integer(row.movingChurn.tiles.adds)}/${integer(row.movingChurn.tiles.removes)}`,
   },
   {
+    // Blank rather than zero when the settle marker left no frames behind: a
+    // phase that was never sampled has no churn to report, and printing 0
+    // reads as proof of calm.
     title: "settled chg",
-    value: (row) => integer(row.settledChurn.detail.changes),
+    value: (row) =>
+      row.settledChurn.detail.read === 0
+        ? "—"
+        : integer(row.settledChurn.detail.changes),
   },
 ];
 

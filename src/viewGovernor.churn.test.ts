@@ -44,7 +44,10 @@ type Sample = {
  */
 const runGesture = (
   options: ViewGovernorOptions,
-  { frames = 240, cost = {} }: { frames?: number; cost?: { fixedMs?: number; spanMs?: number } } = {},
+  {
+    frames = 240,
+    cost = {},
+  }: { frames?: number; cost?: { fixedMs?: number; spanMs?: number } } = {},
 ): readonly Sample[] => {
   const governor = createViewGovernor(options);
   governor.setWorkState({
