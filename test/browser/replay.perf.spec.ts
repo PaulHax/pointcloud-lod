@@ -17,6 +17,7 @@
  */
 
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { cpus, loadavg } from "node:os";
 import { basename, isAbsolute, resolve } from "node:path";
 
 import sharp from "sharp";
@@ -193,6 +194,43 @@ const applyConfig = async (
   }
 };
 
+/**
+ * What else the machine was doing, sampled either side of a run.
+ *
+ * A benchmark is supposed to have the machine to itself, and a run that did
+ * not is not comparable with one that did — but the run still happened and its
+ * artifact is still worth keeping, so this records rather than refuses.
+ * `perCore` is the one to read: load is a queue length, so it only means
+ * something against the number of cores available to drain it.
+ *
+ * Two samples, because contention that arrives mid-run is exactly the case a
+ * single reading at the start would miss. On a platform with no load average —
+ * Windows reports zeroes — the numbers are null rather than a flattering zero.
+ */
+const machineLoad = (): {
+  readonly loadAvg1: number | null;
+  readonly cores: number;
+  readonly perCore: number | null;
+} => {
+  const cores = Math.max(1, cpus().length);
+  const loadAvg1 = loadavg()[0] ?? 0;
+  const usable = Number.isFinite(loadAvg1) && loadAvg1 > 0 ? loadAvg1 : null;
+  return {
+    loadAvg1: usable,
+    cores,
+    perCore: usable === null ? null : usable / cores,
+  };
+};
+
+/** Load either side of a run, as "before->after per-core", for one line. */
+const loadSummary = (
+  before: ReturnType<typeof machineLoad>,
+  after: ReturnType<typeof machineLoad>,
+): string =>
+  before.perCore === null || after.perCore === null
+    ? "n/a"
+    : `${before.perCore.toFixed(2)}->${after.perCore.toFixed(2)}/core`;
+
 const artifactName = (
   recordingPath: string,
   config: BenchmarkConfig,
@@ -330,6 +368,7 @@ describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
               artifactName(recordingPath, config, repeat),
             );
             const framePath = path.replace(/\.json$/, "__frame.png");
+            const loadBefore = machineLoad();
             const recording = JSON.parse(
               await readFile(recordingPath, "utf8"),
             ) as InputRecording;
@@ -488,6 +527,7 @@ describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
                   transferredBytes: session.transferredBytes(),
                 },
                 fidelity: { dispatch: replay.dispatch, drift },
+                machine: { loadBefore, loadAfter: machineLoad() },
                 activity: settledAfter,
                 datasets: await session.datasets(),
                 finalStats: await session.stats(),
@@ -506,7 +546,8 @@ describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
                   ` longTasks=${trace.summary.longTasks}` +
                   ` visible=${frame.visiblePixels}/${(frame.visibleFraction * 100).toFixed(2)}%` +
                   ` lateness=${replay.dispatch.meanLatenessMs.toFixed(1)}/${replay.dispatch.maxLatenessMs.toFixed(1)} ms` +
-                  ` drift=${drift ? `${(drift.meanRelativeError * 100).toFixed(2)}%/${(drift.maxRelativeError * 100).toFixed(2)}%` : "n/a"}\n` +
+                  ` drift=${drift ? `${(drift.meanRelativeError * 100).toFixed(2)}%/${(drift.maxRelativeError * 100).toFixed(2)}%` : "n/a"}` +
+                  ` load=${loadSummary(loadBefore, machineLoad())}\n` +
                   failedDatasets
                     .map(
                       (dataset) =>

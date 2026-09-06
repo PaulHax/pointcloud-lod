@@ -537,3 +537,41 @@ export const churnMetrics = (frames) => {
     },
   };
 };
+
+/**
+ * How busy the machine was while a run was measured.
+ *
+ * A benchmark is supposed to have the machine to itself. Load is a queue
+ * length, so it only means anything divided by the cores available to drain
+ * it, and the peak of the samples either side of the run is what matters —
+ * contention arriving halfway through still spoils the timings.
+ *
+ * Runs recorded before the bench started sampling have no reading at all,
+ * which is reported as unknown rather than quiet.
+ */
+export const BUSY_LOAD_PER_CORE = 0.5;
+
+export const machineLoadOf = (artifact) => {
+  const machine = artifact?.machine;
+  if (machine === null || machine === undefined) {
+    return { perCore: null, cores: null, busy: false, known: false };
+  }
+  const readings = [machine.loadBefore, machine.loadAfter]
+    .map((sample) => sample?.perCore)
+    .filter((value) => typeof value === "number" && Number.isFinite(value));
+  if (readings.length === 0) {
+    return {
+      perCore: null,
+      cores: machine.loadBefore?.cores ?? null,
+      busy: false,
+      known: false,
+    };
+  }
+  const perCore = Math.max(...readings);
+  return {
+    perCore,
+    cores: machine.loadBefore?.cores ?? machine.loadAfter?.cores ?? null,
+    busy: perCore > BUSY_LOAD_PER_CORE,
+    known: true,
+  };
+};

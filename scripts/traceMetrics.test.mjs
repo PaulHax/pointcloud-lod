@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  BUSY_LOAD_PER_CORE,
   adjustmentsOf,
   churnMetrics,
   detailKnobOf,
   holdReasonsOf,
+  machineLoadOf,
   movementOf,
   settleOf,
 } from "./traceMetrics.mjs";
@@ -330,5 +332,57 @@ describe("detailKnobOf", () => {
       0.25,
     );
     expect(detailKnobOf({ kind: "tiles3d", sseMultiplier: 2 })).toBe(2);
+  });
+});
+
+describe("machineLoadOf", () => {
+  const sample = (perCore) => ({ loadAvg1: perCore * 8, cores: 8, perCore });
+
+  it("takes the worst of the samples either side of the run", () => {
+    // Contention that arrives halfway through spoils the run just as surely as
+    // contention that was there at the start.
+    expect(
+      machineLoadOf({
+        machine: { loadBefore: sample(0.1), loadAfter: sample(1.2) },
+      }),
+    ).toMatchObject({ perCore: 1.2, busy: true, known: true });
+  });
+
+  it("calls a machine with room to spare quiet", () => {
+    expect(
+      machineLoadOf({
+        machine: { loadBefore: sample(0.05), loadAfter: sample(0.2) },
+      }),
+    ).toMatchObject({ busy: false, known: true });
+  });
+
+  it("reports an unmeasured run as unknown rather than quiet", () => {
+    // Artifacts written before the bench sampled load must not read as if the
+    // machine had been idle.
+    expect(machineLoadOf({})).toMatchObject({
+      perCore: null,
+      busy: false,
+      known: false,
+    });
+    expect(
+      machineLoadOf({ machine: { loadBefore: { cores: 8 }, loadAfter: {} } }),
+    ).toMatchObject({
+      busy: false,
+      known: false,
+    });
+  });
+
+  it("puts the busy line where a run is sharing half its cores", () => {
+    expect(BUSY_LOAD_PER_CORE).toBe(0.5);
+    expect(
+      machineLoadOf({
+        machine: { loadBefore: sample(0.51), loadAfter: sample(0.1) },
+      }).busy,
+    ).toBe(true);
+    expect(
+      machineLoadOf({
+        machine: { loadBefore: sample(0.49), loadAfter: sample(0.1) },
+      }).busy,
+    ).toBe(false);
   });
 });
