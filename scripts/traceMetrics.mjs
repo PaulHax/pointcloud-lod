@@ -208,3 +208,221 @@ export const table = (rows, columns) => {
   );
   return [header, rule, ...body].join("\n");
 };
+
+/**
+ * The detail knob a member actually shows, normalized to "fraction of full".
+ *
+ * A point cloud thins to a density fraction; a mesh trades screen-space error.
+ * They are different axes, so a scene-wide average of them would mean nothing.
+ * Each member is therefore read on its own knob and reported separately.
+ */
+export const detailKnobOf = (member) =>
+  member.kind === "pointCloud"
+    ? (member.densityFraction ?? null)
+    : (member.sseMultiplier ?? null);
+
+/**
+ * Movement in one scalar over a frame sequence.
+ *
+ * `changes` counts frames where the value moved at all; `reversals` counts how
+ * often it changed direction. The two are kept apart because they answer
+ * different complaints: refinement after a settle is many changes and no
+ * reversals, which is wanted, while an oscillation is few changes and many
+ * reversals, which is the defect.
+ *
+ * `turnover` is the summed relative movement — how much of what was on screen
+ * was replaced — and is the scale-free companion to a raw change count.
+ */
+export const movementOf = (values) => {
+  let changes = 0;
+  let reversals = 0;
+  let increases = 0;
+  let decreases = 0;
+  let turnover = 0;
+  let previousDirection = 0;
+  let previous = null;
+  const distinct = new Set();
+  for (const value of values) {
+    if (value === null || value === undefined || !Number.isFinite(value)) {
+      continue;
+    }
+    distinct.add(value.toFixed(8));
+    if (previous !== null && value !== previous) {
+      changes += 1;
+      const direction = value > previous ? 1 : -1;
+      if (direction > 0) increases += 1;
+      else decreases += 1;
+      if (previousDirection !== 0 && direction !== previousDirection) {
+        reversals += 1;
+      }
+      previousDirection = direction;
+      const scale = Math.max(Math.abs(value), Math.abs(previous));
+      if (scale > 0) turnover += Math.abs(value - previous) / scale;
+    }
+    previous = value;
+  }
+  return {
+    changes,
+    reversals,
+    increases,
+    decreases,
+    distinct: distinct.size,
+    turnover,
+  };
+};
+
+/**
+ * How long a scalar took to stop moving, measured from the first frame given.
+ *
+ * Null when it never settled inside the window, which is itself the answer:
+ * a regime that never reaches a steady state has no time-to-steady-state.
+ */
+export const settleOf = (frames, read) => {
+  let lastChangeIndex = -1;
+  let previous = null;
+  for (const [index, frame] of frames.entries()) {
+    const value = read(frame);
+    if (value === null || value === undefined) continue;
+    if (previous !== null && value !== previous) lastChangeIndex = index;
+    previous = value;
+  }
+  if (frames.length === 0) return { ms: null, frames: null, settled: false };
+  if (lastChangeIndex < 0) return { ms: 0, frames: 0, settled: true };
+  return {
+    ms: frames[lastChangeIndex].atMs - frames[0].atMs,
+    frames: lastChangeIndex,
+    settled: lastChangeIndex < frames.length - 1,
+  };
+};
+
+/**
+ * Every distinct governor adjustment the trace saw, in order.
+ *
+ * `lastAdjustment` is a snapshot repeated on every frame until the next one,
+ * so the same adjustment appears in hundreds of frames. Identity is the
+ * timestamp plus what it did, which is what de-duplicates it without assuming
+ * adjustments are spaced further apart than a frame.
+ */
+export const adjustmentsOf = (frames) => {
+  const seen = new Set();
+  const adjustments = [];
+  for (const frame of frames) {
+    const adjustment =
+      frame.state?.coordinator?.governor?.lastAdjustment ??
+      frame.state?.governor?.lastAdjustment ??
+      null;
+    if (adjustment === null) continue;
+    const identity = `${adjustment.atMs}|${adjustment.reason}|${adjustment.fromFraction}|${adjustment.toFraction}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    adjustments.push({ ...adjustment, regime: regimeOf(frame) });
+  }
+  return adjustments;
+};
+
+/**
+ * Visual churn over a frame sequence, decomposed by where it enters.
+ *
+ * Three levels, because a change at one is not a change at the next and the
+ * difference is the attribution. The governor's own fraction is what the
+ * adaptive loop decided; the allocated fraction is that after demand-capped
+ * water filling, which moves with the camera even when the governor holds; the
+ * detail knob is what a member finally drew, which is a ratio of two separately
+ * clamped budgets and so can hold still while both inputs move, or move while
+ * both hold.
+ *
+ * Point turnover is read from the drawn totals rather than per-tile prefixes:
+ * a trace carries aggregates by design, and every selected tile is thinned to
+ * the same fraction, so the drawn total moves with the prefix that produced it.
+ * What aggregates cannot see is an add and a remove that cancel, which is why
+ * tile adds and removes are counted separately rather than folded in.
+ */
+export const churnMetrics = (frames) => {
+  const spanMs =
+    frames.length < 2 ? 0 : frames[frames.length - 1].atMs - frames[0].atMs;
+  const perSecond = (count) => (spanMs > 0 ? (count * 1000) / spanMs : null);
+
+  const governor = movementOf(
+    frames.map(
+      (frame) =>
+        frame.state?.coordinator?.governor?.viewQualityFraction ??
+        frame.state?.governor?.viewQualityFraction ??
+        null,
+    ),
+  );
+  const allocated = movementOf(
+    frames.map((frame) => {
+      const members = membersOf(frame);
+      return members.length === 0
+        ? null
+        : (members[0].allocation?.qualityFraction ?? null);
+    }),
+  );
+  const detail = movementOf(
+    frames.map((frame) => {
+      const members = membersOf(frame);
+      return members.length === 0 ? null : detailKnobOf(members[0]);
+    }),
+  );
+
+  const drawnPoints = movementOf(
+    frames.map((frame) => detailOf(frame).drawnPoints),
+  );
+  let tileAdds = 0;
+  let tileRemoves = 0;
+  let previousTiles = null;
+  for (const frame of frames) {
+    const tiles = detailOf(frame).drawnTiles;
+    if (previousTiles !== null) {
+      if (tiles > previousTiles) tileAdds += tiles - previousTiles;
+      else if (tiles < previousTiles) tileRemoves += previousTiles - tiles;
+    }
+    previousTiles = tiles;
+  }
+
+  const adjustments = adjustmentsOf(frames);
+  const reasons = new Map();
+  for (const adjustment of adjustments) {
+    reasons.set(adjustment.reason, (reasons.get(adjustment.reason) ?? 0) + 1);
+  }
+  const moves = adjustments.filter(
+    (adjustment) => adjustment.direction !== "none",
+  );
+  let moveReversals = 0;
+  let previousDirection = null;
+  for (const move of moves) {
+    if (previousDirection !== null && move.direction !== previousDirection) {
+      moveReversals += 1;
+    }
+    previousDirection = move.direction;
+  }
+
+  return {
+    frames: frames.length,
+    spanMs,
+    governor,
+    allocated,
+    detail,
+    drawnPoints,
+    tiles: {
+      adds: tileAdds,
+      removes: tileRemoves,
+      addsPerSecond: perSecond(tileAdds),
+      removesPerSecond: perSecond(tileRemoves),
+    },
+    detailReversalsPerSecond: perSecond(detail.reversals),
+    settle: {
+      detail: settleOf(frames, (frame) => {
+        const members = membersOf(frame);
+        return members.length === 0 ? null : detailKnobOf(members[0]);
+      }),
+    },
+    governorMoves: {
+      count: moves.length,
+      reversals: moveReversals,
+      emergencyCuts: reasons.get("emergency-cut") ?? 0,
+      emergencyRestores: reasons.get("emergency-restore") ?? 0,
+      reasons: [...reasons.entries()].sort((left, right) => right[1] - left[1]),
+    },
+  };
+};

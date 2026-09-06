@@ -20,6 +20,7 @@ import { readdir, readFile, writeFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 
 import {
+  churnMetrics,
   detailOf,
   framesOf,
   integer,
@@ -116,6 +117,11 @@ const analyzeArtifact = (artifact) => {
     },
     gesture: phaseMetrics(duringReplay),
     motion: phaseMetrics(moving),
+    // Churn is reported per regime and never as one number over the run.
+    // Refinement after a settle is wanted change; counting it against a
+    // configuration would reward one that simply refuses to refine.
+    movingChurn: churnMetrics(moving),
+    settledChurn: churnMetrics(settledFrames),
     convergence: {
       // How long the view took to finish what the gesture asked of it. The
       // number a user experiences as "it catches up quickly".
@@ -168,6 +174,69 @@ const COLUMNS = [
   { title: "path drift", value: (row) => percent(row.fidelity.pathDrift) },
 ];
 
+/**
+ * What moved, rather than what it cost.
+ *
+ * Reversals are listed beside changes because they are the half that reads as
+ * noise: a run that refines steadily upward has many changes and no reversals
+ * and is behaving correctly, while one that trades the same detail back and
+ * forth has few changes and many reversals and is the reported defect.
+ *
+ * `within-hyst` is here because it says whether the adaptive loop was able to
+ * hold still at all. A near-zero count on a run with many adjustments means
+ * the loop never converged, which is a different fault from converging badly.
+ */
+const CHURN_COLUMNS = [
+  { title: "config", value: (row) => row.config },
+  { title: "run", value: (row) => String(row.repeat) },
+  {
+    title: "moving detail chg",
+    value: (row) => integer(row.movingChurn.detail.changes),
+  },
+  {
+    title: "moving detail rev",
+    value: (row) => integer(row.movingChurn.detail.reversals),
+  },
+  {
+    title: "moving turnover",
+    value: (row) => number(row.movingChurn.detail.turnover),
+  },
+  {
+    title: "rev/s",
+    value: (row) => number(row.movingChurn.detailReversalsPerSecond, 2),
+  },
+  {
+    title: "gov rev",
+    value: (row) => integer(row.movingChurn.governor.reversals),
+  },
+  {
+    title: "cuts",
+    value: (row) => integer(row.movingChurn.governorMoves.emergencyCuts),
+  },
+  {
+    title: "restores",
+    value: (row) => integer(row.movingChurn.governorMoves.emergencyRestores),
+  },
+  {
+    title: "within-hyst",
+    value: (row) =>
+      integer(
+        row.movingChurn.governorMoves.reasons.find(
+          ([reason]) => reason === "within-hysteresis",
+        )?.[1] ?? 0,
+      ),
+  },
+  {
+    title: "tile +/-",
+    value: (row) =>
+      `${integer(row.movingChurn.tiles.adds)}/${integer(row.movingChurn.tiles.removes)}`,
+  },
+  {
+    title: "settled chg",
+    value: (row) => integer(row.settledChurn.detail.changes),
+  },
+];
+
 const main = async () => {
   const args = process.argv.slice(2);
   const jsonFlag = args.indexOf("--json");
@@ -218,6 +287,10 @@ const main = async () => {
     lines.push("");
     lines.push(table(group, COLUMNS));
     lines.push("");
+    lines.push("Visual churn — how much the view changed, split by regime:");
+    lines.push("");
+    lines.push(table(group, CHURN_COLUMNS));
+    lines.push("");
 
     const configs = [...new Set(group.map((row) => row.config))];
     if (group.length > configs.length) {
@@ -233,6 +306,8 @@ const main = async () => {
           points: across(rows, (row) => row.motion.drawnPoints),
           triangles: across(rows, (row) => row.motion.drawnTriangles),
           settle: across(rows, (row) => row.convergence.msAfterGesture),
+          turnover: across(rows, (row) => row.movingChurn.detail.turnover),
+          reversals: across(rows, (row) => row.movingChurn.detail.reversals),
         };
       });
       lines.push(
@@ -267,6 +342,14 @@ const main = async () => {
           {
             title: "settle ms",
             value: (row) => withSpread(row.settle, integer),
+          },
+          {
+            title: "turnover",
+            value: (row) => withSpread(row.turnover, number),
+          },
+          {
+            title: "detail rev",
+            value: (row) => withSpread(row.reversals, integer),
           },
         ]),
       );
