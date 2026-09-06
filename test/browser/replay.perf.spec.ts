@@ -17,6 +17,7 @@
  */
 
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { cpus, loadavg } from "node:os";
 import { basename, isAbsolute, resolve } from "node:path";
 
@@ -206,11 +207,35 @@ const applyConfig = async (
  * Two samples, because contention that arrives mid-run is exactly the case a
  * single reading at the start would miss. On a platform with no load average —
  * Windows reports zeroes — the numbers are null rather than a flattering zero.
+ *
+ * `browserProcesses` is here because processor load turned out to be the wrong
+ * question. A run measured with another browser suite resident drew a third of
+ * the detail at two thirds the frame rate while the load average sat at 0.36
+ * per core, which this file would otherwise have called quiet: the contention
+ * was for the GPU, and under WSL `nvidia-smi` reports neither utilisation nor
+ * compute apps, so there is nothing to query. Counting the browsers is the
+ * signal that is actually available. The benchmark's own browser is in the
+ * count, so read it as a comparison between runs rather than as an absolute.
  */
+const browserProcessCount = (): number | null => {
+  try {
+    const out = execFileSync("pgrep", ["-c", "-f", "chrome|chromium"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const count = Number.parseInt(out.trim(), 10);
+    return Number.isFinite(count) ? count : null;
+  } catch {
+    // pgrep exits non-zero when nothing matches, and is absent off Linux.
+    return null;
+  }
+};
+
 const machineLoad = (): {
   readonly loadAvg1: number | null;
   readonly cores: number;
   readonly perCore: number | null;
+  readonly browserProcesses: number | null;
 } => {
   const cores = Math.max(1, cpus().length);
   const loadAvg1 = loadavg()[0] ?? 0;
@@ -219,6 +244,7 @@ const machineLoad = (): {
     loadAvg1: usable,
     cores,
     perCore: usable === null ? null : usable / cores,
+    browserProcesses: browserProcessCount(),
   };
 };
 
@@ -229,7 +255,10 @@ const loadSummary = (
 ): string =>
   before.perCore === null || after.perCore === null
     ? "n/a"
-    : `${before.perCore.toFixed(2)}->${after.perCore.toFixed(2)}/core`;
+    : `${before.perCore.toFixed(2)}->${after.perCore.toFixed(2)}/core` +
+      (before.browserProcesses === null
+        ? ""
+        : ` browsers=${before.browserProcesses}->${after.browserProcesses}`);
 
 const artifactName = (
   recordingPath: string,

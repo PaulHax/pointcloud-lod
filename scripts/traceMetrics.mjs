@@ -568,8 +568,12 @@ export const machineLoadOf = (artifact) => {
     };
   }
   const perCore = Math.max(...readings);
+  const browsers = [machine.loadBefore, machine.loadAfter]
+    .map((sample) => sample?.browserProcesses)
+    .filter((value) => typeof value === "number" && Number.isFinite(value));
   return {
     perCore,
+    browserProcesses: browsers.length === 0 ? null : Math.max(...browsers),
     cores: machine.loadBefore?.cores ?? machine.loadAfter?.cores ?? null,
     busy: perCore > BUSY_LOAD_PER_CORE,
     known: true,
