@@ -181,6 +181,16 @@ const COLUMNS = [
     title: "load/core",
     value: (row) => (row.machine.known ? number(row.machine.perCore, 2) : "—"),
   },
+  {
+    // Browsers alive during the run, the benchmark's own included. Processor
+    // load misses contention for the GPU entirely, and under WSL there is no
+    // GPU counter to ask, so a run sharing the card shows up here or nowhere.
+    title: "browsers",
+    value: (row) =>
+      row.machine.browserProcesses === null
+        ? "—"
+        : integer(row.machine.browserProcesses),
+  },
 ];
 
 /**
