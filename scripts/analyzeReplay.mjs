@@ -208,8 +208,20 @@ const CHURN_COLUMNS = [
     value: (row) => number(row.movingChurn.detailReversalsPerSecond, 2),
   },
   {
+    // The count of adjustments that actually moved the fraction. Measured
+    // across three repeats of an unchanged configuration it varies by about
+    // 5%, against 57% for the visible reversal count and 146% for turnover,
+    // because it is paced by the cooldown rather than by what the camera
+    // happened to fly over. It is the only figure here with enough
+    // signal-to-noise to carry an A/B on three runs — but it describes the
+    // loop, not the screen, so it is read together with the detail columns
+    // rather than instead of them.
+    title: "gov moves",
+    value: (row) => integer(row.movingChurn.governorMoves.count),
+  },
+  {
     title: "gov rev",
-    value: (row) => integer(row.movingChurn.governor.reversals),
+    value: (row) => integer(row.movingChurn.governorMoves.reversals),
   },
   {
     title: "cuts",
@@ -316,6 +328,7 @@ const main = async () => {
           settle: across(rows, (row) => row.convergence.msAfterGesture),
           turnover: across(rows, (row) => row.movingChurn.detail.turnover),
           reversals: across(rows, (row) => row.movingChurn.detail.reversals),
+          govMoves: across(rows, (row) => row.movingChurn.governorMoves.count),
         };
       });
       lines.push(
@@ -352,12 +365,16 @@ const main = async () => {
             value: (row) => withSpread(row.settle, integer),
           },
           {
-            title: "turnover",
-            value: (row) => withSpread(row.turnover, number),
+            title: "gov moves",
+            value: (row) => withSpread(row.govMoves, integer),
           },
           {
             title: "detail rev",
             value: (row) => withSpread(row.reversals, integer),
+          },
+          {
+            title: "turnover",
+            value: (row) => withSpread(row.turnover, number),
           },
         ]),
       );

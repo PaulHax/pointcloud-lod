@@ -1,13 +1,21 @@
 {
   "note": [
-    "The interaction track's increase threshold is its target times one minus",
-    "the hysteresis band, so at the default 16 ms target an increase needs an",
-    "estimate below 12.8 ms. The estimate is driven by the displayed frame",
-    "interval, which vsync quantises to a 16.6 ms floor on a 60 Hz display, so",
-    "the increase branch cannot be reached while a hand is moving and quality",
-    "only ever ratchets down. These raise the target past that floor: 24 ms",
-    "puts the threshold at 19.2 ms, one quantum of headroom, and 33 ms puts it",
-    "at 26.4 ms, where only a genuinely late frame prevents a climb."
+    "Superseded as a recommendation; kept because the sweep artifacts reference",
+    "it. The reasoning below described the code before the display-quantum fix,",
+    "when the interaction target was used as configured: at 16 ms an increase",
+    "needed an estimate under 12.8 ms, which vsync makes unreachable on a 60 Hz",
+    "display, so quality could only ratchet down.",
+    "",
+    "That fix now raises a 16 ms target to about 23.9 ms, so 24 is what the",
+    "default already is, and it is the worst of the three rather than 'one",
+    "quantum of headroom': its band of 19.1 to 28.6 ms admits neither a one",
+    "refresh interval nor a two, and on a real GPU zero of 1527 moving frames",
+    "landed inside it. Raising the target to 33 does let the loop settle, but",
+    "only by giving up 60 Hz, and measured on hardware it holds no calmer than",
+    "the default while drawing less and settling short of full density.",
+    "",
+    "See interaction-churn.json for the configuration that isolates the source,",
+    "and plans/pointcloud-lod-cleanup/CHURN_LOG.md for the measurements."
   ],
   "configs": [
     { "name": "baseline" },
