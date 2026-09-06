@@ -1,0 +1,26 @@
+{
+  "note": [
+    "Isolating where interaction churn comes from. `pinned-4m` takes the point",
+    "cloud off the adaptive governor entirely — a fixed budget and a density",
+    "fraction of 1 — so whatever movement is left is selection and streaming",
+    "rather than quality. If churn largely disappears against `baseline`, the",
+    "governor is the source.",
+    "",
+    "`interaction-33` is here as the arm that can converge: the hysteresis band",
+    "at that target is 26.4 to 39.6 ms, which admits the 33.3 ms two-refresh",
+    "interval, where the default admits neither one refresh nor two. It is not",
+    "a proposal — it holds still by giving up 60 Hz, so read its frame rate",
+    "next to its churn.",
+    "",
+    "Companion to interaction-target.json, whose note describes the older",
+    "pre-display-quantum behaviour where the increase branch was unreachable."
+  ],
+  "configs": [
+    { "name": "baseline" },
+    {
+      "name": "pinned-4m",
+      "points": { "budgetMode": "fixed", "fixedPointBudget": 4000000 }
+    },
+    { "name": "interaction-33", "quality": { "interactionTargetMs": 33 } }
+  ]
+}
