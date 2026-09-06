@@ -21,6 +21,7 @@ import { basename, resolve } from "node:path";
 
 import {
   churnMetrics,
+  machineLoadOf,
   detailOf,
   framesOf,
   integer,
@@ -115,6 +116,7 @@ const analyzeArtifact = (artifact) => {
       pathDrift: artifact.fidelity.drift?.meanRelativePathError ?? null,
       maxPathDrift: artifact.fidelity.drift?.maxRelativePathError ?? null,
     },
+    machine: machineLoadOf(artifact),
     gesture: phaseMetrics(duringReplay),
     motion: phaseMetrics(moving),
     // Churn is reported per regime and never as one number over the run.
@@ -172,6 +174,13 @@ const COLUMNS = [
     value: (row) => integer(row.network.fetched),
   },
   { title: "path drift", value: (row) => percent(row.fidelity.pathDrift) },
+  {
+    // Peak load per core either side of the run. A benchmark is meant to have
+    // the machine to itself, and a run that shared it is not comparable with
+    // one that did not, however good its other numbers look.
+    title: "load/core",
+    value: (row) => (row.machine.known ? number(row.machine.perCore, 2) : "—"),
+  },
 ];
 
 /**
@@ -377,6 +386,22 @@ const main = async () => {
             value: (row) => withSpread(row.turnover, number),
           },
         ]),
+      );
+      lines.push("");
+    }
+    const busy = group.filter((row) => row.machine.busy);
+    if (busy.length > 0) {
+      lines.push(
+        "> Measured on a busy machine: " +
+          busy
+            .map(
+              (row) =>
+                `${row.config}#${row.repeat} (${number(row.machine.perCore, 2)}/core)`,
+            )
+            .join(", ") +
+          ". A benchmark is meant to have the machine to itself, so these" +
+          " frame times include whatever else was competing for it and are" +
+          " not comparable with runs that had it alone.",
       );
       lines.push("");
     }
