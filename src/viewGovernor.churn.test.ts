@@ -101,6 +101,63 @@ const distinctOf = (samples: readonly Sample[]): number =>
 describe("interaction quality under a quantized display", () => {
   afterEach(() => vi.useRealTimers());
 
+  it("recovers promptly from sustained two-refresh frames below the emergency threshold", () => {
+    vi.useFakeTimers();
+    const governor = createViewGovernor({ initialFraction: 0.7 });
+    for (let frame = 0; frame < 3; frame += 1) {
+      vi.advanceTimersByTime(VSYNC_MS);
+      governor.recordTransientFrame({ hostFrameMs: VSYNC_MS });
+    }
+    const motion = governor.beginMotion("explicit");
+    const start = Date.now();
+    let slowFrames = 0;
+    try {
+      while (Date.now() - start < 5000) {
+        const interval = presentedMs(governor.qualityFraction(), {
+          spanMs: 40,
+        });
+        vi.advanceTimersByTime(interval);
+        governor.recordHostFrame({ hostFrameMs: interval });
+        if (interval === VSYNC_MS) break;
+        slowFrames += 1;
+      }
+      expect(Date.now() - start).toBeLessThanOrEqual(1100);
+      expect(slowFrames).toBeLessThanOrEqual(32);
+    } finally {
+      motion.release();
+      governor.dispose();
+    }
+  });
+
+  it("discovers newly available capacity during the same gesture", () => {
+    vi.useFakeTimers();
+    const governor = createViewGovernor({ initialFraction: 0.7 });
+    for (let frame = 0; frame < 3; frame += 1) {
+      vi.advanceTimersByTime(VSYNC_MS);
+      governor.recordTransientFrame({ hostFrameMs: VSYNC_MS });
+    }
+    const motion = governor.beginMotion("explicit");
+    const start = Date.now();
+    try {
+      while (Date.now() - start < 10000) {
+        const interval = presentedMs(governor.qualityFraction());
+        vi.advanceTimersByTime(interval);
+        governor.recordHostFrame({ hostFrameMs: interval });
+      }
+      const changedAt = Date.now();
+      while (governor.qualityFraction() < 1 && Date.now() - changedAt < 5000) {
+        const interval = presentedMs(governor.qualityFraction(), { spanMs: 5 });
+        vi.advanceTimersByTime(interval);
+        governor.recordHostFrame({ hostFrameMs: interval });
+      }
+      expect(governor.qualityFraction()).toBe(1);
+      expect(Date.now() - changedAt).toBeLessThanOrEqual(1600);
+    } finally {
+      motion.release();
+      governor.dispose();
+    }
+  });
+
   it("cannot converge at the default target, because the dead band is empty", () => {
     vi.useFakeTimers();
     const samples = runGesture({});

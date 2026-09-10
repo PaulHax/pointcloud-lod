@@ -22,7 +22,7 @@ import { basename, resolve } from "node:path";
 import {
   churnMetrics,
   machineLoadOf,
-  detailOf,
+  settledDetailOf,
   framesOf,
   integer,
   isMoving,
@@ -79,13 +79,7 @@ const analyzeArtifact = (artifact) => {
   const settledFrames = frames.filter(
     (frame) => settledAfter !== null && frame.atMs >= settledAfter,
   );
-  // The last frame of the run describes the converged view even when no frame
-  // was recorded after the settle marker, which happens on a view that had
-  // nothing left to draw.
-  const settledDetail = detailOf(
-    settledFrames[settledFrames.length - 1] ??
-      frames[frames.length - 1] ?? { state: {} },
-  );
+  const settledDetail = settledDetailOf(trace);
 
   const longTasks = trace.events.filter((event) => event.type === "long-task");
   const longTaskMs = longTasks.reduce(
@@ -128,16 +122,15 @@ const analyzeArtifact = (artifact) => {
       // How long the view took to finish what the gesture asked of it. The
       // number a user experiences as "it catches up quickly".
       msAfterGesture:
-        settledAfter === null || replayEnd === Number.POSITIVE_INFINITY
+        !settledDetail.confirmed ||
+        settledAfter === null ||
+        replayEnd === Number.POSITIVE_INFINITY
           ? null
           : settledAfter - replayEnd,
       framesAfterGesture: afterReplay.length,
     },
     settled: {
-      // The phase means describe whatever frames landed after the settle
-      // marker, which on a converged view is often none. The detail of the
-      // last frame drawn is what the view actually ended up showing, so it
-      // wins over an average of nothing.
+      // The marker carries a snapshot even when convergence stops rendering.
       ...phaseMetrics(settledFrames),
       ...settledDetail,
     },
@@ -148,6 +141,10 @@ const analyzeArtifact = (artifact) => {
 const COLUMNS = [
   { title: "config", value: (row) => row.config },
   { title: "run", value: (row) => String(row.repeat) },
+  {
+    title: "settle verified",
+    value: (row) => (row.settled.confirmed ? "yes" : "no"),
+  },
   { title: "moving fps", value: (row) => number(row.motion.fps) },
   { title: "moving p50 ms", value: (row) => number(row.motion.intervalMs.p50) },
   { title: "moving p95 ms", value: (row) => number(row.motion.intervalMs.p95) },

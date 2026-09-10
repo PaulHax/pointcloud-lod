@@ -9,7 +9,60 @@ import {
   machineLoadOf,
   movementOf,
   settleOf,
+  settledDetailOf,
 } from "./traceMetrics.mjs";
+
+describe("settled snapshot", () => {
+  const marker = (needsFrame) => ({
+    type: "state",
+    reason: "marker:settled-after-replay",
+    state: {
+      coordinator: {
+        submissions: { queuedJobs: 0 },
+        governor: {
+          regime: "stationary",
+          needsFrame,
+          activity: { workPending: false },
+        },
+      },
+      members: [{ kind: "pointCloud", drawnPoints: 8_101_165 }],
+    },
+  });
+  it("accepts a fixed-only scene without waiting for an unused governor", () => {
+    const fixed = marker(true);
+    fixed.state.coordinator.members = [{ active: true, qualityManaged: false }];
+    expect(settledDetailOf({ events: [fixed] }).confirmed).toBe(true);
+    fixed.state.coordinator.members.push({
+      active: true,
+      qualityManaged: true,
+    });
+    expect(settledDetailOf({ events: [fixed] }).confirmed).toBe(false);
+  });
+  it("does not finish while render submissions remain queued", () => {
+    const pending = marker(false);
+    pending.state.coordinator.submissions.queuedJobs = 1;
+    expect(settledDetailOf({ events: [pending] }).confirmed).toBe(false);
+  });
+  it("does not call a refining frame settled", () => {
+    expect(settledDetailOf({ events: [marker(true)] })).toMatchObject({
+      confirmed: false,
+      drawnPoints: null,
+    });
+    expect(settledDetailOf({ events: [] })).toMatchObject({
+      confirmed: false,
+      drawnPoints: null,
+    });
+  });
+  it("uses the marker snapshot when the last frame has different detail", () => {
+    const earlier = {
+      type: "frame",
+      state: { members: [{ kind: "pointCloud", drawnPoints: 14_332_066 }] },
+    };
+    expect(settledDetailOf({ events: [earlier, marker(false)] })).toMatchObject(
+      { confirmed: true, drawnPoints: 8_101_165 },
+    );
+  });
+});
 
 /** One member's per-frame numbers, with only the fields the readers look at. */
 const pointCloud = (id, { allocated, density, points, tiles }) => ({
