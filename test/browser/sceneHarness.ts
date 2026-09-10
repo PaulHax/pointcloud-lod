@@ -13,7 +13,7 @@
 
 import type { Browser, BrowserContext, Page } from "playwright";
 import type { StreamedSceneCoordinatorStats } from "../../src/streamedSceneCoordinator";
-import { sceneConverged } from "../sceneConvergence";
+import { sceneConverged } from "../../scripts/sceneConvergence.mjs";
 
 import {
   browserFor,
@@ -425,15 +425,7 @@ export const openScene = async (options: {
         // waiting for it to reach "settled" is waiting for content that is
         // not coming. It is a finished state, and the caller is handed the
         // activity so it can say what failed.
-        if (
-          sceneConverged(
-            last,
-            governor,
-            snapshot.coordinator.members,
-            snapshot.coordinator.submissions.queuedJobs,
-          )
-        )
-          return last;
+        if (sceneConverged(last, snapshot.coordinator)) return last;
         await page.waitForTimeout(POLL_INTERVAL_MS);
       }
       throw new Error(
