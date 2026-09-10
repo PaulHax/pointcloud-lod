@@ -126,6 +126,38 @@ export const detailOf = (frame) => {
   return { drawnPoints, drawnTriangles, drawnTiles, residentBytes, worstSse };
 };
 
+/** Read the settled snapshot, never an earlier frame still refining quality. */
+export const settledDetailOf = (trace) => {
+  const marker = trace.events.findLast(
+    (event) =>
+      event.type === "state" && event.reason === "marker:settled-after-replay",
+  );
+  const coordinator = marker?.state?.coordinator;
+  const governor = coordinator?.governor;
+  const fixedOnly =
+    Array.isArray(coordinator?.members) &&
+    coordinator.members.every(
+      (member) => !member.active || !member.qualityManaged,
+    );
+  const confirmed =
+    governor?.regime === "stationary" &&
+    (fixedOnly || governor.needsFrame === false) &&
+    coordinator.submissions?.queuedJobs === 0 &&
+    governor.activity?.workPending === false;
+  return {
+    confirmed,
+    ...(confirmed
+      ? detailOf(marker)
+      : {
+          drawnPoints: null,
+          drawnTriangles: null,
+          drawnTiles: null,
+          residentBytes: null,
+          worstSse: null,
+        }),
+  };
+};
+
 /** The quality fraction the governor had settled on for this frame. */
 export const qualityOf = (frame) =>
   frame.state?.coordinator?.viewQualityFraction ??

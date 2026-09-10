@@ -31,6 +31,11 @@ const openFixtureScene = async (): Promise<
   const session = await openScene({ path: FIXTURE_SCENE, headless: true });
   await session.resizeViewer(VIEWER);
   await session.settle(120_000);
+  expect((await session.stats()).coordinator.governor).toMatchObject({
+    regime: "stationary",
+    needsFrame: false,
+    activity: { workPending: false },
+  });
   return session;
 };
 

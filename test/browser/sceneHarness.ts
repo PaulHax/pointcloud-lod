@@ -7,12 +7,13 @@
  * coordinator — the three scenes being measured differ only in the dataset
  * list their URL carries.
  *
- * Convergence here is the panel's own activity light: every dataset settled
- * with nothing loading. Defining it a second way in the harness would let a
- * benchmark call a scene converged that the page is still showing as busy.
+ * Convergence requires idle datasets and a stationary governor that has
+ * finished adapting quality. Dataset activity alone can finish first.
  */
 
 import type { Browser, BrowserContext, Page } from "playwright";
+import type { StreamedSceneCoordinatorStats } from "../../src/streamedSceneCoordinator";
+import { sceneConverged } from "../sceneConvergence";
 
 import {
   browserFor,
@@ -50,7 +51,7 @@ export type SceneActivity = {
 };
 
 export type SceneStats = {
-  readonly coordinator: Record<string, unknown>;
+  readonly coordinator: StreamedSceneCoordinatorStats;
   readonly members: readonly {
     readonly id: string;
     readonly kind: "points" | "tiles";
@@ -105,7 +106,7 @@ export type SceneSession = {
   frame(): Promise<void>;
   /** Resize until the viewer element is exactly this many CSS pixels. */
   resizeViewer(size: { width: number; height: number }): Promise<void>;
-  /** Wait until every dataset reports settled and nothing is loading. */
+  /** Wait for dataset work and stationary quality adaptation to finish. */
   settle(timeoutMs?: number): Promise<SceneActivity>;
   close(): Promise<void>;
 };
@@ -409,25 +410,35 @@ export const openScene = async (options: {
       await session.frame();
       const deadline = Date.now() + timeoutMs;
       let last: SceneActivity | null = null;
+      let governor: StreamedSceneCoordinatorStats["governor"] | null = null;
       while (Date.now() < deadline) {
-        last = await activity();
+        const snapshot = await evaluate(() => {
+          const scene = (window as never as SceneWindow).pointCloudScene;
+          return {
+            activity: scene.activity(),
+            coordinator: scene.stats().coordinator,
+          };
+        });
+        last = snapshot.activity;
+        governor = snapshot.coordinator.governor;
         // A dataset that reported an error has stopped working on the view:
         // waiting for it to reach "settled" is waiting for content that is
         // not coming. It is a finished state, and the caller is handed the
         // activity so it can say what failed.
-        const finished =
-          last.loading === 0 &&
-          last.datasets.length > 0 &&
-          last.datasets.every(
-            (dataset) =>
-              dataset.state === "settled" || dataset.state === "error",
-          );
-        if (finished) return last;
+        if (
+          sceneConverged(
+            last,
+            governor,
+            snapshot.coordinator.members,
+            snapshot.coordinator.submissions.queuedJobs,
+          )
+        )
+          return last;
         await page.waitForTimeout(POLL_INTERVAL_MS);
       }
       throw new Error(
         `timed out waiting for the scene to settle\nlast activity: ${JSON.stringify(
-          last,
+          { activity: last, governor },
           null,
           2,
         )}`,
