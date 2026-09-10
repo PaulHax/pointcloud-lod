@@ -179,29 +179,16 @@ const COLUMNS = [
     value: (row) => (row.machine.known ? number(row.machine.perCore, 2) : "—"),
   },
   {
-    // Browsers alive during the run, the benchmark's own included. Processor
-    // load misses contention for the GPU entirely, and under WSL there is no
-    // GPU counter to ask, so a run sharing the card shows up here or nowhere.
+    // Includes this benchmark and idle browsers; not a GPU utilization reading.
     title: "browsers",
-    value: (row) =>
-      row.machine.browserProcesses === null
-        ? "—"
-        : integer(row.machine.browserProcesses),
+    value: (row) => integer(row.machine.browserProcesses),
   },
 ];
 
-/**
- * What moved, rather than what it cost.
- *
- * Reversals are listed beside changes because they are the half that reads as
- * noise: a run that refines steadily upward has many changes and no reversals
- * and is behaving correctly, while one that trades the same detail back and
- * forth has few changes and many reversals and is the reported defect.
- *
- * `within-hyst` is here because it says whether the adaptive loop was able to
- * hold still at all. A near-zero count on a run with many adjustments means
- * the loop never converged, which is a different fault from converging badly.
- */
+const observed = (movement, field) =>
+  movement.read > 0 ? movement[field] : null;
+
+/** Changes and direction reversals distinguish refinement from oscillation. */
 const CHURN_COLUMNS = [
   { title: "config", value: (row) => row.config },
   { title: "run", value: (row) => String(row.repeat) },
@@ -209,29 +196,18 @@ const CHURN_COLUMNS = [
     // Summed over every member, so a scene whose mesh holds still while its
     // point cloud thrashes does not report as calm.
     title: "moving detail chg",
-    value: (row) => integer(row.movingChurn.detail.changes),
+    value: (row) => integer(observed(row.movingChurn.detail, "changes")),
   },
   {
     title: "moving detail rev",
-    value: (row) => integer(row.movingChurn.detail.reversals),
+    value: (row) => integer(observed(row.movingChurn.detail, "reversals")),
   },
   {
     title: "moving turnover",
-    value: (row) => number(row.movingChurn.detail.turnover),
+    value: (row) => number(observed(row.movingChurn.detail, "turnover")),
   },
   {
-    title: "rev/s",
-    value: (row) => number(row.movingChurn.detailReversalsPerSecond, 2),
-  },
-  {
-    // The count of adjustments that actually moved the fraction. Measured
-    // across three repeats of an unchanged configuration it varies by about
-    // 5%, against 57% for the visible reversal count and 146% for turnover,
-    // because it is paced by the cooldown rather than by what the camera
-    // happened to fly over. It is the only figure here with enough
-    // signal-to-noise to carry an A/B on three runs — but it describes the
-    // loop, not the screen, so it is read together with the detail columns
-    // rather than instead of them.
+    // Controller decisions, read alongside visible detail changes.
     title: "gov moves",
     value: (row) => integer(row.movingChurn.governorMoves.count),
   },
@@ -257,7 +233,7 @@ const CHURN_COLUMNS = [
       `${integer(row.movingChurn.held.withinHysteresis)}/${integer(row.movingChurn.held.clampedAtFloor)}`,
   },
   {
-    title: "tile +/-",
+    title: "net tile +/-",
     value: (row) =>
       `${integer(row.movingChurn.tiles.adds)}/${integer(row.movingChurn.tiles.removes)}`,
   },
@@ -266,10 +242,7 @@ const CHURN_COLUMNS = [
     // phase that was never sampled has no churn to report, and printing 0
     // reads as proof of calm.
     title: "settled chg",
-    value: (row) =>
-      row.settledChurn.detail.read === 0
-        ? "—"
-        : integer(row.settledChurn.detail.changes),
+    value: (row) => integer(observed(row.settledChurn.detail, "changes")),
   },
 ];
 
@@ -342,8 +315,12 @@ const main = async () => {
           points: across(rows, (row) => row.motion.drawnPoints),
           triangles: across(rows, (row) => row.motion.drawnTriangles),
           settle: across(rows, (row) => row.convergence.msAfterGesture),
-          turnover: across(rows, (row) => row.movingChurn.detail.turnover),
-          reversals: across(rows, (row) => row.movingChurn.detail.reversals),
+          turnover: across(rows, (row) =>
+            observed(row.movingChurn.detail, "turnover"),
+          ),
+          reversals: across(rows, (row) =>
+            observed(row.movingChurn.detail, "reversals"),
+          ),
           govMoves: across(rows, (row) => row.movingChurn.governorMoves.count),
         };
       });

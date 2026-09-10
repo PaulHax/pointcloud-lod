@@ -10,6 +10,8 @@
  * nothing, so cost is only ever reported next to the detail it bought.
  */
 
+import { coordinatorConverged } from "./sceneConvergence.mjs";
+
 export const percentile = (sorted, fraction) => {
   if (sorted.length === 0) return null;
   const rank = (sorted.length - 1) * fraction;
@@ -132,18 +134,7 @@ export const settledDetailOf = (trace) => {
     (event) =>
       event.type === "state" && event.reason === "marker:settled-after-replay",
   );
-  const coordinator = marker?.state?.coordinator;
-  const governor = coordinator?.governor;
-  const fixedOnly =
-    Array.isArray(coordinator?.members) &&
-    coordinator.members.every(
-      (member) => !member.active || !member.qualityManaged,
-    );
-  const confirmed =
-    governor?.regime === "stationary" &&
-    (fixedOnly || governor.needsFrame === false) &&
-    coordinator.submissions?.queuedJobs === 0 &&
-    governor.activity?.workPending === false;
+  const confirmed = coordinatorConverged(marker?.state?.coordinator);
   return {
     confirmed,
     ...(confirmed
@@ -241,31 +232,13 @@ export const table = (rows, columns) => {
   return [header, rule, ...body].join("\n");
 };
 
-/**
- * The detail knob a member shows, normalized to "fraction of full".
- *
- * A point cloud thins to a density fraction. A mesh trades screen-space error,
- * and its `sseMultiplier` is `1 / max(allocation.qualityFraction, 0.05)` — a
- * pure restatement of the fraction it was allocated, not an independent
- * reading. So for a mesh this level says nothing the allocated level did not,
- * except when the fraction saturates at the 0.05 floor, where the clamp makes
- * it under-report movement the governor really made. What actually changes on
- * screen for a mesh is which tiles are drawn, which is counted separately.
- */
+/** Density for points; SSE multiplier for meshes (larger means less detail). */
 export const detailKnobOf = (member) =>
   member.kind === "pointCloud"
     ? (member.densityFraction ?? null)
     : (member.sseMultiplier ?? null);
 
-/**
- * Resolution below which two values are the same number.
- *
- * Quality fractions arrive through repeated multiplication, so a value can
- * differ from the previous one in the last bits without anything having moved.
- * `distinct` has always quantized; comparing raw would let that noise into the
- * change and reversal counts, which are the numbers the churn table calls the
- * defect.
- */
+/** Ignore multiplication roundoff in quality fractions. */
 const SAME_VALUE_EPSILON = 1e-8;
 
 const same = (left, right) => Math.abs(left - right) <= SAME_VALUE_EPSILON;
@@ -323,40 +296,6 @@ export const movementOf = (values) => {
     decreases,
     distinct: distinct.size,
     turnover,
-  };
-};
-
-/**
- * How long a scalar took to stop moving, measured from the first frame given.
- *
- * `settled` is false both when the value was still moving at the end and when
- * there was nothing to read, because neither is evidence that it came to rest.
- * The two are told apart by `read`.
- */
-export const settleOf = (frames, read) => {
-  let lastChangeIndex = -1;
-  let previous = null;
-  let readCount = 0;
-  for (const [index, frame] of frames.entries()) {
-    const value = read(frame);
-    if (value === null || value === undefined || !Number.isFinite(value)) {
-      continue;
-    }
-    readCount += 1;
-    if (previous !== null && !same(value, previous)) lastChangeIndex = index;
-    previous = value;
-  }
-  if (readCount === 0) {
-    return { ms: null, frames: null, read: 0, settled: false };
-  }
-  if (lastChangeIndex < 0) {
-    return { ms: 0, frames: 0, read: readCount, settled: true };
-  }
-  return {
-    ms: frames[lastChangeIndex].atMs - frames[0].atMs,
-    frames: lastChangeIndex,
-    read: readCount,
-    settled: lastChangeIndex < frames.length - 1,
   };
 };
 
@@ -426,21 +365,6 @@ export const holdReasonsOf = (adjustments) => {
   };
 };
 
-/** Members seen anywhere in the sequence, in first-seen order, keyed by id. */
-const memberIdsOf = (frames) => {
-  const ids = [];
-  const seen = new Set();
-  for (const frame of frames) {
-    for (const member of membersOf(frame)) {
-      const id = member.id ?? "";
-      if (seen.has(id)) continue;
-      seen.add(id);
-      ids.push(id);
-    }
-  }
-  return ids;
-};
-
 /**
  * Visual churn over a frame sequence, decomposed by where it enters.
  *
@@ -460,7 +384,6 @@ const memberIdsOf = (frames) => {
 export const churnMetrics = (frames) => {
   const spanMs =
     frames.length < 2 ? 0 : frames[frames.length - 1].atMs - frames[0].atMs;
-  const perSecond = (count) => (spanMs > 0 ? (count * 1000) / spanMs : null);
 
   const governor = movementOf(
     frames.map(
@@ -471,18 +394,17 @@ export const churnMetrics = (frames) => {
     ),
   );
 
-  const members = memberIdsOf(frames).map((id) => {
-    const seriesOf = (read) =>
-      frames.map((frame) => {
-        const member = membersOf(frame).find(
-          (candidate) => (candidate.id ?? "") === id,
-        );
-        return member === undefined ? null : read(member);
-      });
-    const kind =
-      frames
-        .flatMap((frame) => membersOf(frame))
-        .find((member) => (member.id ?? "") === id)?.kind ?? null;
+  const byMember = new Map();
+  for (const frame of frames) {
+    for (const member of membersOf(frame)) {
+      const id = member.id ?? "";
+      if (!byMember.has(id)) byMember.set(id, []);
+      byMember.get(id).push(member);
+    }
+  }
+  const members = [...byMember].map(([id, snapshots]) => {
+    const seriesOf = (read) => snapshots.map(read);
+    const kind = snapshots[0].kind;
     let adds = 0;
     let removes = 0;
     let previousTiles = null;
@@ -546,15 +468,6 @@ export const churnMetrics = (frames) => {
     tiles: {
       adds: tileAdds,
       removes: tileRemoves,
-      addsPerSecond: perSecond(tileAdds),
-      removesPerSecond: perSecond(tileRemoves),
-    },
-    detailReversalsPerSecond: perSecond(detail.reversals),
-    settle: {
-      detail: settleOf(frames, (frame) => {
-        const scene = membersOf(frame);
-        return scene.length === 0 ? null : detailKnobOf(scene[0]);
-      }),
     },
     held: holdReasonsOf(adjustments),
     governorMoves: {
@@ -570,44 +483,24 @@ export const churnMetrics = (frames) => {
   };
 };
 
-/**
- * How busy the machine was while a run was measured.
- *
- * A benchmark is supposed to have the machine to itself. Load is a queue
- * length, so it only means anything divided by the cores available to drain
- * it, and the peak of the samples either side of the run is what matters —
- * contention arriving halfway through still spoils the timings.
- *
- * Runs recorded before the bench started sampling have no reading at all,
- * which is reported as unknown rather than quiet.
- */
+/** Endpoint load samples are contention hints, not proof of an idle GPU. */
 export const BUSY_LOAD_PER_CORE = 0.5;
 
 export const machineLoadOf = (artifact) => {
-  const machine = artifact?.machine;
-  if (machine === null || machine === undefined) {
-    return { perCore: null, cores: null, busy: false, known: false };
-  }
-  const readings = [machine.loadBefore, machine.loadAfter]
-    .map((sample) => sample?.perCore)
-    .filter((value) => typeof value === "number" && Number.isFinite(value));
-  if (readings.length === 0) {
-    return {
-      perCore: null,
-      cores: machine.loadBefore?.cores ?? null,
-      busy: false,
-      known: false,
-    };
-  }
-  const perCore = Math.max(...readings);
-  const browsers = [machine.loadBefore, machine.loadAfter]
-    .map((sample) => sample?.browserProcesses)
-    .filter((value) => typeof value === "number" && Number.isFinite(value));
+  const samples = [artifact?.machine?.loadBefore, artifact?.machine?.loadAfter];
+  const maximum = (field) => {
+    const values = samples
+      .map((sample) => sample?.[field])
+      .filter(Number.isFinite);
+    return values.length === 0 ? null : Math.max(...values);
+  };
+  const perCore = maximum("perCore");
   return {
     perCore,
-    browserProcesses: browsers.length === 0 ? null : Math.max(...browsers),
-    cores: machine.loadBefore?.cores ?? machine.loadAfter?.cores ?? null,
-    busy: perCore > BUSY_LOAD_PER_CORE,
-    known: true,
+    browserProcesses: maximum("browserProcesses"),
+    cores:
+      samples.find((sample) => Number.isFinite(sample?.cores))?.cores ?? null,
+    busy: perCore !== null && perCore > BUSY_LOAD_PER_CORE,
+    known: perCore !== null,
   };
 };

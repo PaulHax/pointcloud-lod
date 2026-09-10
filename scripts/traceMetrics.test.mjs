@@ -8,7 +8,6 @@ import {
   holdReasonsOf,
   machineLoadOf,
   movementOf,
-  settleOf,
   settledDetailOf,
 } from "./traceMetrics.mjs";
 
@@ -19,6 +18,7 @@ describe("settled snapshot", () => {
     state: {
       coordinator: {
         submissions: { queuedJobs: 0 },
+        members: [{ active: true, qualityManaged: true }],
         governor: {
           regime: "stationary",
           needsFrame,
@@ -156,51 +156,6 @@ describe("movementOf", () => {
     const noisy = movementOf([0.5, 0.5 + 1e-12, 0.5 - 1e-12]);
     expect(noisy.changes).toBe(0);
     expect(noisy.distinct).toBe(1);
-  });
-});
-
-describe("settleOf", () => {
-  const at = (atMs, density) =>
-    frame(atMs, [pointCloud("a", { allocated: 1, density })]);
-  const density = (f) => f.state.members[0].densityFraction;
-
-  it("reports when the last change happened, not the first", () => {
-    const frames = [0, 10, 20, 30, 40].map((ms, index) =>
-      at(ms, index < 3 ? 0.5 : 1),
-    );
-    expect(settleOf(frames, density)).toMatchObject({
-      ms: 30,
-      frames: 3,
-      settled: true,
-    });
-  });
-
-  it("does not claim a settle when the value moved on the final frame", () => {
-    const frames = [0, 10, 20].map((ms, index) =>
-      at(ms, index === 2 ? 1 : 0.5),
-    );
-    expect(settleOf(frames, density).settled).toBe(false);
-  });
-
-  it("does not claim a settle for a value that was never there", () => {
-    const frames = [0, 10, 20].map((ms) => frame(ms, []));
-    expect(
-      settleOf(frames, (f) => f.state.members[0]?.densityFraction ?? null),
-    ).toEqual({
-      ms: null,
-      frames: null,
-      read: 0,
-      settled: false,
-    });
-  });
-
-  it("handles the empty and single-frame cases", () => {
-    expect(settleOf([], density)).toMatchObject({ read: 0, settled: false });
-    expect(settleOf([at(0, 1)], density)).toMatchObject({
-      ms: 0,
-      read: 1,
-      settled: true,
-    });
   });
 });
 
@@ -390,6 +345,28 @@ describe("detailKnobOf", () => {
 
 describe("machineLoadOf", () => {
   const sample = (perCore) => ({ loadAvg1: perCore * 8, cores: 8, perCore });
+
+  it("keeps browser readings when processor load is unavailable", () => {
+    expect(
+      machineLoadOf({
+        machine: {
+          loadBefore: { browserProcesses: 0 },
+          loadAfter: { browserProcesses: 10 },
+        },
+      }),
+    ).toMatchObject({ perCore: null, browserProcesses: 10, known: false });
+    expect(machineLoadOf({}).browserProcesses).toBeNull();
+  });
+
+  it("preserves measured zero load", () => {
+    expect(machineLoadOf({ machine: { loadBefore: sample(0) } })).toMatchObject(
+      {
+        perCore: 0,
+        known: true,
+        busy: false,
+      },
+    );
+  });
 
   it("takes the worst of the samples either side of the run", () => {
     // Contention that arrives halfway through spoils the run just as surely as

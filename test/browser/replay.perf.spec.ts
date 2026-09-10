@@ -17,7 +17,7 @@
  */
 
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { cpus, loadavg } from "node:os";
 import { basename, isAbsolute, resolve } from "node:path";
 
@@ -195,42 +195,19 @@ const applyConfig = async (
   }
 };
 
-/**
- * What else the machine was doing, sampled either side of a run.
- *
- * A benchmark is supposed to have the machine to itself, and a run that did
- * not is not comparable with one that did — but the run still happened and its
- * artifact is still worth keeping, so this records rather than refuses.
- * `perCore` is the one to read: load is a queue length, so it only means
- * something against the number of cores available to drain it.
- *
- * Two samples, because contention that arrives mid-run is exactly the case a
- * single reading at the start would miss. On a platform with no load average —
- * Windows reports zeroes — the numbers are null rather than a flattering zero.
- *
- * `browserProcesses` is here because processor load turned out to be the wrong
- * question. A run measured with another browser suite resident drew a third of
- * the detail at two thirds the frame rate while the load average sat at 0.36
- * per core, which this file would otherwise have called quiet: the contention
- * was for the GPU, and under WSL `nvidia-smi` reports neither utilisation nor
- * compute apps, so there is nothing to query. Counting the browsers is the
- * signal that is actually available. The benchmark's own browser is in the
- * count, so read it as a comparison between runs rather than as an absolute.
- */
+/** Counts include idle browsers and this benchmark; they do not measure GPU load. */
 const browserProcessCount = (): number | null => {
-  try {
-    const out = execFileSync("pgrep", ["-c", "-f", "chrome|chromium"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    const count = Number.parseInt(out.trim(), 10);
-    return Number.isFinite(count) ? count : null;
-  } catch {
-    // pgrep exits non-zero when nothing matches, and is absent off Linux.
-    return null;
-  }
+  const result = spawnSync("pgrep", ["-c", "-f", "chrome|chromium"], {
+    encoding: "utf8",
+    timeout: 1000,
+  });
+  if (result.status === 1) return 0;
+  if (result.status !== 0) return null;
+  const count = Number.parseInt(result.stdout.trim(), 10);
+  return Number.isFinite(count) ? count : null;
 };
 
+/** Endpoint samples provide context; they cannot exclude contention mid-run. */
 const machineLoad = (): {
   readonly loadAvg1: number | null;
   readonly cores: number;
@@ -239,7 +216,8 @@ const machineLoad = (): {
 } => {
   const cores = Math.max(1, cpus().length);
   const loadAvg1 = loadavg()[0] ?? 0;
-  const usable = Number.isFinite(loadAvg1) && loadAvg1 > 0 ? loadAvg1 : null;
+  const usable =
+    process.platform !== "win32" && Number.isFinite(loadAvg1) ? loadAvg1 : null;
   return {
     loadAvg1: usable,
     cores,
@@ -576,7 +554,7 @@ describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
                   ` visible=${frame.visiblePixels}/${(frame.visibleFraction * 100).toFixed(2)}%` +
                   ` lateness=${replay.dispatch.meanLatenessMs.toFixed(1)}/${replay.dispatch.maxLatenessMs.toFixed(1)} ms` +
                   ` drift=${drift ? `${(drift.meanRelativeError * 100).toFixed(2)}%/${(drift.maxRelativeError * 100).toFixed(2)}%` : "n/a"}` +
-                  ` load=${loadSummary(loadBefore, machineLoad())}\n` +
+                  ` load=${loadSummary(loadBefore, artifact.machine.loadAfter)}\n` +
                   failedDatasets
                     .map(
                       (dataset) =>
