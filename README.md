@@ -383,11 +383,6 @@ it lives.
 
 The dataset dropdown also offers **Freeman Alley · textured mesh (NYT)**,
 streamed on demand from the [New York Times tileset](https://int.nyt.com/data/3dscenes/ONA360/TILESET/0731_FREEMAN_ALLEY_10M_A_36x8K__10K-PN_50P_DB/tileset_tileset.json).
-The example expands its external indexes and unwraps unbatched b3dm containers
-without changing the embedded Draco geometry or textures. It preserves the
-published transform, which places the model in Lake Neusiedl; that placement is
-not a verified real-world location for the alley. Public data is fetched only
-when selected and is not bundled with the package or used by routine tests.
 
 ### Supported 3D Tiles profile
 
