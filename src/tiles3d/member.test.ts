@@ -294,6 +294,42 @@ describe("createTiles3dMember", () => {
     },
   );
 
+  it("restores resident tiles without fetching after the decoded cache evicts", async () => {
+    const h = harness(true);
+    const member = createTiles3dMember(h.context, {
+      ...h.config,
+      cacheBytes: 0,
+    });
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    for (let i = 0; i < 15; i++) {
+      await settle();
+      while (h.submissions.hasPending()) h.submissions.prepareFrame();
+      if (member.governorInputs().work.operations === 0) break;
+    }
+    expect(member.stats()).toMatchObject({
+      queue: { decodedBytes: 0 },
+      renderer: { drawnTiles: 2 },
+    });
+    const fetches = h.contentRequests.length;
+    const decodes = h.decodedRequests.length;
+    member.setCamera({ ...view, position: [0, 0, -1000] });
+    expect(member.stats()).toMatchObject({ renderer: { drawnTiles: 1 } });
+    member.setCamera(view);
+    expect(member.stats()).toMatchObject({
+      renderer: { drawnTiles: 2, drawnTileIds: ["root/0", "root/1"] },
+    });
+    expect(h.contentRequests).toHaveLength(fetches);
+    expect(h.decodedRequests).toHaveLength(decodes);
+    expect(h.submissions.hasPending()).toBe(false);
+    expect(member.pick(view, 50, 50)?.status).toBe("hit");
+    member.dispose();
+  });
+
   it("batches drawn coverage when many pooled tiles are selected again", async () => {
     const h = harness();
     const manifest = {
@@ -1298,6 +1334,80 @@ describe("createTiles3dMember", () => {
     expect(h.decodedRequests[0]?.tilesetToScene[12]).toBe(10);
     member.dispose();
   });
+
+  it.each([208, 180])(
+    "finishes a partially admitted replacement group within %s bytes",
+    async (budget) => {
+      const h = harness();
+      const releases = new Map<string, () => void>();
+      const originalFetch = h.config.fetchContent!;
+      h.context.workers.decode = (request) => {
+        h.decodedRequests.push(request);
+        const content = decoded();
+        if (request.contentUrl.endsWith("/root.glb")) {
+          content.primitives.push(structuredClone(content.primitives[0]!));
+          content.byteEstimate = { geometry: 84, textures: 0 };
+        }
+        return { promise: Promise.resolve(content), cancel: vi.fn() };
+      };
+      const member = createTiles3dMember(h.context, {
+        ...h.config,
+        concurrency: 5,
+        fetchTileset: async () => ({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: async () => ({
+            ...document(),
+            root: tile(
+              "root.glb",
+              8,
+              [0, 1, 2, 3].map((i) => tile(`child${i}.glb`, 0)),
+            ),
+          }),
+        }),
+        fetchContent: async (...args) => {
+          if (!args[0].endsWith("/root.glb"))
+            await new Promise<void>((resolve) =>
+              releases.set(args[0], resolve),
+            );
+          return originalFetch(...args);
+        },
+      });
+      member.applyAllocation({
+        qualityFraction: 1,
+        memoryBudgetBytes: budget,
+        regime: "stationary",
+      });
+      member.setCamera(view);
+      const drain = async () => {
+        for (let i = 0; i < 8; i++) {
+          await settle();
+          while (h.submissions.hasPending()) h.submissions.prepareFrame();
+        }
+      };
+      await drain();
+      expect(
+        (member.stats() as Tiles3dMemberStats).renderer.drawnTileIds,
+      ).toEqual(["root"]);
+      releases.get("/tiles/child0.glb")!();
+      releases.get("/tiles/child1.glb")!();
+      await drain();
+      expect(
+        (member.stats() as Tiles3dMemberStats).renderer.submittedTiles,
+      ).toBeGreaterThan(1);
+      releases.get("/tiles/child2.glb")!();
+      releases.get("/tiles/child3.glb")!();
+      await drain();
+      expect(member.governorInputs().work.operations).toBe(0);
+      const stats = member.stats() as Tiles3dMemberStats;
+      expect(stats.renderer.residentBytes).toBeLessThanOrEqual(budget);
+      expect([...stats.renderer.drawnTileIds].sort()).toEqual(
+        budget === 208 ? ["root/0", "root/1", "root/2", "root/3"] : ["root"],
+      );
+      member.dispose();
+    },
+  );
 
   it("stops refining only the branch whose replacement group cannot fit", async () => {
     const h = harness(true, 4096);
