@@ -158,6 +158,7 @@ export const createTiles3dMember = (
   let workProgressSerial = 0;
   let selectionPasses = 0;
   const requested = new Set<string>();
+  const desiredRequests = new Set<string>();
   const decoded = new Set<string>();
   const admissionBlocked = new Set<string>();
   const admissionFailed = new Set<string>();
@@ -442,10 +443,16 @@ export const createTiles3dMember = (
   };
 
   const blockGroupUnder = (id: string): void => {
-    const ancestor = submittedAncestors(id)[0];
-    if (ancestor === undefined) {
-      // No submitted frontier to fall back to: the member as a whole cannot
-      // afford what it wants, which is what `memoryConstrained` is for.
+    // Coarsen the nearest content-bearing region even when its fallback is
+    // no longer resident. Traversal can request it again without discarding
+    // affordable detail elsewhere in the view.
+    const ancestor = ancestorIds(id).find(
+      (candidate) =>
+        materializedTileById.get(candidate)?.contentUrl !== undefined,
+    );
+    if (ancestor === undefined || ancestor === source?.root.id) {
+      // No smaller content region can cover this request: the member as a
+      // whole must fall back to its root.
       memoryConstrained = true;
       irreducibleBudget = false;
     } else {
@@ -480,9 +487,41 @@ export const createTiles3dMember = (
 
   const clearAdmissionState = (): void => {
     requested.clear();
+    desiredRequests.clear();
     decoded.clear();
     admissionBlocked.clear();
     admissionFailed.clear();
+    lostBlockedContent.clear();
+  };
+
+  const lostBlockedContent = new Set<string>();
+  let cacheBackoffQueued = false;
+  const backoffAfterCacheLoss = (id: string): void => {
+    if (!admissionBlocked.has(id)) return;
+    lostBlockedContent.add(id);
+    if (cacheBackoffQueued) return;
+    cacheBackoffQueued = true;
+    // Eviction runs inside the queue's cache mutation. Wait until that
+    // transaction and its content delivery finish before changing selection.
+    queueMicrotask(() => {
+      cacheBackoffQueued = false;
+      const lost = [...lostBlockedContent];
+      lostBlockedContent.clear();
+      if (disposed || !active) return;
+      for (const candidate of lost) {
+        if (
+          requested.has(candidate) &&
+          admissionBlocked.has(candidate) &&
+          adapter.tileState(candidate) === "absent" &&
+          !queue?.get(candidate)
+        ) {
+          if (candidate === source?.root.id && memoryConstrained) {
+            latchIrreducibleBudget();
+            refreshSelection();
+          } else blockGroupUnder(candidate);
+        }
+      }
+    });
   };
 
   const retryIfDesiredSelectionChanged = (): void => {
@@ -555,11 +594,20 @@ export const createTiles3dMember = (
         subtreeQueue?.setSelection([]);
         for (const id of requested) adapter.cancelTile(id);
         requested.clear();
+        desiredRequests.clear();
         updateDrawSet(true);
         return;
       }
       selectionPasses += 1;
       const next = select(traversalMaximumSse(), traversalQualityFraction());
+      const newlyDesired = new Set(
+        next.desiredTileIds.filter(
+          (id) =>
+            !desiredRequests.has(id) && adapter.tileState(id) === "absent",
+        ),
+      );
+      desiredRequests.clear();
+      for (const id of next.desiredTileIds) desiredRequests.add(id);
       traversal = next;
       subtreeQueue?.setSelection(next.neededSubtreeRequests);
       const nextContentRequests = contentRequests(
@@ -588,12 +636,21 @@ export const createTiles3dMember = (
         nextContentRequests.filter(
           (request) => adapter.tileState(request.id) !== "submitted",
         ),
+        { requeueUncached: newlyDesired },
       );
       for (const id of nextRequested) {
         if (!admissionBlocked.has(id) || adapter.tileState(id) !== "absent")
           continue;
         const content = queue.get(id);
         if (content && !irreducibleBudget) {
+          // A regional backoff can complete a replacement set without a new
+          // decode callback. Reconsider the group against the new frontier.
+          const groupOutcome = trySubmitDesiredGroup(id);
+          if (groupOutcome === "queued") continue;
+          if (groupOutcome === "budget-blocked") {
+            blockGroupUnder(id);
+            break;
+          }
           const replacements = replacementsForAdmission(id);
           const outcome = adapter.submitTile(
             id,
@@ -698,6 +755,7 @@ export const createTiles3dMember = (
         );
         if (outcome === "budget-blocked") {
           admissionBlocked.add(request.id);
+          if (!queue?.get(request.id)) backoffAfterCacheLoss(request.id);
           if (coveredSoonByDesiredDescendants(request.id)) {
             updateDrawSet();
             return;
@@ -707,10 +765,7 @@ export const createTiles3dMember = (
             return;
           }
           if (!memoryConstrained) {
-            memoryConstrained = true;
-            constrainedDesiredSignature = unconstrainedDesiredSignature();
-            irreducibleBudget = false;
-            refreshSelection();
+            blockGroupUnder(request.id);
           } else if (request.id === tileset.root.id) {
             latchIrreducibleBudget();
             refreshSelection();
@@ -723,6 +778,7 @@ export const createTiles3dMember = (
       onEvict: (request) => {
         workProgressSerial += 1;
         decoded.delete(request.id);
+        backoffAfterCacheLoss(request.id);
       },
       onError: (_request, error) => {
         workProgressSerial += 1;
@@ -906,6 +962,9 @@ export const createTiles3dMember = (
         next.verticalExaggeration !== config.verticalExaggeration ||
         next.verticalPivotZ !== config.verticalPivotZ ||
         next.geometricErrorScale !== config.geometricErrorScale;
+      const cacheIncreased =
+        (next.cacheBytes ?? DEFAULT_TILES3D_CACHE_BYTES) >
+        (config.cacheBytes ?? DEFAULT_TILES3D_CACHE_BYTES);
       config = next;
       if (placementChanged) applyPlacement();
       if (sourceChanged || decodeChanged) {
@@ -927,6 +986,7 @@ export const createTiles3dMember = (
         clearBudgetConstraint();
         if (active) beginLoad();
       } else {
+        if (cacheIncreased) clearBudgetConstraint();
         queue?.configure({
           maxConcurrency: concurrency(),
           maxDecodedBytes: config.cacheBytes ?? DEFAULT_TILES3D_CACHE_BYTES,
@@ -1016,7 +1076,7 @@ export const createTiles3dMember = (
       }
       refreshSelection();
       // An oversize decoded value is deliberately not cached by ContentQueue.
-      // If it was blocked by the previous GPU allowance, deselect/reselect it
+      // If it was blocked by the previous GPU allowance, explicitly reopen it
       // so the larger allocation can fetch/decode again instead of leaving a
       // permanently-ready entry with no retained payload.
       const uncachedBlocked = new Set(
@@ -1025,17 +1085,20 @@ export const createTiles3dMember = (
         ),
       );
       if (queue && uncachedBlocked.size > 0) {
-        queue.setSelection(
-          contentRequests(
-            materializedTileById,
-            [...requested].filter((id) => !uncachedBlocked.has(id)),
-          ),
-        );
         for (const id of uncachedBlocked) {
           admissionBlocked.delete(id);
           admissionFailed.delete(id);
           decoded.delete(id);
         }
+        queue.setSelection(
+          contentRequests(
+            materializedTileById,
+            [...requested].filter(
+              (id) => adapter.tileState(id) !== "submitted",
+            ),
+          ),
+          { requeueUncached: uncachedBlocked },
+        );
         refreshSelection();
       }
     },
