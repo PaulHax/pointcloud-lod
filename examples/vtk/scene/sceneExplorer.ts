@@ -1,3 +1,4 @@
+import { createFreemanSource, FREEMAN_URL } from "./freeman";
 import {
   createCopcWorkerTileSource,
   wgs84ToEcef,
@@ -87,6 +88,8 @@ type PointSource = {
 type TilesSource = {
   readonly label: string;
   readonly endpoint: string;
+  readonly tilesetToScene?: Tiles3dMemberConfig["tilesetToScene"];
+  readonly view?: ViewTarget;
   readonly place?: Place;
   readonly fetchTileset?: Tiles3dMemberConfig["fetchTileset"];
   readonly fetchContent?: Tiles3dMemberConfig["fetchContent"];
@@ -118,6 +121,11 @@ const tilesPreset = (place: Place, radiusMeters = 3_000): TilesSource => ({
   }),
   location: { kind: "tiles-place", value: place.label },
 });
+
+const tilePresets: readonly TilesSource[] = [
+  ...PLACES.map((place) => tilesPreset(place)),
+  createFreemanSource(),
+];
 
 const basename = (value: string): string => {
   try {
@@ -361,6 +369,7 @@ const sourceForLocation = (
     };
   }
   if (location.kind === "tiles-url") {
+    if (location.value === FREEMAN_URL) return createFreemanSource();
     return {
       endpoint: tilesEndpoint(location.value),
       label: basename(location.value) || "3D Tiles",
@@ -697,7 +706,9 @@ export const startSceneExplorer = (preset: ExplorerPreset): void => {
     let config: Tiles3dMemberConfig = {
       endpoint: input.endpoint,
       revision: `${id}:${Date.now()}`,
-      tilesetToScene: input.place ? contentToScene(input.place) : IDENTITY,
+      tilesetToScene:
+        input.tilesetToScene ??
+        (input.place ? contentToScene(input.place) : IDENTITY),
       maximumScreenSpaceErrorPx: Number(sse.value),
       wasm: decodeWasmUrls(),
       ...(input.fetchTileset ? { fetchTileset: input.fetchTileset } : {}),
@@ -720,9 +731,11 @@ export const startSceneExplorer = (preset: ExplorerPreset): void => {
       statsElement: built.stats,
       registration,
       location: input.location,
-      view: input.place
-        ? { center: [0, 0, 30], distance: input.place.viewDistance }
-        : null,
+      view:
+        input.view ??
+        (input.place
+          ? { center: [0, 0, 30], distance: input.place.viewDistance }
+          : null),
       controls: {
         setVisible: (next) => {
           visible.checked = next;
@@ -886,9 +899,9 @@ export const startSceneExplorer = (preset: ExplorerPreset): void => {
             value: String(index),
             label: item.label,
           }))
-        : PLACES.map((place, index) => ({
+        : tilePresets.map((source, index) => ({
             value: String(index),
-            label: `3DBAG buildings · ${place.label}`,
+            label: source.label,
           }));
     for (const choice of choices) {
       const option = document.createElement("option");
@@ -969,7 +982,7 @@ export const startSceneExplorer = (preset: ExplorerPreset): void => {
       { label: "Point clouds", sources: pointPresets },
       {
         label: "3D Tiles",
-        sources: PLACES.map((place) => tilesPreset(place)),
+        sources: tilePresets,
       },
     ];
     for (const group of groups) {
@@ -1071,7 +1084,7 @@ export const startSceneExplorer = (preset: ExplorerPreset): void => {
       } else {
         let source: TilesSource;
         if (sourceType.value === "preset") {
-          source = tilesPreset(PLACES[Number(presetSelect.value)]!);
+          source = tilePresets[Number(presetSelect.value)]!;
         } else if (sourceType.value === "url") {
           if (!urlInput.value.trim()) throw new Error("Enter a 3D Tiles URL.");
           source = {
@@ -1144,11 +1157,10 @@ export const startSceneExplorer = (preset: ExplorerPreset): void => {
       const tiles = parameters.get("tiles");
       addTilesDataset(
         tiles
-          ? {
-              endpoint: tilesEndpoint(tiles),
-              label: basename(tiles) || "3D Tiles",
-              location: { kind: "tiles-url", value: tiles },
-            }
+          ? (sourceForLocation({
+              kind: "tiles-url",
+              value: tiles,
+            }) as TilesSource)
           : tilesPreset(place),
       );
     } else {
