@@ -1027,25 +1027,8 @@ describe("createTiles3dMember", () => {
   });
 
   it("surfaces permanent adapter rejection once without retrying forever", async () => {
-    const h = harness();
-    (h.context.workers as any).decode = (request: DecodeTileRequest) => {
-      h.decodedRequests.push(request);
-      const invalid = decoded();
-      invalid.primitives[0]!.material.baseColorTexture = {
-        kind: "rgba",
-        rgba: new Uint8Array(2048),
-        width: 32,
-        height: 16,
-        colorSpace: "srgb",
-        sampler: {
-          magFilter: 9729,
-          minFilter: 9987,
-          wrapS: 10497,
-          wrapT: 10497,
-        },
-      };
-      return { promise: Promise.resolve(invalid), cancel: vi.fn() };
-    };
+    // Geometry can be split into triangles, but one triangle is indivisible.
+    const h = harness(false, 16);
     const member = createTiles3dMember(h.context, h.config);
     member.applyAllocation({
       qualityFraction: 1,
@@ -1056,7 +1039,7 @@ describe("createTiles3dMember", () => {
     await settle();
     expect((member.stats() as Tiles3dMemberStats).errorCount).toBe(1);
     expect((member.stats() as Tiles3dMemberStats).lastError).toMatch(
-      /texture is 2048 bytes.*submission cap/,
+      /one mesh triangle requires .*submission cap/,
     );
     expect(member.governorInputs()).toMatchObject({
       work: { operations: 0 },

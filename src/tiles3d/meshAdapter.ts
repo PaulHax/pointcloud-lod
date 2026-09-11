@@ -803,20 +803,10 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
           formats.add(texture.kind === "compressed" ? texture.format : "rgba");
       }
       try {
-        const validatedTextures = new Set<DecodedTexture>();
         for (const primitive of content.primitives) {
           if (bytesPerTriangle(primitive) > maxJobBytes) {
             throw new Error(
               `one mesh triangle requires ${bytesPerTriangle(primitive)} bytes, exceeding the ${maxJobBytes}-byte submission cap`,
-            );
-          }
-          const texture = primitive.material.baseColorTexture;
-          if (!texture || validatedTextures.has(texture)) continue;
-          validatedTextures.add(texture);
-          const bytes = textureByteLength(texture);
-          if (bytes > maxJobBytes) {
-            throw new Error(
-              `mesh texture is ${bytes} bytes, exceeding the ${maxJobBytes}-byte submission cap`,
             );
           }
         }
@@ -882,10 +872,15 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
           }
         }
       }
-      const enqueue = (bytes: number, run: () => void): void => {
+      const enqueue = (
+        bytes: number,
+        run: () => void,
+        atomic = false,
+      ): void => {
         entry.remainingJobs += 1;
         const submission = options.submissions.enqueue({
           bytes,
+          atomic,
           run: () => {
             if (entry.cancelled || disposed) return;
             run();
@@ -910,21 +905,20 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         entry.jobs.push(submission);
       };
       try {
-        // Texture ownership is admitted explicitly and once before geometry
-        // chunks that reference it. vtkTexture's payload setter is atomic, so
-        // a single retained representation must fit one scheduler slice.
+        // Texture ownership is indivisible at vtkTexture's payload setter.
+        // The tile already passed the residency budget; a large texture gets
+        // its own admission frame instead of becoming a permanent load error.
         for (const decodedTexture of decodedTextures) {
           const bytes = textureByteLength(decodedTexture);
-          if (bytes > maxJobBytes) {
-            throw new Error(
-              `mesh texture is ${bytes} bytes, exceeding the ${maxJobBytes}-byte submission cap`,
-            );
-          }
-          enqueue(bytes, () => {
-            const texture = createTexture(decodedTexture);
-            textures.set(decodedTexture, texture);
-            resources.textures.add(texture);
-          });
+          enqueue(
+            bytes,
+            () => {
+              const texture = createTexture(decodedTexture);
+              textures.set(decodedTexture, texture);
+              resources.textures.add(texture);
+            },
+            true,
+          );
         }
         content.primitives.forEach((primitive) => {
           const totalTriangles = trianglesIn(primitive);

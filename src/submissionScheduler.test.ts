@@ -42,6 +42,35 @@ describe("createSubmissionScheduler", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("isolates oversized atomic resources between ordinary slices", () => {
+    const admitted: number[] = [];
+    const scheduler = createSubmissionScheduler({
+      scheduleRender: vi.fn(),
+      maxBytesPerFrame: 10,
+      now: () => 0,
+    });
+    scheduler.enqueue({ bytes: 4, run: () => admitted.push(4) });
+    scheduler.enqueue({
+      bytes: 20,
+      atomic: true,
+      run: () => admitted.push(20),
+    });
+    scheduler.enqueue({ bytes: 0, run: () => admitted.push(0) });
+    scheduler.enqueue({ bytes: 6, run: () => admitted.push(6) });
+    scheduler.prepareFrame();
+    expect(admitted).toEqual([4]);
+    scheduler.prepareFrame();
+    expect(admitted).toEqual([4, 20]);
+    expect(scheduler.stats()).toMatchObject({
+      lastFrameAdmittedJobs: 1,
+      lastFrameAdmittedBytes: 20,
+      queuedBytes: 6,
+    });
+    scheduler.prepareFrame();
+    expect(admitted).toEqual([4, 20, 0, 6]);
+    expect(scheduler.hasPending()).toBe(false);
+  });
+
   it("uses elapsed wall time as a second per-frame boundary", () => {
     let now = 0;
     const admitted: number[] = [];
