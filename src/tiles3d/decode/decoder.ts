@@ -171,6 +171,7 @@ const validateRequiredExtensions = (json: GltfJson, tileUri: string): void => {
 };
 
 interface GltfPrimitive {
+  extensions?: Record<string, unknown>;
   attributes: Record<string, number | ExpandedAccessor>;
   indices?: number | ExpandedAccessor;
   material?: number;
@@ -1530,8 +1531,8 @@ const decodeTileContentInner = async (
       fetch: fetchDependency,
     },
     modules,
-    // Read the encoded index sequence; glTF primitive.mode determines how
-    // those indices form faces. Do not ask Draco to generate a new strip.
+    // Decode mesh faces directly, then normalize compressed primitive modes
+    // below: Draco triangle-list output is no longer a glTF strip.
     draco: { topology: "triangle-list" },
     gltf: {
       normalize: false,
@@ -1540,6 +1541,18 @@ const decodeTileContentInner = async (
       decompressMeshes: true,
     },
   })) as unknown as ParsedGltf;
+  for (const [meshIndex, mesh] of (originalJson.meshes ?? []).entries()) {
+    for (const [primitiveIndex, primitive] of mesh.primitives.entries()) {
+      if (
+        primitive.mode === 5 &&
+        primitive.extensions?.KHR_draco_mesh_compression !== undefined
+      ) {
+        const decoded =
+          parsed.json.meshes?.[meshIndex]?.primitives[primitiveIndex];
+        if (decoded) decoded.mode = 4;
+      }
+    }
+  }
   // loaders.gl normalizes material objects and currently drops the empty
   // KHR_materials_unlit marker. Material indices remain stable, so restore
   // that renderer-significant authored flag from the validated source JSON.

@@ -501,11 +501,11 @@ describe("decoded tile contract", () => {
       faces: [0, 1, 2, 2, 1, 3, 2, 3, 4, 4, 3, 5],
     },
     {
-      label: "Draco",
+      label: "Draco disconnected faces",
       compressed: true,
       indexed: true,
       strip: [0, 1, 2, 3, 4, 5],
-      faces: [0, 1, 2, 2, 1, 3, 2, 3, 4, 4, 3, 5],
+      faces: [0, 1, 2, 3, 4, 5],
     },
     {
       label: "unindexed",
