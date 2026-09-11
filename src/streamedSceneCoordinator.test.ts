@@ -135,6 +135,84 @@ describe("createStreamedSceneCoordinator", () => {
     expect(fixed.allocations.at(-1)?.qualityFraction).toBe(1);
   });
 
+  it("does not train on the frame that drains the final submission", () => {
+    const coordinator = createStreamedSceneCoordinator({
+      scheduleRender: vi.fn(),
+      memory: createMemoryPool({ totalBytes: 300 }),
+      governor: { minSamples: 1, cooldownMs: 0, hysteresis: 0 },
+    });
+    let busy = true;
+    const member = makeMember();
+    member.governorInputs = () => ({
+      projectedImportance: 1 as Importance,
+      qualityDemand: 1,
+      work: { operations: busy ? 1 : 0, progressSerial: busy ? 0 : 1 },
+      physicalTileOperations: 0,
+      physicalHierarchyOperations: 0,
+      residentBytes: 0,
+    });
+    member.prepareFrame.mockImplementation(() => {
+      busy = false;
+    });
+    coordinator.register(member, { qualityManaged: true });
+    coordinator.prepareFrame(1);
+    coordinator.recordHostFrame({ hostFrameMs: 100, now: 0 });
+    expect(coordinator.stats().viewQualityFraction).toBe(1);
+    coordinator.recordHostFrame({ hostFrameMs: 100, now: 1 });
+    expect(coordinator.stats().viewQualityFraction).toBeLessThan(1);
+    coordinator.dispose();
+  });
+
+  it("rejects a submission enqueued and drained between work notifications", () => {
+    const coordinator = createStreamedSceneCoordinator({
+      scheduleRender: vi.fn(),
+      memory: createMemoryPool({ totalBytes: 300 }),
+      governor: { minSamples: 1, cooldownMs: 0, hysteresis: 0 },
+    });
+    coordinator.register(makeMember(), { qualityManaged: true });
+    const run = vi.fn();
+    coordinator.context({} as never).submissions.enqueue({ bytes: 1, run });
+    coordinator.prepareFrame(1);
+    expect(run).toHaveBeenCalledOnce();
+    coordinator.recordHostFrame({ hostFrameMs: 100, now: 0 });
+    expect(coordinator.stats().governor.capacitySamples.lastEligible).toBe(
+      false,
+    );
+    expect(coordinator.stats().viewQualityFraction).toBe(1);
+    coordinator.prepareFrame(2);
+    coordinator.recordHostFrame({ hostFrameMs: 100, now: 1 });
+    expect(coordinator.stats().viewQualityFraction).toBeLessThan(1);
+    coordinator.dispose();
+  });
+
+  it("keeps completed fixed-member work until a valid presentation report", () => {
+    const coordinator = createStreamedSceneCoordinator({
+      scheduleRender: vi.fn(),
+      memory: createMemoryPool({ totalBytes: 300 }),
+      governor: { minSamples: 1, cooldownMs: 0, hysteresis: 0 },
+    });
+    coordinator.register(makeMember(), { qualityManaged: true });
+    const fixed = makeMember();
+    let busy = true;
+    fixed.governorInputs = () => ({
+      projectedImportance: 1 as Importance,
+      qualityDemand: 1,
+      work: { operations: 0, progressSerial: 0 },
+      physicalTileOperations: busy ? 1 : 0,
+      physicalHierarchyOperations: 0,
+      residentBytes: 0,
+    });
+    coordinator.register(fixed, { qualityManaged: false });
+    busy = false;
+    coordinator.context({} as never).onWorkChange?.();
+    coordinator.recordHostFrame({ hostFrameMs: Number.NaN });
+    coordinator.recordHostFrame({ hostFrameMs: 100, now: 0 });
+    expect(coordinator.stats().viewQualityFraction).toBe(1);
+    coordinator.recordHostFrame({ hostFrameMs: 100, now: 1 });
+    expect(coordinator.stats().viewQualityFraction).toBeLessThan(1);
+    coordinator.dispose();
+  });
+
   it("feeds the governor fraction directly into view allocation", () => {
     const coordinator = createStreamedSceneCoordinator({
       scheduleRender: vi.fn(),
