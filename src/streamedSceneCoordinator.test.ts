@@ -70,6 +70,39 @@ describe("createStreamedSceneCoordinator", () => {
     expect(b.allocations.at(-1)?.memoryBudgetBytes).toBe(900);
   });
 
+  it.each([true, false])(
+    "wakes finished work without a submission for adaptive=%s",
+    (qualityManaged) => {
+      let pending = true;
+      const scheduleRender = vi.fn();
+      const coordinator = createStreamedSceneCoordinator({
+        scheduleRender,
+        memory: createMemoryPool({ totalBytes: 1000 }),
+      });
+      const base = makeMember();
+      coordinator.register(
+        {
+          ...base,
+          governorInputs: () => ({
+            ...base.governorInputs(),
+            work: {
+              operations: pending ? 1 : 0,
+              progressSerial: pending ? 0 : 1,
+            },
+          }),
+        },
+        { qualityManaged },
+      );
+      scheduleRender.mockClear();
+      pending = false;
+      coordinator.context({}).onWorkChange?.();
+      expect(scheduleRender).toHaveBeenCalledTimes(qualityManaged ? 1 : 0);
+      coordinator.stats();
+      expect(scheduleRender).toHaveBeenCalledTimes(qualityManaged ? 1 : 0);
+      coordinator.dispose();
+    },
+  );
+
   it("survives members that report work from inside applyAllocation", async () => {
     // Applying an allocation makes the member queue work, and queueing work is
     // a work change, which is another refresh. Two members sharing one quality

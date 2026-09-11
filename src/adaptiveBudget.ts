@@ -106,6 +106,8 @@ export type AdaptiveQuality = {
   fraction(interacting: boolean): number;
   target(interacting: boolean): number;
   restartAt(interacting: boolean, fraction: number, now: number): number;
+  /** Discard costs from an older frontier without changing quality or emergency debt. */
+  clearSamples(interacting: boolean, now: number): void;
   reduceNow(interacting: boolean, now: number): number;
   /** Gives back one emergency cut, never past what the cut took away. */
   restoreNow(interacting: boolean, now: number): number;
@@ -350,6 +352,12 @@ export const createAdaptiveQuality = (
       track.emergencyCeiling = null;
       record(track, now, "none", "seeded", from, null);
       return track.fraction;
+    },
+
+    clearSamples(interacting, now) {
+      const track = trackFor(interacting);
+      track.samples.length = 0;
+      record(track, now, "none", "insufficient-samples", track.fraction, null);
     },
 
     reduceNow(interacting, now) {

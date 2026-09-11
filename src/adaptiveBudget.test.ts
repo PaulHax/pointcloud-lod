@@ -78,6 +78,18 @@ describe("createAdaptiveQuality", () => {
     expect(quality.restartAt(false, 0, 3)).toBe(MIN_VIEW_QUALITY_FRACTION);
   });
 
+  it("preserves emergency recovery when completed work invalidates samples", () => {
+    const quality = createAdaptiveQuality({ initialFraction: 1 });
+    quality.reduceNow(true, 0);
+    quality.clearSamples(true, 1);
+    expect(quality.stats().interaction).toMatchObject({
+      fraction: 0.5,
+      emergencyCeiling: 1,
+      samples: 0,
+    });
+    expect(quality.restoreNow(true, 2)).toBe(1);
+  });
+
   it("records convergence inside hysteresis without changing quality", () => {
     const quality = createAdaptiveQuality(options);
     frames(quality, 32, false);
