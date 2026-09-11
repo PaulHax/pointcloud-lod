@@ -501,9 +501,18 @@ describe("decoded tile contract", () => {
       faces: [0, 1, 2, 2, 1, 3, 2, 3, 4, 4, 3, 5],
     },
     {
-      label: "Draco disconnected faces",
+      label: "Draco strip",
       compressed: true,
       indexed: true,
+      mode: 5,
+      strip: [0, 1, 2, 3, 4, 5],
+      faces: [0, 1, 2, 2, 1, 3, 2, 3, 4, 4, 3, 5],
+    },
+    {
+      label: "Draco triangles",
+      compressed: true,
+      indexed: true,
+      mode: 4,
       strip: [0, 1, 2, 3, 4, 5],
       faces: [0, 1, 2, 3, 4, 5],
     },
@@ -522,8 +531,8 @@ describe("decoded tile contract", () => {
       faces: [0, 1, 2, 3, 2, 4, 3, 4, 5],
     },
   ])(
-    "triangulates $label strips with preserved winding",
-    async ({ compressed, indexed, strip, faces }) => {
+    "preserves authored topology and winding for $label primitives",
+    async ({ compressed, indexed, strip, faces, mode = 5 }) => {
       const positions = new Float32Array([
         0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0, 0, 2, 0, 1, 2, 0,
       ]);
@@ -611,7 +620,7 @@ describe("decoded tile contract", () => {
           {
             primitives: [
               {
-                mode: 5,
+                mode,
                 attributes: { POSITION: 0 },
                 ...(indexed ? { indices: 1 } : {}),
                 extensions: extension,
