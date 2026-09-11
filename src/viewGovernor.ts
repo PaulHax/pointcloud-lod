@@ -173,7 +173,7 @@ const INTERACTION_SEED_OF_STATIONARY = 0.25;
 
 const GOVERNOR_DEFAULTS = {
   vtkFrameFraction: 0.7,
-  interactionSettleMs: 750,
+  interactionSettleMs: 250,
   motionDebounceMs: 250,
 } as const;
 
