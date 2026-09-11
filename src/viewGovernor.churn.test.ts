@@ -72,22 +72,25 @@ describe("interaction quality under a quantized display", () => {
     // Ten samples make p90 robust to one isolated hitch, at the cost of
     // additional observations before a sustained-overload adjustment.
     { minSamples: undefined, maxMs: 1200, maxSlowFrames: 35 },
-  ])("recovers promptly with minimum sample count $minSamples", ({ minSamples, maxMs, maxSlowFrames }) => {
-    withGesture(
-      { initialFraction: 0.7, minSamples },
-      (_governor, step) => {
-        const start = Date.now();
-        let slowFrames = 0;
-        while (Date.now() - start < 5000) {
-          if (step({ spanMs: 40 }) === VSYNC_MS) break;
-          slowFrames += 1;
-        }
-        expect(Date.now() - start).toBeLessThanOrEqual(maxMs);
-        expect(slowFrames).toBeLessThanOrEqual(maxSlowFrames);
-      },
-      true,
-    );
-  });
+  ])(
+    "recovers promptly with minimum sample count $minSamples",
+    ({ minSamples, maxMs, maxSlowFrames }) => {
+      withGesture(
+        { initialFraction: 0.7, minSamples },
+        (_governor, step) => {
+          const start = Date.now();
+          let slowFrames = 0;
+          while (Date.now() - start < 5000) {
+            if (step({ spanMs: 40 }) === VSYNC_MS) break;
+            slowFrames += 1;
+          }
+          expect(Date.now() - start).toBeLessThanOrEqual(maxMs);
+          expect(slowFrames).toBeLessThanOrEqual(maxSlowFrames);
+        },
+        true,
+      );
+    },
+  );
 
   it("discovers newly available capacity during the same gesture", () => {
     withGesture(
