@@ -60,13 +60,28 @@ describe("stationary quality trials", () => {
     });
     expect(governor.stats().lastAdjustment?.reason).toBe("trial-rejected");
     for (let now = 6; now < 100; now += 1)
-      governor.recordHostFrame({ hostFrameMs: 16.7, now });
+      governor.recordHostFrame({ hostFrameMs: 33.4, now });
     expect(governor.qualityFraction()).toBe(0.8);
     expect(governor.needsFrame()).toBe(false);
     governor.invalidateCapacity();
     for (let now = 100; now < 108; now += 1)
       governor.recordHostFrame({ hostFrameMs: 33.4, now });
     expect(governor.qualityFraction()).toBe(1);
+    expect(governor.needsFrame()).toBe(false);
+    governor.dispose();
+  });
+
+  it("recovers from a rejected trial when total frame times improve", () => {
+    const governor = createViewGovernor(options);
+    for (let now = 0; now < 4; now += 1)
+      governor.recordHostFrame({ hostFrameMs: 33.4, now });
+    for (let now = 4; now < 6; now += 1)
+      governor.recordHostFrame({ hostFrameMs: 50, now });
+    expect(governor.qualityFraction()).toBe(0.8);
+    for (let now = 6; now < 12; now += 1)
+      governor.recordHostFrame({ hostFrameMs: 16.7, now });
+    expect(governor.qualityFraction()).toBe(1);
+    expect(governor.stats().trialAttempts).toBe(1);
     expect(governor.needsFrame()).toBe(false);
     governor.dispose();
   });

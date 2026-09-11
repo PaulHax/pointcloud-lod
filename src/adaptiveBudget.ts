@@ -387,10 +387,9 @@ export const createAdaptiveQuality = (
       record(track, now, "none", "within-hysteresis", from, estimate);
       return;
     }
-    const next =
-      factor > 1
-        ? Math.min(track.increaseCeiling, clamp(track.fraction * factor))
-        : clamp(track.fraction * factor);
+    // A failed on-target probe must not cap ordinary recovery when measured
+    // frames are below the fast threshold. The ceiling only bounds probes.
+    const next = clamp(track.fraction * factor);
     if (next === from) {
       record(track, now, "none", "clamped", from, estimate);
       return;

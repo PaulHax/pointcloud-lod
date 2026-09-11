@@ -8,8 +8,6 @@ export const DEFAULT_MAXIMUM_SCREEN_SPACE_ERROR_PX = 16;
 export const DEFAULT_TILES3D_CACHE_BYTES = 128 * 1024 * 1024;
 export const DEFAULT_TILES3D_CONCURRENCY = 4;
 export const DEFAULT_TILES3D_SUBTREE_CACHE_BYTES = 8 * 1024 * 1024;
-export const DEFAULT_INTERACTION_RETENTION_MAX_TRIANGLES = 1024;
-export const DEFAULT_INTERACTION_RETENTION_MAX_ACTORS = 64;
 export const DEFAULT_VERTICAL_EXAGGERATION = 1;
 export const DEFAULT_VERTICAL_PIVOT_Z = 0;
 
@@ -48,10 +46,6 @@ export type Tiles3dMemberConfig = {
   /** Scale convention for tile geometric error; terrain error is horizontal. */
   readonly geometricErrorScale?: GeometricErrorScale;
   readonly maximumScreenSpaceErrorPx?: number;
-  /** Keep an already drawn small frontier during motion; zero disables retention.
-   * Both limits apply, and memory pressure always takes precedence. */
-  readonly interactionRetentionMaxTriangles?: number;
-  readonly interactionRetentionMaxActors?: number;
   readonly wasm?: DecodeWasmUrls;
   readonly cacheBytes?: number;
   /** Simultaneous content and subtree fetches. */
