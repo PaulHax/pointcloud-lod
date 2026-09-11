@@ -492,6 +492,146 @@ describe("decoded tile contract", () => {
     expect(() => structuredClone(result)).not.toThrow();
   });
 
+  it.each([
+    {
+      label: "indexed",
+      compressed: false,
+      indexed: true,
+      strip: [0, 1, 2, 3, 4, 5],
+      faces: [0, 1, 2, 2, 1, 3, 2, 3, 4, 4, 3, 5],
+    },
+    {
+      label: "Draco",
+      compressed: true,
+      indexed: true,
+      strip: [0, 1, 2, 3, 4, 5],
+      faces: [0, 1, 2, 2, 1, 3, 2, 3, 4, 4, 3, 5],
+    },
+    {
+      label: "unindexed",
+      compressed: false,
+      indexed: false,
+      strip: [0, 1, 2, 3, 4, 5],
+      faces: [0, 1, 2, 2, 1, 3, 2, 3, 4, 4, 3, 5],
+    },
+    {
+      label: "degenerate connectors",
+      compressed: false,
+      indexed: true,
+      strip: [0, 1, 2, 2, 3, 4, 5],
+      faces: [0, 1, 2, 3, 2, 4, 3, 4, 5],
+    },
+  ])(
+    "triangulates $label strips with preserved winding",
+    async ({ compressed, indexed, strip, faces }) => {
+      const positions = new Float32Array([
+        0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0, 0, 2, 0, 1, 2, 0,
+      ]);
+      const indices = new Uint16Array(strip);
+      let bytes: Uint8Array;
+      let extension: Record<string, unknown> = {};
+      if (compressed) {
+        const runtime = (await draco3d.createEncoderModule()) as any;
+        const mesh = new runtime.Mesh();
+        const builder = new runtime.MeshBuilder();
+        const encoder = new runtime.Encoder();
+        const output = new runtime.DracoInt8Array();
+        try {
+          const positionId = builder.AddFloatAttributeToMesh(
+            mesh,
+            runtime.POSITION,
+            6,
+            3,
+            positions,
+          );
+          builder.AddFacesToMesh(mesh, 2, indices);
+          encoder.SetEncodingMethod(runtime.MESH_SEQUENTIAL_ENCODING);
+          const length = encoder.EncodeMeshToDracoBuffer(mesh, output);
+          expect(length).toBeGreaterThan(0);
+          bytes = Uint8Array.from({ length }, (_, i) => output.GetValue(i));
+          extension = {
+            KHR_draco_mesh_compression: {
+              bufferView: 0,
+              attributes: { POSITION: positionId },
+            },
+          };
+        } finally {
+          for (const item of [output, encoder, builder, mesh])
+            runtime.destroy(item);
+        }
+      } else {
+        bytes = new Uint8Array(positions.byteLength + indices.byteLength);
+        bytes.set(new Uint8Array(positions.buffer));
+        bytes.set(new Uint8Array(indices.buffer), positions.byteLength);
+      }
+      const json = {
+        asset: { version: "2.0" },
+        scene: 0,
+        scenes: [{ nodes: [0] }],
+        nodes: [{ mesh: 0 }],
+        ...(compressed
+          ? {
+              extensionsUsed: ["KHR_draco_mesh_compression"],
+              extensionsRequired: ["KHR_draco_mesh_compression"],
+            }
+          : {}),
+        buffers: [
+          {
+            uri: `data:application/octet-stream;base64,${Buffer.from(bytes).toString("base64")}`,
+            byteLength: bytes.length,
+          },
+        ],
+        bufferViews: compressed
+          ? [{ buffer: 0, byteLength: bytes.length }]
+          : [
+              { buffer: 0, byteLength: positions.byteLength },
+              {
+                buffer: 0,
+                byteOffset: positions.byteLength,
+                byteLength: indices.byteLength,
+              },
+            ],
+        accessors: [
+          {
+            componentType: 5126,
+            type: "VEC3",
+            count: 6,
+            min: [0, 0, 0],
+            max: [1, 2, 0],
+            ...(!compressed ? { bufferView: 0 } : {}),
+          },
+          {
+            componentType: 5123,
+            type: "SCALAR",
+            count: indices.length,
+            ...(!compressed ? { bufferView: 1 } : {}),
+          },
+        ],
+        meshes: [
+          {
+            primitives: [
+              {
+                mode: 5,
+                attributes: { POSITION: 0 },
+                ...(indexed ? { indices: 1 } : {}),
+                extensions: extension,
+              },
+            ],
+          },
+        ],
+      };
+      const decoded = await decodeTileContent(
+        {
+          ...(await request("level-0-root.glb")),
+          content: new TextEncoder().encode(JSON.stringify(json)).buffer,
+        },
+        { ...testOptions, modules: { draco3d } },
+      );
+      expect(Array.from(decoded.primitives[0]!.indices!)).toEqual(faces);
+      expect(decoded.primitives[0]!.positions).toHaveLength(18);
+    },
+  );
+
   it("fails closed instead of falling back to remote codec defaults", async () => {
     await expect(
       decodeTileContent(

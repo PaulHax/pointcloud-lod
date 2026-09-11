@@ -921,6 +921,37 @@ const accessorIndices = (
   return output;
 };
 
+/** Preserve strip winding; repeated indices join strips without drawing faces. */
+const triangulateStrip = (
+  indices: Uint16Array | Uint32Array | undefined,
+  vertexCount: number,
+): Uint16Array | Uint32Array => {
+  const count = indices?.length ?? vertexCount;
+  const at = (index: number): number => indices?.[index] ?? index;
+  let triangles = 0;
+  for (let i = 2; i < count; i += 1) {
+    const a = at(i - 2),
+      b = at(i - 1),
+      c = at(i);
+    if (a !== b && b !== c && a !== c) triangles += 1;
+  }
+  const result =
+    vertexCount <= 65_536
+      ? new Uint16Array(triangles * 3)
+      : new Uint32Array(triangles * 3);
+  let offset = 0;
+  for (let i = 2; i < count; i += 1) {
+    const a = at(i - 2),
+      b = at(i - 1),
+      c = at(i);
+    if (a === b || b === c || a === c) continue;
+    result[offset++] = i % 2 === 0 ? a : b;
+    result[offset++] = i % 2 === 0 ? b : a;
+    result[offset++] = c;
+  }
+  return result;
+};
+
 const nodeMatrix = (node: GltfNode): Mat4 => {
   if (node.matrix) {
     if (
@@ -995,8 +1026,10 @@ const applySceneRtc = (
     if (node.mesh !== undefined) {
       const mesh = requireIndex(gltf.json.meshes, node.mesh, "mesh");
       for (const primitive of mesh.primitives) {
-        if ((primitive.mode ?? 4) !== 4) {
-          throw new Error("only glTF TRIANGLES primitives are supported");
+        if (![4, 5].includes(primitive.mode ?? 4)) {
+          throw new Error(
+            "only glTF TRIANGLES and TRIANGLE_STRIP primitives are supported",
+          );
         }
         const positions = accessorFloats(
           primitive.attributes.POSITION,
@@ -1031,7 +1064,7 @@ const applySceneRtc = (
             `glTF primitive has no TEXCOORD_${texCoord} attribute`,
           );
         }
-        const indices = accessorIndices(primitive.indices, gltf);
+        let indices = accessorIndices(primitive.indices, gltf);
         const vertexCount = positions.length / 3;
         if (
           indices?.some(
@@ -1042,6 +1075,8 @@ const applySceneRtc = (
             `glTF primitive index exceeds its ${vertexCount}-vertex POSITION accessor`,
           );
         }
+        if (primitive.mode === 5)
+          indices = triangulateStrip(indices, vertexCount);
         pending.push({
           rtc: flattenPrimitiveToRtc(
             {
@@ -1495,6 +1530,9 @@ const decodeTileContentInner = async (
       fetch: fetchDependency,
     },
     modules,
+    // Read the encoded index sequence; glTF primitive.mode determines how
+    // those indices form faces. Do not ask Draco to generate a new strip.
+    draco: { topology: "triangle-list" },
     gltf: {
       normalize: false,
       loadBuffers: true,
