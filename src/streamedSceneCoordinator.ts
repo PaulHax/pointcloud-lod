@@ -251,6 +251,15 @@ export const createStreamedSceneCoordinator = (
   });
   const governor = createViewGovernor(governorOptions());
 
+  const invalidateCapacity = (): void => {
+    if (disposed || governor.stats().frameMetrics.frames === 0) return;
+    governor.invalidateCapacity();
+    // Reject the presentation spanning the mutation as well as the previous
+    // workload's samples. A style or visibility change may enqueue no work.
+    capacityWorkSinceLastReport = true;
+    if (Array.from(members).some(isAdaptive)) options.scheduleRender();
+  };
+
   const applyAllocations = (): void => {
     if (disposed) return;
     const regime =
@@ -473,6 +482,7 @@ export const createStreamedSceneCoordinator = (
         };
       }
       members.add(state);
+      if (state.active) invalidateCapacity();
       if (state.active) {
         state.memoryMember = memory.register(refresh);
       }
@@ -516,6 +526,7 @@ export const createStreamedSceneCoordinator = (
         setActive(active) {
           if (released || disposed || active === state.active) return;
           state.active = active;
+          invalidateCapacity();
           if (active) state.memoryMember = memory.register(refresh);
           else {
             state.memoryMember?.release();
@@ -526,6 +537,7 @@ export const createStreamedSceneCoordinator = (
         },
         setConfig(kindConfig) {
           if (released || disposed) return;
+          if (state.active) invalidateCapacity();
           state.member.setConfig(kindConfig);
           refresh();
         },
@@ -539,6 +551,7 @@ export const createStreamedSceneCoordinator = (
           if (released) return;
           released = true;
           if (members.delete(state)) {
+            if (state.active) invalidateCapacity();
             state.memoryMember?.release();
             state.memoryMember = null;
             state.member.dispose();
