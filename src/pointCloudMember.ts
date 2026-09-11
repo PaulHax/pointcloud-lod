@@ -128,6 +128,9 @@ export const createPointCloudMember = (
     ...(config.onError === undefined ? {} : { onError: config.onError }),
   });
 
+  let cachedWorkRevision = -1;
+  let cachedWorkPending = false;
+
   const fullCeiling = (): number => {
     const memoryCeiling = controller.governorInputs().memoryCeilingPoints;
     return Math.max(
@@ -210,7 +213,10 @@ export const createPointCloudMember = (
 
     governorInputs(): GovernorInputs {
       const narrow = controller.governorInputs();
-      const stats = controller.stats();
+      if (narrow.workRevision !== cachedWorkRevision) {
+        cachedWorkPending = controller.stats().workPending;
+        cachedWorkRevision = narrow.workRevision;
+      }
       const full = fullCeiling();
       return {
         // The controller reports root SSE in CSS pixels; the governor compares
@@ -226,18 +232,18 @@ export const createPointCloudMember = (
         work: {
           // Backoff remains one logical obligation even when physical counts
           // are temporarily zero.
-          operations: stats.workPending
+          operations: cachedWorkPending
             ? Math.max(
                 1,
                 narrow.physicalTileOperations +
                   narrow.physicalHierarchyOperations,
               )
             : 0,
-          progressSerial: stats.workRevision,
+          progressSerial: narrow.workRevision,
         },
         physicalTileOperations: narrow.physicalTileOperations,
         physicalHierarchyOperations: narrow.physicalHierarchyOperations,
-        residentBytes: adapter.stats().gpuResidentBytes,
+        residentBytes: adapter.workState().gpuResidentBytes,
       };
     },
 

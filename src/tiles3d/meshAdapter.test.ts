@@ -67,6 +67,51 @@ const alphaContent = (
 describe("vtk mesh adapter", () => {
   beforeEach(resetStubs);
 
+  it("reports admission and pooled memory without detailed diagnostics", () => {
+    const scheduler = createSubmissionScheduler({
+      scheduleRender: vi.fn(),
+      maxBytesPerFrame: 128,
+      now: () => 0,
+    });
+    const adapter = createMeshAdapter({
+      renderer: { addActor: vi.fn(), removeActor: vi.fn() },
+      submissions: scheduler,
+      scheduleRender: vi.fn(),
+    });
+    expect(adapter.workState()).toMatchObject({
+      pendingJobs: 0,
+      residentBytes: 0,
+    });
+    adapter.submitTile("tile", content());
+    expect(adapter.workState()).toMatchObject({
+      pendingJobs: 3,
+      residentBytes: 0,
+    });
+    const revision = adapter.workState().workRevision;
+    scheduler.prepareFrame();
+    expect(adapter.workState()).toMatchObject({
+      pendingJobs: 1,
+      residentBytes: 0,
+    });
+    scheduler.prepareFrame();
+    expect(adapter.workState()).toMatchObject({
+      pendingJobs: 0,
+      residentBytes: 240,
+    });
+    expect(adapter.workState().workRevision).toBeGreaterThan(revision);
+    adapter.retireTile("tile");
+    expect(adapter.workState()).toMatchObject({
+      pendingJobs: 0,
+      residentBytes: 240,
+    });
+    adapter.setResourceCeilingBytes(0);
+    expect(adapter.workState()).toMatchObject({
+      pendingJobs: 0,
+      residentBytes: 0,
+    });
+    adapter.dispose();
+  });
+
   it("admits a large texture alone while retaining the tile memory ceiling", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
     const scheduler = createSubmissionScheduler({

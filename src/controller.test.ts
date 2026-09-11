@@ -1996,6 +1996,7 @@ describe("createLodController — selection stats", () => {
     const agrees = () => {
       const stats = controller.stats();
       expect(controller.governorInputs()).toEqual({
+        workRevision: stats.workRevision,
         memoryBudgetBytes: stats.memoryBudgetBytes,
         memoryCeilingPoints: stats.memoryCeilingPoints,
         projectedImportance: stats.selection.projectedImportance,
