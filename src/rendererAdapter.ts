@@ -77,6 +77,8 @@ export type RendererAdapter = {
   setResourceCeilingBytes(bytes: number): void;
   /** Renderer-owned resource and draw accounting. */
   stats(): RendererAdapterStats;
+  /** Held counters for coordinator refreshes, without scanning the drawn set. */
+  workState(): Pick<RendererAdapterStats, "workRevision" | "gpuResidentBytes">;
   /**
    * Diagnostics: the keys this adapter holds actors for, and the keys whose
    * actors are pooled awaiting reuse or release. `submitted` must match the
@@ -483,6 +485,10 @@ export const createRendererAdapter = (
       if (disposed || !finiteNonNegative(bytes)) return;
       resourceCeilingBytes = bytes;
       trimPool();
+    },
+
+    workState() {
+      return { workRevision, gpuResidentBytes: submittedBytes + pooledBytes };
     },
 
     stats() {

@@ -275,10 +275,11 @@ export type LodControllerStats = {
  * A governor member also takes `workPending`, which is deliberately not here:
  * answering it needs the walk of the selected set. It is also the one input
  * that cannot change without the controller reporting a work change, so it
- * belongs on the `onWorkChange` path — read `stats().workPending` there — and
- * not on the frame.
+ * should be recomputed only when `workRevision` changes, not on every frame.
  */
 export type LodGovernorInputs = {
+  /** Invalidates cached logical work state without constructing diagnostics. */
+  readonly workRevision: number;
   readonly memoryBudgetBytes: number;
   readonly memoryCeilingPoints: number;
   /** The selection's root screen-space error; `selection.projectedImportance`. */
@@ -1824,6 +1825,7 @@ export const createLodController = (
 
     governorInputs() {
       return {
+        workRevision,
         memoryBudgetBytes: memoryBudgetBytes(),
         memoryCeilingPoints: memoryCeilingPoints(),
         projectedImportance: selectionStats.projectedImportance,

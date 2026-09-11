@@ -1008,7 +1008,7 @@ export const createTiles3dMember = (
     },
 
     governorInputs(): GovernorInputs {
-      const renderer = adapter.stats();
+      const renderer = adapter.workState();
       const hasContent = !!traversal && traversal.requestedTileIds.length > 0;
       return {
         projectedImportance:
@@ -1062,7 +1062,9 @@ export const createTiles3dMember = (
       };
       if (allocation.memoryBudgetBytes > previousMemoryBudgetBytes) {
         clearBudgetConstraint();
-      } else if (adapter.stats().residentBytes > allocation.memoryBudgetBytes) {
+      } else if (
+        adapter.workState().residentBytes > allocation.memoryBudgetBytes
+      ) {
         memoryConstrained = true;
         irreducibleBudget = false;
         constrainedDesiredSignature = unconstrainedDesiredSignature();

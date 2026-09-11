@@ -121,6 +121,11 @@ export type MeshAdapter = {
   submissionRevision(): number;
   /** Drawn geometry used for picking; excludes hidden admitted resources. */
   submittedTiles(): readonly SubmittedMeshTile[];
+  /** Admission and memory counters without constructing detailed tile diagnostics. */
+  workState(): Pick<
+    MeshAdapterStats,
+    "workRevision" | "pendingJobs" | "residentBytes"
+  >;
   stats(): MeshAdapterStats;
   dispose(): void;
 };
@@ -1184,6 +1189,16 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
           primitives: tile.primitives.map((entry) => entry.primitive),
           ...(tile.bounds ? { bounds: tile.bounds } : {}),
         }));
+    },
+
+    workState() {
+      let pendingJobs = 0;
+      for (const tile of pending.values()) pendingJobs += tile.remainingJobs;
+      return {
+        workRevision,
+        pendingJobs,
+        residentBytes: sumOf(submittedBytes) + sumOf(pooledBytes),
+      };
     },
 
     stats() {
