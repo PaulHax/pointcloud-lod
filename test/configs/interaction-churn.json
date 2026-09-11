@@ -1,0 +1,21 @@
+{
+  "note": "Compare adaptive quality with a fixed 4M-point budget to isolate governor-driven density changes. The 33 ms interaction target admits two refresh intervals on a 60 Hz display. These are diagnostic configurations, not recommended defaults.",
+  "configs": [
+    {
+      "name": "baseline"
+    },
+    {
+      "name": "pinned-4m",
+      "points": {
+        "budgetMode": "fixed",
+        "fixedPointBudget": 4000000
+      }
+    },
+    {
+      "name": "interaction-33",
+      "quality": {
+        "interactionTargetMs": 33
+      }
+    }
+  ]
+}

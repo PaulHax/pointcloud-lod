@@ -1,17 +1,20 @@
 {
-  "note": [
-    "The interaction track's increase threshold is its target times one minus",
-    "the hysteresis band, so at the default 16 ms target an increase needs an",
-    "estimate below 12.8 ms. The estimate is driven by the displayed frame",
-    "interval, which vsync quantises to a 16.6 ms floor on a 60 Hz display, so",
-    "the increase branch cannot be reached while a hand is moving and quality",
-    "only ever ratchets down. These raise the target past that floor: 24 ms",
-    "puts the threshold at 19.2 ms, one quantum of headroom, and 33 ms puts it",
-    "at 26.4 ms, where only a genuinely late frame prevents a climb."
-  ],
+  "note": "Interaction-target sweep. The display-quantum correction can raise the effective target above the configured value. On a 60 Hz display, the default and 24 ms targets have a hysteresis band between one and two refresh intervals; 33 ms admits two refresh intervals. Compare responsiveness and detail together.",
   "configs": [
-    { "name": "baseline" },
-    { "name": "interaction-24", "quality": { "interactionTargetMs": 24 } },
-    { "name": "interaction-33", "quality": { "interactionTargetMs": 33 } }
+    {
+      "name": "baseline"
+    },
+    {
+      "name": "interaction-24",
+      "quality": {
+        "interactionTargetMs": 24
+      }
+    },
+    {
+      "name": "interaction-33",
+      "quality": {
+        "interactionTargetMs": 33
+      }
+    }
   ]
 }

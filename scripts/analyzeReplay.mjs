@@ -20,7 +20,9 @@ import { readdir, readFile, writeFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 
 import {
-  detailOf,
+  churnMetrics,
+  machineLoadOf,
+  settledDetailOf,
   framesOf,
   integer,
   isMoving,
@@ -77,13 +79,7 @@ const analyzeArtifact = (artifact) => {
   const settledFrames = frames.filter(
     (frame) => settledAfter !== null && frame.atMs >= settledAfter,
   );
-  // The last frame of the run describes the converged view even when no frame
-  // was recorded after the settle marker, which happens on a view that had
-  // nothing left to draw.
-  const settledDetail = detailOf(
-    settledFrames[settledFrames.length - 1] ??
-      frames[frames.length - 1] ?? { state: {} },
-  );
+  const settledDetail = settledDetailOf(trace);
 
   const longTasks = trace.events.filter((event) => event.type === "long-task");
   const longTaskMs = longTasks.reduce(
@@ -114,22 +110,27 @@ const analyzeArtifact = (artifact) => {
       pathDrift: artifact.fidelity.drift?.meanRelativePathError ?? null,
       maxPathDrift: artifact.fidelity.drift?.maxRelativePathError ?? null,
     },
+    machine: machineLoadOf(artifact),
     gesture: phaseMetrics(duringReplay),
     motion: phaseMetrics(moving),
+    // Churn is reported per regime and never as one number over the run.
+    // Refinement after a settle is wanted change; counting it against a
+    // configuration would reward one that simply refuses to refine.
+    movingChurn: churnMetrics(moving),
+    settledChurn: churnMetrics(settledFrames),
     convergence: {
       // How long the view took to finish what the gesture asked of it. The
       // number a user experiences as "it catches up quickly".
       msAfterGesture:
-        settledAfter === null || replayEnd === Number.POSITIVE_INFINITY
+        !settledDetail.confirmed ||
+        settledAfter === null ||
+        replayEnd === Number.POSITIVE_INFINITY
           ? null
           : settledAfter - replayEnd,
       framesAfterGesture: afterReplay.length,
     },
     settled: {
-      // The phase means describe whatever frames landed after the settle
-      // marker, which on a converged view is often none. The detail of the
-      // last frame drawn is what the view actually ended up showing, so it
-      // wins over an average of nothing.
+      // The marker carries a snapshot even when convergence stops rendering.
       ...phaseMetrics(settledFrames),
       ...settledDetail,
     },
@@ -140,6 +141,10 @@ const analyzeArtifact = (artifact) => {
 const COLUMNS = [
   { title: "config", value: (row) => row.config },
   { title: "run", value: (row) => String(row.repeat) },
+  {
+    title: "settle verified",
+    value: (row) => (row.settled.confirmed ? "yes" : "no"),
+  },
   { title: "moving fps", value: (row) => number(row.motion.fps) },
   { title: "moving p50 ms", value: (row) => number(row.motion.intervalMs.p50) },
   { title: "moving p95 ms", value: (row) => number(row.motion.intervalMs.p95) },
@@ -166,6 +171,79 @@ const COLUMNS = [
     value: (row) => integer(row.network.fetched),
   },
   { title: "path drift", value: (row) => percent(row.fidelity.pathDrift) },
+  {
+    // Peak load per core either side of the run. A benchmark is meant to have
+    // the machine to itself, and a run that shared it is not comparable with
+    // one that did not, however good its other numbers look.
+    title: "load/core",
+    value: (row) => (row.machine.known ? number(row.machine.perCore, 2) : "—"),
+  },
+  {
+    // Includes this benchmark and idle browsers; not a GPU utilization reading.
+    title: "browsers",
+    value: (row) => integer(row.machine.browserProcesses),
+  },
+];
+
+const observed = (movement, field) =>
+  movement.read > 0 ? movement[field] : null;
+
+/** Changes and direction reversals distinguish refinement from oscillation. */
+const CHURN_COLUMNS = [
+  { title: "config", value: (row) => row.config },
+  { title: "run", value: (row) => String(row.repeat) },
+  {
+    // Summed over every member, so a scene whose mesh holds still while its
+    // point cloud thrashes does not report as calm.
+    title: "moving detail chg",
+    value: (row) => integer(observed(row.movingChurn.detail, "changes")),
+  },
+  {
+    title: "moving detail rev",
+    value: (row) => integer(observed(row.movingChurn.detail, "reversals")),
+  },
+  {
+    title: "moving turnover",
+    value: (row) => number(observed(row.movingChurn.detail, "turnover")),
+  },
+  {
+    // Controller decisions, read alongside visible detail changes.
+    title: "gov moves",
+    value: (row) => integer(row.movingChurn.governorMoves.count),
+  },
+  {
+    title: "gov rev",
+    value: (row) => integer(row.movingChurn.governorMoves.reversals),
+  },
+  {
+    title: "cuts",
+    value: (row) => integer(row.movingChurn.governorMoves.emergencyCuts),
+  },
+  {
+    title: "restores",
+    value: (row) => integer(row.movingChurn.governorMoves.emergencyRestores),
+  },
+  {
+    // Evaluations where the loop judged the view good enough, against those
+    // where it wanted to move and could not because the fraction had bottomed
+    // out. A run held at the floor is not a converged run, and one number for
+    // both would say it was.
+    title: "held ok/floor",
+    value: (row) =>
+      `${integer(row.movingChurn.held.withinHysteresis)}/${integer(row.movingChurn.held.clampedAtFloor)}`,
+  },
+  {
+    title: "net tile +/-",
+    value: (row) =>
+      `${integer(row.movingChurn.tiles.adds)}/${integer(row.movingChurn.tiles.removes)}`,
+  },
+  {
+    // Blank rather than zero when the settle marker left no frames behind: a
+    // phase that was never sampled has no churn to report, and printing 0
+    // reads as proof of calm.
+    title: "settled chg",
+    value: (row) => integer(observed(row.settledChurn.detail, "changes")),
+  },
 ];
 
 const main = async () => {
@@ -218,6 +296,10 @@ const main = async () => {
     lines.push("");
     lines.push(table(group, COLUMNS));
     lines.push("");
+    lines.push("Visual churn — how much the view changed, split by regime:");
+    lines.push("");
+    lines.push(table(group, CHURN_COLUMNS));
+    lines.push("");
 
     const configs = [...new Set(group.map((row) => row.config))];
     if (group.length > configs.length) {
@@ -233,6 +315,13 @@ const main = async () => {
           points: across(rows, (row) => row.motion.drawnPoints),
           triangles: across(rows, (row) => row.motion.drawnTriangles),
           settle: across(rows, (row) => row.convergence.msAfterGesture),
+          turnover: across(rows, (row) =>
+            observed(row.movingChurn.detail, "turnover"),
+          ),
+          reversals: across(rows, (row) =>
+            observed(row.movingChurn.detail, "reversals"),
+          ),
+          govMoves: across(rows, (row) => row.movingChurn.governorMoves.count),
         };
       });
       lines.push(
@@ -268,7 +357,35 @@ const main = async () => {
             title: "settle ms",
             value: (row) => withSpread(row.settle, integer),
           },
+          {
+            title: "gov moves",
+            value: (row) => withSpread(row.govMoves, integer),
+          },
+          {
+            title: "detail rev",
+            value: (row) => withSpread(row.reversals, integer),
+          },
+          {
+            title: "turnover",
+            value: (row) => withSpread(row.turnover, number),
+          },
         ]),
+      );
+      lines.push("");
+    }
+    const busy = group.filter((row) => row.machine.busy);
+    if (busy.length > 0) {
+      lines.push(
+        "> Measured on a busy machine: " +
+          busy
+            .map(
+              (row) =>
+                `${row.config}#${row.repeat} (${number(row.machine.perCore, 2)}/core)`,
+            )
+            .join(", ") +
+          ". A benchmark is meant to have the machine to itself, so these" +
+          " frame times include whatever else was competing for it and are" +
+          " not comparable with runs that had it alone.",
       );
       lines.push("");
     }
