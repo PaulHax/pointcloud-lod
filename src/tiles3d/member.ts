@@ -381,6 +381,9 @@ export const createTiles3dMember = (
       desiredDescendants(ancestor).some((candidate) => {
         if (candidate === id) return false;
         const state = adapter.tileState(candidate);
+        // A submitted sibling cannot free any more space by arriving later.
+        // Counting it as outstanding strands the last unaffordable child.
+        if (state === "submitted") return false;
         return (
           state === "queued" ||
           decoded.has(candidate) ||
@@ -451,11 +454,13 @@ export const createTiles3dMember = (
         materializedTileById.get(candidate)?.contentUrl !== undefined,
     );
     if (ancestor === undefined || ancestor === source?.root.id) {
+      if (memoryConstrained) return;
       // No smaller content region can cover this request: the member as a
       // whole must fall back to its root.
       memoryConstrained = true;
       irreducibleBudget = false;
     } else {
+      if (blockedGroupAncestors.has(ancestor)) return;
       blockedGroupAncestors.add(ancestor);
       for (const candidate of desiredDescendants(ancestor)) {
         admissionBlocked.add(candidate);
@@ -665,6 +670,14 @@ export const createTiles3dMember = (
           } else if (id === source.root.id && memoryConstrained) {
             latchIrreducibleBudget();
             refreshAgain = true;
+          } else if (
+            !coveredSoonByDesiredDescendants(id) &&
+            !waitingForSiblingBeforeReplacement(id)
+          ) {
+            // Siblings may have finished since this payload was refused.
+            // Reevaluate waiting here as well as in the decode callback.
+            blockGroupUnder(id);
+            break;
           }
         }
       }

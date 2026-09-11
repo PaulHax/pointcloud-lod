@@ -1487,6 +1487,75 @@ describe("createTiles3dMember", () => {
     },
   );
 
+  it.each([true, false])(
+    "finishes an unaffordable last child with sibling already submitted: %s",
+    async (submittedFirst) => {
+      const h = harness();
+      let releaseChildren!: () => void;
+      const childrenReady = new Promise<void>((resolve) => {
+        releaseChildren = resolve;
+      });
+      let releaseLarge!: () => void;
+      const largeReady = new Promise<void>((resolve) => {
+        releaseLarge = resolve;
+      });
+      const fetchContent = h.config.fetchContent!;
+      h.context.workers.decode = (request) => {
+        const value = decoded();
+        if (request.contentUrl.endsWith("/large.glb")) {
+          for (let i = 1; i < 4; i++)
+            value.primitives.push(structuredClone(value.primitives[0]!));
+          value.byteEstimate = { geometry: 168, textures: 0 };
+        }
+        return { promise: Promise.resolve(value), cancel: vi.fn() };
+      };
+      const member = createTiles3dMember(h.context, {
+        ...h.config,
+        concurrency: 3,
+        fetchTileset: async () => ({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: async () => ({
+            ...document(),
+            root: tile("root.glb", 8, [
+              tile("small.glb", 0),
+              tile("large.glb", 0),
+            ]),
+          }),
+        }),
+        fetchContent: async (...args) => {
+          if (!args[0].endsWith("/root.glb")) await childrenReady;
+          if (args[0].endsWith("/large.glb")) await largeReady;
+          return fetchContent(...args);
+        },
+      });
+      member.applyAllocation({
+        qualityFraction: 1,
+        memoryBudgetBytes: 180,
+        regime: "stationary",
+      });
+      member.setCamera(view);
+      const drain = async () => {
+        for (let i = 0; i < 8; i++) {
+          await settle();
+          while (h.submissions.hasPending()) h.submissions.prepareFrame();
+        }
+      };
+      await drain();
+      releaseChildren();
+      if (submittedFirst) await drain();
+      else await settle();
+      releaseLarge();
+      await drain();
+      expect(member.governorInputs().work.operations).toBe(0);
+      expect(
+        (member.stats() as Tiles3dMemberStats).renderer.drawnTileIds,
+      ).toEqual(["root"]);
+      member.dispose();
+    },
+  );
+
   it("reconsiders cached replacement groups after regional backoff", async () => {
     const h = harness();
     let releaseBranches!: () => void;
