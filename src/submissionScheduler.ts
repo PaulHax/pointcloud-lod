@@ -10,6 +10,9 @@ export const DEFAULT_SUBMISSION_TIME_MS_PER_FRAME = 4;
 export type SubmissionJob = {
   /** Estimated retained geometry/texture bytes admitted by this job. */
   readonly bytes: number;
+  /** Indivisible resource already checked against its owner's memory budget.
+   * If larger than the byte slice, admit it alone; all other work waits. */
+  readonly atomic?: boolean;
   /** Synchronous VTK construction or GPU-admission work. */
   readonly run: () => void;
   readonly onError?: (error: unknown) => void;
@@ -93,7 +96,7 @@ export const createSubmissionScheduler = (
   return {
     enqueue(job) {
       const bytes = wholeAtLeast("submission bytes", job.bytes, 0);
-      if (bytes > maxBytes) {
+      if (bytes > maxBytes && !job.atomic) {
         throw new Error(
           `submission job is ${bytes} bytes, exceeding the ${maxBytes}-byte per-frame cap; split it into smaller jobs`,
         );
@@ -136,8 +139,8 @@ export const createSubmissionScheduler = (
       discardCancelledHead();
       while (queue.length > 0) {
         const next = queue[0]!;
-        // Enqueue already proved each job fits one byte slice. Every later job
-        // waits for the next frame once either cap has been consumed.
+        // An indivisible resource may consume a whole frame on its own.
+        // Never combine an oversized atomic job with another job.
         if (
           frameJobs > 0 &&
           (frameBytes + next.bytes > maxBytes || now() - started >= maxTimeMs)
