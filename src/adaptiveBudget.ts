@@ -135,7 +135,9 @@ export const ADAPTIVE_QUALITY_DEFAULTS = {
   maxIncreaseStep: 0.25,
   maxDecreaseStep: 0.5,
   cooldownMs: 400,
-  minSamples: 8,
+  // With fewer than ten samples, nearest-rank p90 is the maximum: one
+  // isolated presentation hitch would immediately reduce learned quality.
+  minSamples: 10,
 } as const;
 
 const EMERGENCY_CUT = 0.5;
