@@ -228,6 +228,7 @@ export const createStreamedSceneCoordinator = (
   let lastPreparedFrameSerial = -1;
   let capacityWorkSinceLastReport = false;
   let refreshing = false;
+  let reportedWorkPending = false;
   let refreshPending = false;
   let exhaustedRefreshes = 0;
   let viewQualityFraction = 1;
@@ -380,8 +381,9 @@ export const createStreamedSceneCoordinator = (
         pending = pending || state.inputs.work.operations > 0;
       }
     }
-    capacityWorkSinceLastReport ||=
+    reportedWorkPending =
       pending || tileOperations > 0 || hierarchyOperations > 0;
+    capacityWorkSinceLastReport ||= reportedWorkPending;
     governor.setWorkState({
       physicalTileOperations: tileOperations,
       physicalHierarchyOperations: hierarchyOperations,
@@ -401,6 +403,7 @@ export const createStreamedSceneCoordinator = (
       refreshPending = true;
       return;
     }
+    const wasPending = reportedWorkPending;
     refreshing = true;
     try {
       let pass = 0;
@@ -412,6 +415,16 @@ export const createStreamedSceneCoordinator = (
       if (refreshPending && !disposed) exhaustedRefreshes += 1;
     } finally {
       refreshing = false;
+      // Cancellation and budget backoff can finish without submitting an
+      // actor. Still present a frame so the governor can measure the result.
+      if (
+        !disposed &&
+        wasPending &&
+        !reportedWorkPending &&
+        hasAdaptiveMember()
+      ) {
+        options.scheduleRender();
+      }
     }
   };
 
