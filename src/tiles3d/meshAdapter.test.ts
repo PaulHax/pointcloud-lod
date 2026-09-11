@@ -67,6 +67,45 @@ const alphaContent = (
 describe("vtk mesh adapter", () => {
   beforeEach(resetStubs);
 
+  it("admits a large texture alone while retaining the tile memory ceiling", () => {
+    const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
+    const scheduler = createSubmissionScheduler({
+      scheduleRender: vi.fn(),
+      maxBytesPerFrame: 128,
+      now: () => 0,
+    });
+    const adapter = createMeshAdapter({
+      renderer,
+      submissions: scheduler,
+      scheduleRender: vi.fn(),
+    });
+    const payload = content({
+      ...compressed,
+      width: 16,
+      height: 16,
+      levels: [{ width: 16, height: 16, data: new Uint8Array(256) }],
+    });
+    adapter.setResourceCeilingBytes(479);
+    expect(adapter.submitTile("tile", payload)).toBe("budget-blocked");
+    expect(scheduler.hasPending()).toBe(false);
+    adapter.setResourceCeilingBytes(480);
+    expect(adapter.submitTile("tile", payload)).toBe("queued");
+    scheduler.prepareFrame();
+    expect(scheduler.stats()).toMatchObject({
+      lastFrameAdmittedBytes: 256,
+      lastFrameAdmittedJobs: 1,
+    });
+    expect(textureInstances).toHaveLength(1);
+    expect(renderer.addActor).not.toHaveBeenCalled();
+    while (scheduler.hasPending()) scheduler.prepareFrame();
+    expect(renderer.addActor).toHaveBeenCalledTimes(2);
+    expect(adapter.stats()).toMatchObject({
+      residentBytes: 480,
+      submittedTiles: 1,
+    });
+    adapter.dispose();
+  });
+
   it("admits multi-primitive tiles atomically and binds shared compressed textures once", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
     const scheduleRender = vi.fn();
