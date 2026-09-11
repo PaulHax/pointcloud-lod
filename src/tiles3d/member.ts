@@ -405,7 +405,13 @@ export const createTiles3dMember = (
     if (!traversal || !queue) return null;
     const ancestor = submittedAncestors(id)[0];
     if (!ancestor) return null;
-    const desired = desiredDescendants(ancestor);
+    // Some siblings can fit alongside the ancestor before the rest arrive.
+    // Keep those admitted resources and replace the ancestor with only the
+    // remaining siblings; requiring the entire group to be absent can leave
+    // a partially admitted frontier waiting forever at its memory ceiling.
+    const desired = desiredDescendants(ancestor).filter(
+      (candidate) => adapter.tileState(candidate) !== "submitted",
+    );
     if (
       desired.length < 2 ||
       desired.some(
@@ -573,7 +579,16 @@ export const createTiles3dMember = (
       }
       requested.clear();
       for (const id of nextRequested) requested.add(id);
-      queue.setSelection(nextContentRequests);
+      // Renderer residency outlives the decoded CPU cache. Restore those
+      // immutable resources before asking the content queue to fetch them.
+      for (const id of nextRequested) {
+        if (adapter.restoreTile(id) === "failed") admissionFailed.add(id);
+      }
+      queue.setSelection(
+        nextContentRequests.filter(
+          (request) => adapter.tileState(request.id) !== "submitted",
+        ),
+      );
       for (const id of nextRequested) {
         if (!admissionBlocked.has(id) || adapter.tileState(id) !== "absent")
           continue;

@@ -108,6 +108,8 @@ export type MeshAdapter = {
   /** Retire every queued/submitted tile, including currently hidden fallbacks. */
   clearTiles(): void;
   tileState(id: string): MeshTileState;
+  /** Restore retained resources without fetching or decoding their payload again. */
+  restoreTile(id: string): "restored" | "absent" | "failed";
   /** All admitted resources, including fallbacks not in the drawn frontier. */
   submittedTileIds(): readonly string[];
   /**
@@ -733,31 +735,37 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
   };
 
   const api: MeshAdapter = {
+    restoreTile(id) {
+      if (disposed || failed.has(id)) return "failed";
+      const reusable = pooled.get(id);
+      if (!reusable) return "absent";
+      // Tile ids identify immutable content within this adapter. Source and
+      // decode-configuration changes clear it, while placement is reapplied.
+      try {
+        for (const primitive of reusable.primitives)
+          setActorState(reusable, primitive);
+      } catch (error) {
+        unpool(id, reusable);
+        failed.add(id);
+        release(reusable);
+        safeCall(() => options.onError?.(error));
+        return "failed";
+      }
+      unpool(id, reusable);
+      admit(id, reusable);
+      workRevision += 1;
+      options.scheduleRender();
+      return "restored";
+    },
+
     submitTile(id, content, onSubmitted, replacementIds = []) {
       if (disposed || failed.has(id)) return "failed";
       if (pending.has(id) || submitted.has(id)) return "queued";
       if (typeof id !== "string" || id.length === 0)
         throw new TypeError("mesh tile id must be non-empty");
-      const reusable = pooled.get(id);
-      if (reusable) {
-        // Tile ids are content-currency keys within one adapter. Endpoint,
-        // revision, placement, and capability changes clear the whole adapter, so a
-        // pooled id is reusable even when ContentQueue had to re-decode a new
-        // JS payload object after eviction.
-        try {
-          for (const primitive of reusable.primitives)
-            setActorState(reusable, primitive);
-        } catch (error) {
-          unpool(id, reusable);
-          failed.add(id);
-          release(reusable);
-          safeCall(() => options.onError?.(error));
-          return "failed";
-        }
-        unpool(id, reusable);
-        admit(id, reusable);
-        workRevision += 1;
-        options.scheduleRender();
+      const restored = api.restoreTile(id);
+      if (restored === "failed") return "failed";
+      if (restored === "restored") {
         try {
           onSubmitted?.();
         } catch (error) {
