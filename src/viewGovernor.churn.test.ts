@@ -67,9 +67,14 @@ describe("interaction quality under a quantized display", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it("recovers promptly from sustained two-refresh frames below the emergency threshold", () => {
+  it.each([
+    { minSamples: 8, maxMs: 1100, maxSlowFrames: 32 },
+    // Ten samples make p90 robust to one isolated hitch, at the cost of
+    // additional observations before a sustained-overload adjustment.
+    { minSamples: undefined, maxMs: 1200, maxSlowFrames: 35 },
+  ])("recovers promptly with minimum sample count $minSamples", ({ minSamples, maxMs, maxSlowFrames }) => {
     withGesture(
-      { initialFraction: 0.7 },
+      { initialFraction: 0.7, minSamples },
       (_governor, step) => {
         const start = Date.now();
         let slowFrames = 0;
@@ -77,8 +82,8 @@ describe("interaction quality under a quantized display", () => {
           if (step({ spanMs: 40 }) === VSYNC_MS) break;
           slowFrames += 1;
         }
-        expect(Date.now() - start).toBeLessThanOrEqual(1100);
-        expect(slowFrames).toBeLessThanOrEqual(32);
+        expect(Date.now() - start).toBeLessThanOrEqual(maxMs);
+        expect(slowFrames).toBeLessThanOrEqual(maxSlowFrames);
       },
       true,
     );
