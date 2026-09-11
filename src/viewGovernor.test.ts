@@ -58,6 +58,32 @@ describe("createViewGovernor", () => {
     expect(governor.qualityFraction()).toBeCloseTo(0.4);
   });
 
+  it("remeasures a completed workload without reusing the old capacity window", () => {
+    const governor = createViewGovernor({ minSamples: 2, cooldownMs: 0 });
+    governor.recordHostFrame({ hostFrameMs: 16.7, now: 0 });
+    governor.recordHostFrame({ hostFrameMs: 16.7, now: 1 });
+    expect(governor.needsFrame()).toBe(false);
+    governor.setWorkState({
+      workPending: true,
+      physicalTileOperations: 0,
+      physicalHierarchyOperations: 0,
+    });
+    governor.setWorkState({
+      workPending: false,
+      physicalTileOperations: 0,
+      physicalHierarchyOperations: 0,
+    });
+    expect(governor.stats()).toMatchObject({
+      viewQualityFraction: 1,
+      samples: 0,
+      needsFrame: true,
+    });
+    governor.recordHostFrame({ hostFrameMs: 66, now: 2 });
+    governor.recordHostFrame({ hostFrameMs: 66, now: 3 });
+    expect(governor.qualityFraction()).toBeCloseTo(0.5);
+    governor.dispose();
+  });
+
   it("rejects capacity samples while any work remains", () => {
     const governor = createViewGovernor({ minSamples: 1, cooldownMs: 0 });
     governor.setWorkState({

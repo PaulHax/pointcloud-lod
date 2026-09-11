@@ -512,6 +512,7 @@ export const createViewGovernor = (
 
     setWorkState(next) {
       if (disposed) return;
+      const wasPending = pendingWork();
       work = {
         workPending: !!next.workPending,
         physicalTileOperations: finiteNonNegative(next.physicalTileOperations)
@@ -523,6 +524,9 @@ export const createViewGovernor = (
           ? Math.floor(next.physicalHierarchyOperations)
           : 0,
       };
+      if (wasPending && !pendingWork()) {
+        quality.clearSamples(interacting(), stampNow());
+      }
     },
 
     setOptions(next = {}) {
