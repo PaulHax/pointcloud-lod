@@ -844,47 +844,54 @@ describe("createTiles3dMember", () => {
     member.dispose();
   });
 
-  it("retries ready decoded content when its GPU allocation grows", async () => {
-    const h = harness();
-    const member = createTiles3dMember(h.context, h.config);
-    member.applyAllocation({
-      qualityFraction: 1,
-      memoryBudgetBytes: 1,
-      regime: "stationary",
-    });
-    member.setCamera(view);
-    await settle();
-    expect(h.submissions.stats().queuedJobs).toBe(0);
-    expect((member.stats() as Tiles3dMemberStats).errorCount).toBe(0);
-    expect((member.stats() as Tiles3dMemberStats).lastError).toBeNull();
-    expect(
-      (member.stats() as Tiles3dMemberStats).queue?.decodedBytes,
-    ).toBeGreaterThan(1);
-    // Blocked on a budget increase, not on work: nothing will progress until
-    // something outside the member acts. Claiming pending work here stops the
-    // view governor sampling capacity for every member in the view, so the
-    // whole view's adaptive quality freezes behind one over-budget tileset.
-    expect(member.governorInputs().work.operations).toBe(0);
-    expect(member.stats()).toMatchObject({
-      memoryConstrained: true,
-      irreducibleBudget: true,
-      renderer: { residentBytes: 0 },
-    });
-    member.applyAllocation({
-      qualityFraction: 1,
-      memoryBudgetBytes: 4096,
-      regime: "stationary",
-    });
-    // A bigger allowance clears the latch and the work resumes on its own.
-    expect((member.stats() as Tiles3dMemberStats).irreducibleBudget).toBe(
-      false,
-    );
-    expect(h.submissions.stats().queuedJobs).toBeGreaterThan(0);
-    expect(member.governorInputs().work.operations).toBeGreaterThan(0);
-    h.submissions.prepareFrame();
-    expect(h.renderer.addActor).toHaveBeenCalledOnce();
-    member.dispose();
-  });
+  it.each([1024, 0])(
+    "retries blocked content with cache %s when its GPU allocation grows",
+    async (cacheBytes) => {
+      const h = harness();
+      const member = createTiles3dMember(h.context, {
+        ...h.config,
+        cacheBytes,
+      });
+      member.applyAllocation({
+        qualityFraction: 1,
+        memoryBudgetBytes: 1,
+        regime: "stationary",
+      });
+      member.setCamera(view);
+      await settle();
+      expect(h.submissions.stats().queuedJobs).toBe(0);
+      expect((member.stats() as Tiles3dMemberStats).errorCount).toBe(0);
+      expect((member.stats() as Tiles3dMemberStats).lastError).toBeNull();
+      expect((member.stats() as Tiles3dMemberStats).queue?.decodedBytes).toBe(
+        cacheBytes === 0 ? 0 : 42,
+      );
+      // Blocked on a budget increase, not on work: nothing will progress until
+      // something outside the member acts. Claiming pending work here stops the
+      // view governor sampling capacity for every member in the view, so the
+      // whole view's adaptive quality freezes behind one over-budget tileset.
+      expect(member.governorInputs().work.operations).toBe(0);
+      expect(member.stats()).toMatchObject({
+        memoryConstrained: true,
+        irreducibleBudget: true,
+        renderer: { residentBytes: 0 },
+      });
+      member.applyAllocation({
+        qualityFraction: 1,
+        memoryBudgetBytes: 4096,
+        regime: "stationary",
+      });
+      // A bigger allowance clears the latch and the work resumes on its own.
+      expect((member.stats() as Tiles3dMemberStats).irreducibleBudget).toBe(
+        false,
+      );
+      await settle();
+      expect(h.submissions.stats().queuedJobs).toBeGreaterThan(0);
+      expect(member.governorInputs().work.operations).toBeGreaterThan(0);
+      h.submissions.prepareFrame();
+      expect(h.renderer.addActor).toHaveBeenCalledOnce();
+      member.dispose();
+    },
+  );
 
   it("swaps submitted descendants for a fitting parent before enforcing a smaller byte share", async () => {
     const h = harness(true, 128);
@@ -1335,11 +1342,83 @@ describe("createTiles3dMember", () => {
     member.dispose();
   });
 
-  it.each([208, 180])(
-    "finishes a partially admitted replacement group within %s bytes",
-    async (budget) => {
+  it("keeps affordable detail when an unresident branch must coarsen", async () => {
+    const h = harness();
+    const releases = new Map<string, () => void>();
+    const originalFetch = h.config.fetchContent!;
+    h.context.workers.decode = (request) => {
+      h.decodedRequests.push(request);
+      const content = decoded();
+      if (request.contentUrl.endsWith("/right-fine.glb")) {
+        content.primitives.push(structuredClone(content.primitives[0]!));
+        content.byteEstimate = { geometry: 84, textures: 0 };
+      }
+      return { promise: Promise.resolve(content), cancel: vi.fn() };
+    };
+    const member = createTiles3dMember(h.context, {
+      ...h.config,
+      concurrency: 5,
+      fetchTileset: async () => ({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          ...document(),
+          root: contentlessTile(16, [
+            tile("left.glb", 8, [tile("left-fine.glb", 0)]),
+            tile("right.glb", 8, [tile("right-fine.glb", 0)]),
+          ]),
+        }),
+      }),
+      fetchContent: async (...args) => {
+        if (!args[0].endsWith("/left-fine.glb"))
+          await new Promise<void>((resolve) => releases.set(args[0], resolve));
+        return originalFetch(...args);
+      },
+    });
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 104,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    const drain = async () => {
+      for (let i = 0; i < 8; i++) {
+        await settle();
+        while (h.submissions.hasPending()) h.submissions.prepareFrame();
+      }
+    };
+    await drain();
+    expect(
+      (member.stats() as Tiles3dMemberStats).renderer.drawnTileIds,
+    ).toContain("root/0/0");
+    releases.get("/tiles/right-fine.glb")!();
+    await drain();
+    releases.get("/tiles/left.glb")!();
+    releases.get("/tiles/right.glb")!();
+    await drain();
+    expect(member.governorInputs().work.operations).toBe(0);
+    const stats = member.stats() as Tiles3dMemberStats;
+    expect(stats.renderer.residentBytes).toBeLessThanOrEqual(104);
+    expect([...stats.renderer.drawnTileIds].sort()).toEqual([
+      "root/0/0",
+      "root/1",
+    ]);
+    expect(stats.memoryConstrained).toBe(false);
+    member.dispose();
+  });
+
+  it.each([
+    { budget: 208, cacheBytes: 1024 },
+    { budget: 180, cacheBytes: 1024 },
+    { budget: 208, cacheBytes: 42 },
+    { budget: 208, cacheBytes: 0 },
+  ])(
+    "finishes a partially admitted replacement group within $budget GPU bytes and $cacheBytes cache bytes",
+    async ({ budget, cacheBytes }) => {
       const h = harness();
       const releases = new Map<string, () => void>();
+      const released = new Set<string>();
       const originalFetch = h.config.fetchContent!;
       h.context.workers.decode = (request) => {
         h.decodedRequests.push(request);
@@ -1353,6 +1432,7 @@ describe("createTiles3dMember", () => {
       const member = createTiles3dMember(h.context, {
         ...h.config,
         concurrency: 5,
+        cacheBytes,
         fetchTileset: async () => ({
           ok: true,
           status: 200,
@@ -1367,9 +1447,12 @@ describe("createTiles3dMember", () => {
           }),
         }),
         fetchContent: async (...args) => {
-          if (!args[0].endsWith("/root.glb"))
+          if (!args[0].endsWith("/root.glb") && !released.has(args[0]))
             await new Promise<void>((resolve) =>
-              releases.set(args[0], resolve),
+              releases.set(args[0], () => {
+                released.add(args[0]);
+                resolve();
+              }),
             );
           return originalFetch(...args);
         },
@@ -1403,11 +1486,99 @@ describe("createTiles3dMember", () => {
       const stats = member.stats() as Tiles3dMemberStats;
       expect(stats.renderer.residentBytes).toBeLessThanOrEqual(budget);
       expect([...stats.renderer.drawnTileIds].sort()).toEqual(
-        budget === 208 ? ["root/0", "root/1", "root/2", "root/3"] : ["root"],
+        budget === 208 && cacheBytes >= 84
+          ? ["root/0", "root/1", "root/2", "root/3"]
+          : ["root"],
       );
+      if (budget === 208 && cacheBytes < 84) {
+        member.setConfig({ ...h.config, concurrency: 5, cacheBytes: 1024 });
+        await drain();
+        expect(member.governorInputs().work.operations).toBe(0);
+        expect(
+          [
+            ...(member.stats() as Tiles3dMemberStats).renderer.drawnTileIds,
+          ].sort(),
+        ).toEqual(["root/0", "root/1", "root/2", "root/3"]);
+      }
       member.dispose();
     },
   );
+
+  it("reconsiders cached replacement groups after regional backoff", async () => {
+    const h = harness();
+    let releaseBranches!: () => void;
+    const branchesReady = new Promise<void>((resolve) => {
+      releaseBranches = resolve;
+    });
+    let releaseLeaf!: () => void;
+    const leafReady = new Promise<void>((resolve) => {
+      releaseLeaf = resolve;
+    });
+    const fetchContent = h.config.fetchContent!;
+    h.context.workers.decode = (request) => {
+      const content = decoded();
+      const count = request.contentUrl.endsWith("/root.glb")
+        ? 3
+        : request.contentUrl.endsWith("/expensive.glb")
+          ? 10
+          : 1;
+      for (let i = 1; i < count; i++)
+        content.primitives.push(structuredClone(content.primitives[0]!));
+      content.byteEstimate = { geometry: 42 * count, textures: 0 };
+      return { promise: Promise.resolve(content), cancel: vi.fn() };
+    };
+    const member = createTiles3dMember(h.context, {
+      ...h.config,
+      concurrency: 5,
+      fetchTileset: async () => ({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          ...document(),
+          root: tile("root.glb", 16, [
+            tile("a.glb", 0),
+            tile("b.glb", 0),
+            tile("c.glb", 8, [tile("expensive.glb", 0)]),
+          ]),
+        }),
+      }),
+      fetchContent: async (...args) => {
+        if (!args[0].endsWith("/root.glb")) await branchesReady;
+        if (args[0].endsWith("/expensive.glb")) await leafReady;
+        return fetchContent(...args);
+      },
+    });
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 180,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    const drain = async () => {
+      for (let i = 0; i < 8; i++) {
+        await settle();
+        while (h.submissions.hasPending()) h.submissions.prepareFrame();
+      }
+    };
+    await drain();
+    expect(
+      (member.stats() as Tiles3dMemberStats).renderer.drawnTileIds,
+    ).toEqual(["root"]);
+    releaseBranches();
+    await drain();
+    releaseLeaf();
+    await drain();
+    expect(member.governorInputs().work.operations).toBe(0);
+    const stats = member.stats() as Tiles3dMemberStats;
+    expect([...stats.renderer.drawnTileIds].sort()).toEqual([
+      "root/0",
+      "root/1",
+      "root/2",
+    ]);
+    expect(stats.renderer.residentBytes).toBeLessThanOrEqual(180);
+    member.dispose();
+  });
 
   it("stops refining only the branch whose replacement group cannot fit", async () => {
     const h = harness(true, 4096);

@@ -100,7 +100,10 @@ export type ContentQueueConfiguration = {
 };
 
 export type ContentQueue<T> = {
-  setSelection(requests: readonly TileContentRequest[]): void;
+  setSelection(
+    requests: readonly TileContentRequest[],
+    options?: { readonly requeueUncached?: ReadonlySet<string> },
+  ): void;
   configure(configuration: ContentQueueConfiguration): void;
   /** Look up decoded content and mark it most recently used. */
   get(id: string): T | undefined;
@@ -497,7 +500,7 @@ export const createContentQueue = <T>(
   };
 
   return {
-    setSelection(requests) {
+    setSelection(requests, selectionOptions) {
       if (disposed) throw new Error("content queue is disposed");
       const normalized = new Map<string, TileContentRequest>();
       for (const raw of requests) {
@@ -528,7 +531,17 @@ export const createContentQueue = <T>(
       const nextSelection = new Map<string, SelectedEntry>();
       for (const item of normalized.values()) {
         const retained = selected.get(item.id);
-        if (retained) {
+        // Delivery is distinct from cache residency. A consumer that needs
+        // an evicted payload again can explicitly reopen only that request,
+        // without cancelling unrelated work or retrying cached/active jobs.
+        if (
+          retained &&
+          !(
+            retained.status === "ready" &&
+            !cache.has(item.id) &&
+            selectionOptions?.requeueUncached?.has(item.id)
+          )
+        ) {
           nextSelection.set(item.id, retained);
           continue;
         }

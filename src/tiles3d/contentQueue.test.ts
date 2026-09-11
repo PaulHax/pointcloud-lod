@@ -437,6 +437,35 @@ describe("content queue", () => {
     expect(queue.get("c")?.id).toBe("c");
   });
 
+  it("reopens an evicted delivery without cancelling unrelated work", async () => {
+    const waiting = deferred<ReturnType<typeof ok>>();
+    const fetcher = vi.fn(async (url: string) =>
+      url.endsWith("/c.glb") ? waiting.promise : ok(),
+    );
+    const { queue, decoded } = makeQueue({
+      maxDecodedBytes: 10,
+      fetch: fetcher,
+    });
+    queue.setSelection([request("a")]);
+    await flush();
+    queue.setSelection([request("a"), request("b")]);
+    await flush();
+    expect(queue.get("a")).toBeUndefined();
+    queue.setSelection([request("a"), request("b"), request("c")]);
+    await flush();
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    queue.setSelection([request("a"), request("b"), request("c")], {
+      requeueUncached: new Set(["a", "b", "c"]),
+    });
+    await flush();
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(decoded).toEqual(["a", "b", "a"]);
+    waiting.resolve(ok());
+    await flush();
+    expect(queue.snapshot()).toMatchObject({ active: 0, queued: 0, ready: 3 });
+    queue.dispose();
+  });
+
   it("delivers oversize content without caching or evicting retained entries", async () => {
     const events: string[] = [];
     const { queue } = makeQueue({
