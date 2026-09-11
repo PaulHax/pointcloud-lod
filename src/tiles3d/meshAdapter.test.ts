@@ -381,7 +381,7 @@ describe("vtk mesh adapter", () => {
     adapter.dispose();
   });
 
-  it("retires/removes/deletes exact submitted actors and never renders synchronously", () => {
+  it("hides pooled actors and removes their resources only on eviction", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
     const scheduleRender = vi.fn();
     const scheduler = createSubmissionScheduler({
@@ -398,9 +398,10 @@ describe("vtk mesh adapter", () => {
     adapter.submitTile("tile", content());
     scheduler.prepareFrame();
     adapter.retireTile("tile");
-    expect(renderer.removeActor).toHaveBeenCalledTimes(2);
+    expect(renderer.removeActor).not.toHaveBeenCalled();
     expect(adapter.stats()).toMatchObject({ pooledTiles: 1 });
     adapter.setResourceCeilingBytes(0);
+    expect(renderer.removeActor).toHaveBeenCalledTimes(2);
     expect(actorInstances.every((actor) => actor.deleted)).toBe(true);
     expect(mapperInstances.every((mapper) => mapper.deleted)).toBe(true);
     expect(polyDataInstances.every((polyData) => polyData.deleted)).toBe(true);
@@ -445,11 +446,19 @@ describe("vtk mesh adapter", () => {
       pooledTiles: 1,
       residentBytes: 240,
     });
+    expect(createdActors.every((actor) => !actor.visibility)).toBe(true);
+    expect(adapter.submittedTiles()).toEqual([]);
+    adapter.setVisible(false);
+    adapter.setVisible(true);
+    expect(createdActors.every((actor) => !actor.visibility)).toBe(true);
     const redecoded = content();
     adapter.submitTile("tile", redecoded);
     expect(actorInstances).toEqual(createdActors);
+    expect(renderer.addActor).toHaveBeenCalledTimes(2);
+    expect(renderer.removeActor).not.toHaveBeenCalled();
     adapter.setDrawnTiles(["tile"]);
     expect(adapter.submittedTiles()[0]?.primitives[0]?.positions[0]).toBe(0);
+    expect(createdActors.every((actor) => actor.visibility)).toBe(true);
     expect(adapter.stats()).toMatchObject({
       submittedTiles: 1,
       pooledTiles: 0,
@@ -720,7 +729,7 @@ describe("vtk mesh adapter", () => {
     adapter.dispose();
   });
 
-  it("rolls back and releases an exact pooled reuse when reattachment throws", () => {
+  it("releases an exact pooled reuse when restoring actor state throws", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
     const onError = vi.fn();
     const scheduler = createSubmissionScheduler({
@@ -739,13 +748,16 @@ describe("vtk mesh adapter", () => {
     adapter.submitTile("reuse", decoded);
     scheduler.prepareFrame();
     adapter.retireTile("reuse");
-    renderer.addActor.mockImplementationOnce(() => {
-      throw new Error("injected pooled attachment failure");
-    });
+    const actor = actorInstances[0]!;
+    const setUserMatrix = actor.setUserMatrix;
+    actor.setUserMatrix = () => {
+      actor.setUserMatrix = setUserMatrix;
+      throw new Error("injected pooled state failure");
+    };
     expect(adapter.submitTile("reuse", decoded)).toBe("failed");
     expect(onError).toHaveBeenCalledWith(
       expect.objectContaining({
-        message: "injected pooled attachment failure",
+        message: "injected pooled state failure",
       }),
     );
     expect(adapter.stats()).toMatchObject({
