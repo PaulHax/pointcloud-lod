@@ -69,6 +69,10 @@ describe("createStreamedSceneCoordinator", () => {
       frame(66);
       frame(66);
       for (let index = 0; index < 4; index += 1) frame(33);
+      // The old workload cannot sustain the trial above half quality.
+      frame(66);
+      frame(66);
+      for (let index = 0; index < 4; index += 1) frame(33);
       expect(coordinator.stats().viewQualityFraction).toBe(0.5);
       expect(coordinator.needsFrame()).toBe(false);
       scheduleRender.mockClear();
@@ -129,11 +133,32 @@ describe("createStreamedSceneCoordinator", () => {
     coordinator.recordHostFrame({ hostFrameMs: 33, now: 1 });
     scheduleRender.mockClear();
     active.setActive(true);
+    active.setQualityPolicy(true);
     inactive.setConfig({ diameterCssPx: 32 });
     inactive.release();
     expect(coordinator.stats().governor.samples).toBe(2);
     expect(coordinator.needsFrame()).toBe(false);
     expect(scheduleRender).not.toHaveBeenCalled();
+    coordinator.dispose();
+  });
+
+  it("remeasures after an active member changes quality policy", () => {
+    const scheduleRender = vi.fn();
+    const coordinator = createStreamedSceneCoordinator({
+      scheduleRender,
+      memory: createMemoryPool({ totalBytes: 1000 }),
+      governor: { minSamples: 2 },
+    });
+    coordinator.register(makeMember(), { qualityManaged: true });
+    const peer = coordinator.register(makeMember());
+    coordinator.recordHostFrame({ hostFrameMs: 33, now: 0 });
+    coordinator.recordHostFrame({ hostFrameMs: 33, now: 1 });
+    expect(coordinator.needsFrame()).toBe(false);
+    scheduleRender.mockClear();
+    peer.setQualityPolicy(true);
+    expect(coordinator.stats().governor.samples).toBe(0);
+    expect(coordinator.needsFrame()).toBe(true);
+    expect(scheduleRender).toHaveBeenCalledOnce();
     coordinator.dispose();
   });
 

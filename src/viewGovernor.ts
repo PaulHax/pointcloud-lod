@@ -12,6 +12,7 @@ import {
   createAdaptiveQuality,
   type AdaptiveQuality,
   type AdaptiveQualityOptions,
+  type AdaptiveQualityTrackStats,
   type DisplayQuantumSupplier,
   type QualityAdjustment,
   type QualityRegime,
@@ -105,6 +106,9 @@ export type ViewGovernorStats = {
   readonly estimateMs: number | null;
   readonly samples: number;
   readonly lastAdjustment: QualityAdjustment | null;
+  readonly trial: AdaptiveQualityTrackStats["trial"];
+  readonly increaseCeiling: number;
+  readonly trialAttempts: number;
   readonly physicalTileOperations: number;
   readonly physicalHierarchyOperations: number;
   readonly needsFrame: boolean;
@@ -302,6 +306,7 @@ export const createViewGovernor = (
   const enterInteraction = (): void => {
     emergencyStreak = 0;
     reliefStreak = 0;
+    quality.invalidateCapacity(false, stampNow());
     quality.restartAt(
       true,
       Math.max(
@@ -385,7 +390,11 @@ export const createViewGovernor = (
         ? quality.stats().interaction
         : quality.stats().stationary;
     const reason = current.lastAdjustment?.reason;
-    return reason === "within-hysteresis" || reason === "clamped";
+    return (
+      reason === "within-hysteresis" ||
+      reason === "clamped" ||
+      (reason === "trial-accepted" && current.fraction === 1)
+    );
   };
 
   const shouldRender = (): boolean =>
@@ -518,8 +527,8 @@ export const createViewGovernor = (
       const now = stampNow();
       // A different workload invalidates both regimes' measurements, but
       // preserves their quality, cooldowns, and outstanding emergency relief.
-      quality.clearSamples(false, now);
-      quality.clearSamples(true, now);
+      quality.invalidateCapacity(false, now);
+      quality.invalidateCapacity(true, now);
     },
 
     setWorkState(next) {
@@ -645,6 +654,9 @@ export const createViewGovernor = (
         estimateMs: track.estimateMs,
         samples: track.samples,
         lastAdjustment: track.lastAdjustment,
+        trial: track.trial,
+        increaseCeiling: track.increaseCeiling,
+        trialAttempts: track.trialAttempts,
         physicalTileOperations: work.physicalTileOperations,
         physicalHierarchyOperations: work.physicalHierarchyOperations,
         needsFrame: shouldRender(),

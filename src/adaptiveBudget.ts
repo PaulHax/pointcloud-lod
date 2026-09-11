@@ -31,6 +31,11 @@ export type QualityAdjustmentReason =
   | "clamped"
   | "emergency-cut"
   | "emergency-restore"
+  | "trial-warming"
+  | "trial-started"
+  | "trial-sampling"
+  | "trial-accepted"
+  | "trial-rejected"
   | "seeded";
 
 export type QualityAdjustment = {
@@ -70,6 +75,9 @@ export type AdaptiveQualityTrackStats = {
   /** The target actually steered to, once the display quantum is known. */
   readonly effectiveTargetMs: number;
   readonly lastAdjustment: QualityAdjustment | null;
+  readonly trial: QualityTrial | null;
+  readonly increaseCeiling: number;
+  readonly trialAttempts: number;
 };
 
 export type AdaptiveQualityStats = {
@@ -108,6 +116,8 @@ export type AdaptiveQuality = {
   restartAt(interacting: boolean, fraction: number, now: number): number;
   /** Discard costs from an older frontier without changing quality or emergency debt. */
   clearSamples(interacting: boolean, now: number): void;
+  /** A new workload cancels comparison with the old one and permits new trials. */
+  invalidateCapacity(interacting: boolean, now: number): void;
   reduceNow(interacting: boolean, now: number): number;
   /** Gives back one emergency cut, never past what the cut took away. */
   restoreNow(interacting: boolean, now: number): number;
@@ -141,6 +151,13 @@ export const ADAPTIVE_QUALITY_DEFAULTS = {
 } as const;
 
 const EMERGENCY_CUT = 0.5;
+const MAX_STATIONARY_TRIALS = 16;
+
+type QualityTrial = {
+  readonly fromFraction: number;
+  readonly toFraction: number;
+  readonly baselineEstimateMs: number;
+};
 
 /**
  * How far the increase threshold must clear the display quantum.
@@ -170,6 +187,9 @@ type Track = {
    * stand in for the eligible increase that actually measures capacity.
    */
   emergencyCeiling: number | null;
+  trial: QualityTrial | null;
+  increaseCeiling: number;
+  trialAttempts: number;
 };
 
 export const createAdaptiveQuality = (
@@ -245,6 +265,9 @@ export const createAdaptiveQuality = (
     lastAdjust: Number.NEGATIVE_INFINITY,
     lastAdjustment: null,
     emergencyCeiling: null,
+    trial: null,
+    increaseCeiling: MAX_VIEW_QUALITY_FRACTION,
+    trialAttempts: 0,
   });
   const stationary = makeTrack(stationaryTargetMs);
   const interaction = makeTrack(interactionTargetMs);
@@ -286,13 +309,30 @@ export const createAdaptiveQuality = (
       return;
     }
     const estimate = percentile(track.samples, percentileP);
+    const targetMs = effectiveTargetMs(track);
+    const slowLimit = targetMs * (1 + hysteresis);
+    const fastLimit = targetMs * (1 - hysteresis);
+    if (track.trial) {
+      if (estimate > slowLimit) {
+        track.fraction = track.trial.fromFraction;
+        track.increaseCeiling = track.fraction;
+        track.trial = null;
+        track.samples.length = 0;
+        track.lastAdjust = now;
+        record(track, now, "decrease", "trial-rejected", from, estimate);
+      } else if (track.samples.length < windowSize) {
+        record(track, now, "none", "trial-sampling", from, estimate);
+      } else {
+        track.trial = null;
+        track.lastAdjust = now;
+        record(track, now, "none", "trial-accepted", from, estimate);
+      }
+      return;
+    }
     if (now - track.lastAdjust < cooldownMs) {
       record(track, now, "none", "cooldown", from, estimate);
       return;
     }
-    const targetMs = effectiveTargetMs(track);
-    const slowLimit = targetMs * (1 + hysteresis);
-    const fastLimit = targetMs * (1 - hysteresis);
     let factor: number;
     let reason: QualityAdjustmentReason;
     if (estimate > slowLimit) {
@@ -302,10 +342,55 @@ export const createAdaptiveQuality = (
       factor = Math.min(targetMs / estimate, 1 + maxIncreaseStep);
       reason = "below-target";
     } else {
+      // Vsync and discrete frontiers can leave both a coarse and a finer
+      // scene inside the same timing band. Measure a bounded increase instead
+      // of assuming this band proves there is no room for more detail.
+      if (
+        track === stationary &&
+        from < track.increaseCeiling &&
+        maxIncreaseStep > 0 &&
+        maxDecreaseStep > 0 &&
+        track.trialAttempts < MAX_STATIONARY_TRIALS
+      ) {
+        if (track.samples.length < windowSize) {
+          record(track, now, "none", "trial-warming", from, estimate);
+          return;
+        }
+        const next = Math.min(
+          track.increaseCeiling,
+          // Reverting must also respect a caller's decrease-step bound.
+          clamp(
+            from *
+              (1 +
+                Math.min(
+                  maxIncreaseStep,
+                  maxDecreaseStep / (1 - maxDecreaseStep),
+                )),
+          ),
+        );
+        if (next === from) {
+          record(track, now, "none", "clamped", from, estimate);
+          return;
+        }
+        track.trial = {
+          fromFraction: from,
+          toFraction: next,
+          baselineEstimateMs: estimate,
+        };
+        track.trialAttempts += 1;
+        track.fraction = next;
+        track.samples.length = 0;
+        track.lastAdjust = now;
+        record(track, now, "increase", "trial-started", from, estimate);
+        return;
+      }
       record(track, now, "none", "within-hysteresis", from, estimate);
       return;
     }
-    const next = clamp(track.fraction * factor);
+    const next =
+      factor > 1
+        ? Math.min(track.increaseCeiling, clamp(track.fraction * factor))
+        : clamp(track.fraction * factor);
     if (next === from) {
       record(track, now, "none", "clamped", from, estimate);
       return;
@@ -352,6 +437,9 @@ export const createAdaptiveQuality = (
       track.samples.length = 0;
       track.lastAdjust = Number.NEGATIVE_INFINITY;
       track.emergencyCeiling = null;
+      track.trial = null;
+      track.increaseCeiling = MAX_VIEW_QUALITY_FRACTION;
+      track.trialAttempts = 0;
       record(track, now, "none", "seeded", from, null);
       return track.fraction;
     },
@@ -362,8 +450,20 @@ export const createAdaptiveQuality = (
       record(track, now, "none", "insufficient-samples", track.fraction, null);
     },
 
+    invalidateCapacity(interacting, now) {
+      const track = trackFor(interacting);
+      if (track.trial) track.fraction = track.trial.fromFraction;
+      track.trial = null;
+      track.increaseCeiling = MAX_VIEW_QUALITY_FRACTION;
+      track.trialAttempts = 0;
+      track.samples.length = 0;
+      record(track, now, "none", "insufficient-samples", track.fraction, null);
+    },
+
     reduceNow(interacting, now) {
       const track = trackFor(interacting);
+      if (track.trial) track.fraction = track.trial.fromFraction;
+      track.trial = null;
       const from = track.fraction;
       const next = clamp(from * EMERGENCY_CUT);
       if (next !== from) {
@@ -421,6 +521,9 @@ export const createAdaptiveQuality = (
         targetMs: track.targetMs,
         effectiveTargetMs: effectiveTargetMs(track),
         lastAdjustment: track.lastAdjustment,
+        trial: track.trial && { ...track.trial },
+        increaseCeiling: track.increaseCeiling,
+        trialAttempts: track.trialAttempts,
       });
       return {
         minimumFraction: MIN_VIEW_QUALITY_FRACTION,
