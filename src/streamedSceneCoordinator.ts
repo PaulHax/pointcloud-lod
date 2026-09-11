@@ -543,8 +543,14 @@ export const createStreamedSceneCoordinator = (
         },
         setQualityPolicy(managed, targets) {
           if (released || disposed) return;
+          if (
+            managed === state.qualityManaged &&
+            sameTargets(state.qualityTargets, targets)
+          )
+            return;
           state.qualityManaged = managed;
           state.qualityTargets = targets;
+          if (state.active) invalidateCapacity();
           refresh();
         },
         release() {

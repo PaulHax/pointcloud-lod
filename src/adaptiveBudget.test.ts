@@ -125,12 +125,12 @@ describe("createAdaptiveQuality", () => {
     expect(quality.restoreNow(true, 2)).toBe(1);
   });
 
-  it("records convergence inside hysteresis without changing quality", () => {
+  it("collects a full baseline before probing inside hysteresis", () => {
     const quality = createAdaptiveQuality(options);
     frames(quality, 32, false);
     expect(quality.fraction(false)).toBe(0.8);
     expect(quality.stats().stationary.lastAdjustment?.reason).toBe(
-      "within-hysteresis",
+      "trial-warming",
     );
   });
 

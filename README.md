@@ -618,9 +618,22 @@ and allocates its fraction across every format member in the view.
 Two regimes, two targets. A moving camera is being steered, so it gets the
 tighter **16 ms** target and trades drawn points for responsiveness; a settled
 camera is being read, so it gets the looser **33 ms** target and spends the
-extra frame time on detail. With the default 20% hysteresis the no-change bands
+extra frame time on detail. With the default 20% hysteresis the ordinary adjustment bands
 are 12.8-19.2 ms while moving and 26.4-39.6 ms while settled. Both tracks start
 at quality **1** and never drop below **0.05**.
+
+At rest, an on-target estimate below full quality does not prove that finer
+detail would miss the target. After a complete sample window the governor
+tries up to 25% more quality, accepts it only after another complete window
+meets the existing slow threshold, and reverts if the minimum sample window
+already exceeds that threshold. A rejected increase stays blocked until a
+camera or workload change invalidates the comparison. Each stationary episode
+permits at most 16 such trials. Pending streaming work withholds capacity
+samples, and memory limits still apply. Diagnostics expose the active `trial`,
+`trialAttempts`, and `increaseCeiling`; `needsFrame()` remains true while a
+trial needs measurements. These trials seek higher quality that meets the
+target; they do not establish whether reductions help when every tested level
+misses it.
 
 A target below what the display can present is raised to one it can. Frames
 are measured between presentations, so no sample falls below the refresh
