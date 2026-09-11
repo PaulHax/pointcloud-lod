@@ -1,8 +1,6 @@
 import { integerAtLeast } from "../numeric";
 import {
   DEFAULT_MAXIMUM_SCREEN_SPACE_ERROR_PX,
-  DEFAULT_INTERACTION_RETENTION_MAX_TRIANGLES,
-  DEFAULT_INTERACTION_RETENTION_MAX_ACTORS,
   DEFAULT_TILES3D_CACHE_BYTES,
   DEFAULT_TILES3D_CONCURRENCY,
   DEFAULT_VERTICAL_EXAGGERATION,
@@ -100,18 +98,6 @@ export const validateTiles3dMemberConfig = (
   }
   return {
     ...config,
-    interactionRetentionMaxTriangles: integerAtLeast(
-      "interactionRetentionMaxTriangles",
-      config.interactionRetentionMaxTriangles ??
-        DEFAULT_INTERACTION_RETENTION_MAX_TRIANGLES,
-      0,
-    ),
-    interactionRetentionMaxActors: integerAtLeast(
-      "interactionRetentionMaxActors",
-      config.interactionRetentionMaxActors ??
-        DEFAULT_INTERACTION_RETENTION_MAX_ACTORS,
-      0,
-    ),
     concurrency,
     cacheBytes,
     verticalExaggeration,
