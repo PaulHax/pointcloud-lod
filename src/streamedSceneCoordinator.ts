@@ -226,6 +226,7 @@ export const createStreamedSceneCoordinator = (
   const stallWindowMs = Math.max(1, options.stallWindowMs ?? 4_000);
   let stallTimer: ReturnType<typeof setTimeout> | null = null;
   let lastPreparedFrameSerial = -1;
+  let capacityWorkSinceLastReport = false;
   let refreshing = false;
   let refreshPending = false;
   let exhaustedRefreshes = 0;
@@ -379,6 +380,8 @@ export const createStreamedSceneCoordinator = (
         pending = pending || state.inputs.work.operations > 0;
       }
     }
+    capacityWorkSinceLastReport ||=
+      pending || tileOperations > 0 || hierarchyOperations > 0;
     governor.setWorkState({
       physicalTileOperations: tileOperations,
       physicalHierarchyOperations: hierarchyOperations,
@@ -569,16 +572,27 @@ export const createStreamedSceneCoordinator = (
         if (state.active) state.member.prepareFrame();
       }
       submissions.prepareFrame();
+      capacityWorkSinceLastReport ||=
+        submissions.stats().lastFrameAdmittedJobs > 0;
       refresh();
     },
 
     recordHostFrame(metrics) {
-      if (disposed) return;
+      if (disposed || !finiteNonNegative(metrics?.hostFrameMs)) return;
       refresh();
       // Fixed-only views have no adaptive fraction to train. Fixed members do
       // still contaminate samples whenever at least one adaptive member is
       // present, because their frame cost belongs to that same host frame.
-      if (hasAdaptiveMember()) governor.recordHostFrame(metrics);
+      if (hasAdaptiveMember())
+        governor.recordHostFrame({
+          ...metrics,
+          capacitySampleEligible:
+            (metrics.capacitySampleEligible ?? true) &&
+            !capacityWorkSinceLastReport,
+        });
+      // Work that finished during this presentation still contaminated its
+      // cost. Start the next interval clean before allocation can request work.
+      capacityWorkSinceLastReport = false;
       applyAllocations();
     },
 
