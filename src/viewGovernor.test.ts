@@ -58,6 +58,36 @@ describe("createViewGovernor", () => {
     expect(governor.qualityFraction()).toBeCloseTo(0.4);
   });
 
+  it("keeps full quality when presentation and rendering meet the target", () => {
+    const governor = createViewGovernor();
+    for (let index = 0; index < 12; index += 1) {
+      governor.recordHostFrame({
+        hostFrameMs: 33.4,
+        vtkFrameMs: 30,
+        gpuMs: 20,
+        now: index * 33.4,
+      });
+    }
+    expect(governor.qualityFraction()).toBe(1);
+    expect(governor.stats().estimateMs).toBe(33.4);
+  });
+
+  it.each([
+    { hostFrameMs: 50, vtkFrameMs: 5, gpuMs: 1 },
+    { hostFrameMs: 16.7, vtkFrameMs: 50, gpuMs: 1 },
+    { hostFrameMs: 16.7, vtkFrameMs: 5, gpuMs: 50 },
+  ])("reduces quality for an actual slow measured span: %o", (metrics) => {
+    const governor = createViewGovernor();
+    for (let index = 0; index < 10; index += 1) {
+      governor.recordHostFrame({ ...metrics, now: index * 50 });
+    }
+    expect(governor.qualityFraction()).toBeCloseTo(0.66);
+    expect(governor.stats().lastAdjustment).toMatchObject({
+      reason: "above-target",
+      estimateMs: 50,
+    });
+  });
+
   it("remeasures a completed workload without reusing the old capacity window", () => {
     const governor = createViewGovernor({ minSamples: 2, cooldownMs: 0 });
     governor.recordHostFrame({ hostFrameMs: 16.7, now: 0 });

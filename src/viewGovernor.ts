@@ -64,7 +64,7 @@ export type MotionReference = {
 };
 
 export type ViewGovernorOptions = AdaptiveQualityOptions & {
-  /** Maximum fraction of a host frame assigned to streamed VTK work. */
+  /** Maximum fraction of a host frame assigned to streamed VTK work. Default 1. */
   readonly vtkFrameFraction?: number;
   /** Delay before returning a changed camera to stationary quality. */
   readonly interactionSettleMs?: number;
@@ -172,7 +172,9 @@ const DISPLAY_QUANTUM_WINDOW = 240;
 const INTERACTION_SEED_OF_STATIONARY = 0.25;
 
 const GOVERNOR_DEFAULTS = {
-  vtkFrameFraction: 0.7,
+  // The measured presentation already includes the host's other work.
+  // Callers can still request a smaller share as an explicit sub-budget.
+  vtkFrameFraction: 1,
   interactionSettleMs: 250,
   motionDebounceMs: 250,
 } as const;
