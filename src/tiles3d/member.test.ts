@@ -579,6 +579,7 @@ describe("createTiles3dMember", () => {
       submittedTiles: 2,
     });
     expect(h.renderer.removeActor).not.toHaveBeenCalled();
+    expect((member.stats() as Tiles3dMemberStats).renderer.pooledTiles).toBe(1);
     member.dispose();
   });
 
@@ -983,7 +984,7 @@ describe("createTiles3dMember", () => {
       revision: "r2",
       tilesetToScene: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 0, 0, 1],
     });
-    expect(h.renderer.removeActor).not.toHaveBeenCalled();
+    expect(h.renderer.removeActor).toHaveBeenCalledOnce();
     expect(member.pick(view, 50, 50)).toEqual({ status: "miss" });
     expect(member.stats()).toMatchObject({
       sourceState: "loading",
@@ -1113,7 +1114,7 @@ describe("createTiles3dMember", () => {
       wasm: { draco: { wrapperUrl: "/draco.js", wasmUrl: "/draco-v2.wasm" } },
     });
 
-    expect(h.renderer.removeActor).not.toHaveBeenCalled();
+    expect(h.renderer.removeActor).toHaveBeenCalledOnce();
     expect(member.stats()).toMatchObject({
       configGeneration: 2,
       sourceState: "loading",
