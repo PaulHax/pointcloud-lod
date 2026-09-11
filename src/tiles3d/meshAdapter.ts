@@ -508,15 +508,6 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
     tile.attached = false;
   };
 
-  const detach = (tile: TileResources): void => {
-    if (!tile.attached) return;
-    for (const entry of tile.primitives) {
-      options.renderer.removeActor(entry.actor);
-      entry.actor.setVisibility(false);
-    }
-    tile.attached = false;
-  };
-
   const createTexture = (decoded: DecodedTexture): any => {
     const texture = vtkTexture.newInstance();
     try {
@@ -754,7 +745,8 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         // pooled id is reusable even when ContentQueue had to re-decode a new
         // JS payload object after eviction.
         try {
-          attach(reusable);
+          for (const primitive of reusable.primitives)
+            setActorState(reusable, primitive);
         } catch (error) {
           unpool(id, reusable);
           failed.add(id);
@@ -1090,7 +1082,10 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
       const tile = withdraw(id);
       if (!tile) return failed.delete(id);
       drawn.delete(id);
-      detach(tile);
+      // Keep invisible actors in the renderer while pooled. Removing them
+      // destroys vtk render nodes and forces GPU uploads on cache reuse.
+      // Pool eviction still releases the actors under the residency ceiling.
+      for (const primitive of tile.primitives) setActorState(tile, primitive);
       pool(id, tile);
       trimPool();
       workRevision += 1;

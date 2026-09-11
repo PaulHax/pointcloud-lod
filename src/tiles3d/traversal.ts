@@ -65,6 +65,9 @@ export type TilesetTraversalOptions = {
    * of being refined past into content that will be requested forever.
    */
   readonly refinable?: (tileId: string) => boolean;
+  /** Retain previously drawn refinement at the configured SSE, within the
+   * caller's small-frontier budget. Does not override memory-blocked groups. */
+  readonly retainRefinement?: (tileId: string) => boolean;
   /** Immutable hierarchy state sampled at the beginning of this pass. */
   readonly subtrees?: SubtreeHierarchyState | null;
 };
@@ -553,7 +556,10 @@ const traverseHierarchy = (
           bounds,
           options.camera,
           errorScale,
-        ) > effective &&
+        ) >
+          (options.retainRefinement?.(tile.id)
+            ? options.maximumScreenSpaceErrorPx
+            : effective) &&
           (options.refinable?.(tile.id) ?? true)));
     const childResults = refine
       ? tile.children.map((child) => visit(child, accumulated))

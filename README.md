@@ -398,6 +398,20 @@ The mesh member deliberately accepts a narrow, typed 3D Tiles 1.1 profile:
   `KHR_materials_unlit`, and `KHR_mesh_quantization`. Other required extensions
   fail as `TileUnsupportedExtensionError` with tile URI and decode stage.
 
+During motion, an already drawn mesh frontier of at most 1,024 triangles and
+64 actors retains its refinement when adaptive quality falls. Both
+`interactionRetentionMaxTriangles` and `interactionRetentionMaxActors` can be
+configured on `Tiles3dMemberConfig`; setting either to zero disables retention.
+These are conservative complexity limits, not GPU time guarantees. Larger
+frontiers follow the allocated SSE normally. Retention still obeys the configured
+SSE when zooming out, frustum culling, and memory constraints; it does not pin a
+source to full quality or preload its finest level. Diagnostics report the
+allocated SSE and actual drawn tile IDs separately.
+
+Retired mesh resources stay attached but invisible while pooled, preserving vtk
+render nodes and GPU buffers/textures across reuse. They are excluded from draws
+and picks. Eviction under the residency ceiling removes and deletes them.
+
 Implicit subtrees have a bounded revision-scoped cache independent of decoded
 mesh residency. Unknown visible boundaries request their subtree and hold the
 nearest submitted `REPLACE` ancestor; an unknown subtree is never interpreted
