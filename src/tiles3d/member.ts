@@ -263,11 +263,31 @@ export const createTiles3dMember = (
     qualityFraction: number,
     honourBlockedGroups = true,
   ): TilesetTraversalResult => {
+    const retainedAncestors = new Set<string>();
+    if (
+      !memoryConstrained &&
+      allocation.regime === "moving" &&
+      qualityFraction < 1
+    ) {
+      const drawn = adapter.stats();
+      if (
+        config.interactionRetentionMaxTriangles! > 0 &&
+        config.interactionRetentionMaxActors! > 0 &&
+        drawn.drawnActors > 0 &&
+        drawn.drawnActors <= config.interactionRetentionMaxActors! &&
+        drawn.drawnTriangles <= config.interactionRetentionMaxTriangles!
+      ) {
+        for (const id of drawn.drawnTileIds)
+          for (const ancestor of ancestorIds(id))
+            retainedAncestors.add(ancestor);
+      }
+    }
     const result = traverseTileset({
       root: source!.root,
       camera: camera!,
       maximumScreenSpaceErrorPx,
       qualityFraction,
+      retainRefinement: (id) => retainedAncestors.has(id),
       modelMatrix: traversalModelMatrix(),
       geometricErrorScale: config.geometricErrorScale,
       readiness,

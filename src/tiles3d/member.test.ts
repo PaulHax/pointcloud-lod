@@ -150,6 +150,96 @@ const harness = (withChildren = false, schedulerBytes = 1024) => {
 describe("createTiles3dMember", () => {
   beforeEach(resetStubs);
 
+  it.each([
+    {
+      label: "small resident frontier",
+      triangles: 1024,
+      actors: 64,
+      budget: 4096,
+      retained: true,
+    },
+    {
+      label: "triangle limit",
+      triangles: 1,
+      actors: 64,
+      budget: 4096,
+      retained: false,
+    },
+    {
+      label: "actor limit",
+      triangles: 1024,
+      actors: 1,
+      budget: 4096,
+      retained: false,
+    },
+    {
+      label: "disabled retention",
+      triangles: 0,
+      actors: 0,
+      budget: 4096,
+      retained: false,
+    },
+    {
+      label: "memory pressure",
+      triangles: 1024,
+      actors: 64,
+      budget: 52,
+      retained: false,
+    },
+  ])(
+    "honours $label during interaction",
+    async ({ triangles, actors, budget, retained }) => {
+      const h = harness(true);
+      const member = createTiles3dMember(h.context, {
+        ...h.config,
+        interactionRetentionMaxTriangles: triangles,
+        interactionRetentionMaxActors: actors,
+      });
+      const drain = async () => {
+        for (let i = 0; i < 15; i++) {
+          await settle();
+          while (h.submissions.hasPending()) h.submissions.prepareFrame();
+          if (member.governorInputs().work.operations === 0) break;
+        }
+      };
+      const camera: CameraView = {
+        ...view,
+        projection: "orthographic",
+        parallelScale: 10,
+      };
+      member.applyAllocation({
+        qualityFraction: 1,
+        memoryBudgetBytes: 4096,
+        regime: "stationary",
+      });
+      member.setCamera(camera);
+      await drain();
+      expect((member.stats() as Tiles3dMemberStats).renderer.drawnTiles).toBe(
+        2,
+      );
+      const requests = h.contentRequests.length;
+      member.applyAllocation({
+        qualityFraction: 0.05,
+        memoryBudgetBytes: budget,
+        regime: "moving",
+      });
+      await drain();
+      expect((member.stats() as Tiles3dMemberStats).renderer.drawnTiles).toBe(
+        retained ? 2 : 1,
+      );
+      if (retained) {
+        expect(h.contentRequests).toHaveLength(requests);
+        // Camera movement still culls, and zooming out still follows nominal SSE.
+        member.setCamera({ ...camera, parallelScale: 1000 });
+        await drain();
+        expect((member.stats() as Tiles3dMemberStats).renderer.drawnTiles).toBe(
+          1,
+        );
+      }
+      member.dispose();
+    },
+  );
+
   it.each([104, 110])(
     "recovers mixed pooled and GPU-evicted children within a %i-byte budget",
     async (budget) => {
@@ -542,7 +632,8 @@ describe("createTiles3dMember", () => {
       drawnTiles: 2,
       submittedTiles: 2,
     });
-    expect(h.renderer.removeActor).toHaveBeenCalledOnce();
+    expect(h.renderer.removeActor).not.toHaveBeenCalled();
+    expect((member.stats() as Tiles3dMemberStats).renderer.pooledTiles).toBe(1);
     member.dispose();
   });
 
