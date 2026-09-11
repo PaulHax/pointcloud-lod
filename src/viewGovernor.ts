@@ -133,6 +133,7 @@ export type ViewGovernor = {
   recordTransientFrame(metrics: TransientFrameMetrics): void;
   recordCapacitySample(metrics: CapacitySampleMetrics): void;
   recordHostFrame(metrics: HostFrameMetrics): void;
+  invalidateCapacity(): void;
   needsFrame(): boolean;
   stats(): ViewGovernorStats;
   dispose(): void;
@@ -511,6 +512,15 @@ export const createViewGovernor = (
 
   return {
     qualityFraction: () => quality.fraction(interacting()),
+
+    invalidateCapacity() {
+      if (disposed) return;
+      const now = stampNow();
+      // A different workload invalidates both regimes' measurements, but
+      // preserves their quality, cooldowns, and outstanding emergency relief.
+      quality.clearSamples(false, now);
+      quality.clearSamples(true, now);
+    },
 
     setWorkState(next) {
       if (disposed) return;

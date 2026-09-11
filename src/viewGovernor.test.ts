@@ -215,6 +215,28 @@ describe("createViewGovernor", () => {
     motion.release();
   });
 
+  it("preserves emergency relief across capacity invalidation", () => {
+    const governor = createViewGovernor({ minSamples: 30, cooldownMs: 0 });
+    governor.setWorkState({
+      workPending: true,
+      physicalTileOperations: 1,
+      physicalHierarchyOperations: 0,
+    });
+    const motion = governor.beginMotion("explicit");
+    governor.recordHostFrame({ hostFrameMs: 40, now: 0 });
+    governor.recordHostFrame({ hostFrameMs: 40, now: 1 });
+    expect(governor.qualityFraction()).toBe(0.5);
+    governor.invalidateCapacity();
+    expect(governor.qualityFraction()).toBe(0.5);
+    expect(governor.stats().samples).toBe(0);
+    governor.recordHostFrame({ hostFrameMs: 10, now: 2 });
+    governor.recordHostFrame({ hostFrameMs: 10, now: 3 });
+    expect(governor.qualityFraction()).toBe(1);
+    expect(governor.stats().lastAdjustment?.reason).toBe("emergency-restore");
+    motion.release();
+    governor.dispose();
+  });
+
   it("restores no more quality than the emergency cuts took away", () => {
     const governor = createViewGovernor({
       minSamples: 30,

@@ -52,6 +52,91 @@ const makeMember = (overrides: Partial<GovernorInputs> = {}) => {
 };
 
 describe("createStreamedSceneCoordinator", () => {
+  it.each(["hide", "release"])(
+    "remeasures after an active peer is removed by %s",
+    (action) => {
+      const scheduleRender = vi.fn();
+      const coordinator = createStreamedSceneCoordinator({
+        scheduleRender,
+        memory: createMemoryPool({ totalBytes: 1000 }),
+        governor: { minSamples: 2, windowSize: 4, cooldownMs: 0 },
+      });
+      coordinator.register(makeMember(), { qualityManaged: true });
+      const peer = coordinator.register(makeMember());
+      let now = 0;
+      const frame = (hostFrameMs: number) =>
+        coordinator.recordHostFrame({ hostFrameMs, now: (now += 100) });
+      frame(66);
+      frame(66);
+      for (let index = 0; index < 4; index += 1) frame(33);
+      expect(coordinator.stats().viewQualityFraction).toBe(0.5);
+      expect(coordinator.needsFrame()).toBe(false);
+      scheduleRender.mockClear();
+      if (action === "hide") peer.setActive(false);
+      else peer.release();
+      expect(scheduleRender).toHaveBeenCalledOnce();
+      expect(coordinator.needsFrame()).toBe(true);
+      // The mutation presentation is not a clean capacity sample.
+      frame(200);
+      expect(coordinator.stats().governor.samples).toBe(0);
+      for (let index = 0; index < 12; index += 1) frame(16.7);
+      expect(coordinator.stats().viewQualityFraction).toBe(1);
+      coordinator.dispose();
+    },
+  );
+
+  it.each(["configure", "add"])(
+    "remeasures a more expensive workload after %s without queued work",
+    (action) => {
+      const scheduleRender = vi.fn();
+      const coordinator = createStreamedSceneCoordinator({
+        scheduleRender,
+        memory: createMemoryPool({ totalBytes: 1000 }),
+        governor: { minSamples: 2, windowSize: 4, cooldownMs: 0 },
+      });
+      const member = coordinator.register(makeMember(), {
+        qualityManaged: true,
+      });
+      let now = 0;
+      const frame = (hostFrameMs: number) =>
+        coordinator.recordHostFrame({ hostFrameMs, now: (now += 100) });
+      for (let index = 0; index < 4; index += 1) frame(16.7);
+      expect(coordinator.needsFrame()).toBe(false);
+      scheduleRender.mockClear();
+      if (action === "configure") member.setConfig({ diameterCssPx: 32 });
+      else coordinator.register(makeMember());
+      expect(scheduleRender).toHaveBeenCalledOnce();
+      expect(coordinator.needsFrame()).toBe(true);
+      frame(200);
+      expect(coordinator.stats().governor.samples).toBe(0);
+      frame(66);
+      frame(66);
+      expect(coordinator.stats().viewQualityFraction).toBe(0.5);
+      coordinator.dispose();
+    },
+  );
+
+  it("does not restart learning for inactive changes or unchanged visibility", () => {
+    const scheduleRender = vi.fn();
+    const coordinator = createStreamedSceneCoordinator({
+      scheduleRender,
+      memory: createMemoryPool({ totalBytes: 1000 }),
+      governor: { minSamples: 2 },
+    });
+    const active = coordinator.register(makeMember(), { qualityManaged: true });
+    const inactive = coordinator.register(makeMember(), { active: false });
+    coordinator.recordHostFrame({ hostFrameMs: 33, now: 0 });
+    coordinator.recordHostFrame({ hostFrameMs: 33, now: 1 });
+    scheduleRender.mockClear();
+    active.setActive(true);
+    inactive.setConfig({ diameterCssPx: 32 });
+    inactive.release();
+    expect(coordinator.stats().governor.samples).toBe(2);
+    expect(coordinator.needsFrame()).toBe(false);
+    expect(scheduleRender).not.toHaveBeenCalled();
+    coordinator.dispose();
+  });
+
   it("owns one memory registration per active member and fans out byte shares", () => {
     const memory = createMemoryPool({ totalBytes: 900 });
     const coordinator = createStreamedSceneCoordinator({
