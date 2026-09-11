@@ -29,6 +29,41 @@ const frames = (
 };
 
 describe("createAdaptiveQuality", () => {
+  it("does not turn one isolated presentation hitch into an initial p90 cut", () => {
+    const quality = createAdaptiveQuality();
+    // A warmed-view trace: one hitch among otherwise on-target presentations.
+    const intervals = [
+      33.4, 16.7, 16.7, 16.6, 50.1, 16.6, 16.7, 16.7, 16.7, 16.7,
+    ];
+    intervals.forEach((duration, index) => {
+      quality.recordFrame(duration, { interacting: false, now: index * 33.4 });
+      expect(quality.fraction(false)).toBe(1);
+    });
+    expect(quality.stats().stationary.lastAdjustment).toMatchObject({
+      reason: "within-hysteresis",
+      estimateMs: 33.4,
+    });
+  });
+
+  it.each([2, 10])(
+    "still reduces when %i of ten presentations miss the target",
+    (slowFrames) => {
+      const quality = createAdaptiveQuality();
+      for (let index = 0; index < 10; index += 1) {
+        quality.recordFrame(index < slowFrames ? 50 : 33.3, {
+          interacting: false,
+          now: index * 50,
+        });
+      }
+      expect(quality.fraction(false)).toBeCloseTo(0.66);
+      expect(quality.stats().stationary.lastAdjustment).toMatchObject({
+        direction: "decrease",
+        reason: "above-target",
+        estimateMs: 50,
+      });
+    },
+  );
+
   it("governs normalized fractions and never point counts", () => {
     const quality = createAdaptiveQuality();
     expect(quality.fraction(false)).toBe(1);
