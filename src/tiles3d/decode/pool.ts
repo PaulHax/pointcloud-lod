@@ -10,21 +10,21 @@ import {
   type TileDecodeStage,
 } from "./types";
 
-interface DecodeWorkerRequestMessage {
+type DecodeWorkerRequestMessage = {
   kind: "decode";
   jobId: number;
   generation: number;
   request: DecodeTileRequest;
-}
+};
 
-interface DecodeWorkerCompleteMessage {
+type DecodeWorkerCompleteMessage = {
   kind: "complete";
   jobId: number;
   generation: number;
   result: DecodedTileContent;
-}
+};
 
-interface DecodeWorkerErrorMessage {
+type DecodeWorkerErrorMessage = {
   kind: "error";
   jobId: number;
   generation: number;
@@ -36,13 +36,13 @@ interface DecodeWorkerErrorMessage {
     readonly reason?: string;
     readonly extension?: string;
   };
-}
+};
 
 type DecodeWorkerResponseMessage =
   | DecodeWorkerCompleteMessage
   | DecodeWorkerErrorMessage;
 
-export interface DecodeWorkerLike {
+export type DecodeWorkerLike = {
   onmessage: ((event: MessageEvent<unknown>) => void) | null;
   onerror: ((event: ErrorEvent) => void) | null;
   postMessage(
@@ -50,15 +50,15 @@ export interface DecodeWorkerLike {
     transfer?: Transferable[],
   ): void;
   terminate(): void;
-}
+};
 
-export interface DecodeWorkerPoolOptions {
+export type DecodeWorkerPoolOptions = {
   size?: number;
   workerFactory?: (index: number) => DecodeWorkerLike;
   workerUrl?: string | URL;
-}
+};
 
-interface JobRecord {
+type JobRecord = {
   jobId: number;
   generation: number;
   request: DecodeTileRequest;
@@ -66,12 +66,12 @@ interface JobRecord {
   startedAt: number | null;
   resolve(value: DecodedTileContent): void;
   reject(reason: unknown): void;
-}
+};
 
-interface WorkerSlot {
+type WorkerSlot = {
   worker: DecodeWorkerLike;
   active: JobRecord | null;
-}
+};
 
 const BASIS_TIMING_SAMPLE_LIMIT = 64;
 

@@ -6,10 +6,10 @@ import type {
   DecodeWorkerRequestMessage,
 } from "./pool";
 
-interface ClassicWorkerScope {
+type ClassicWorkerScope = {
   onmessage: ((event: MessageEvent<unknown>) => void) | null;
   postMessage(message: unknown, transfer?: Transferable[]): void;
-}
+};
 
 const errorMessage = (
   message: DecodeWorkerRequestMessage,
