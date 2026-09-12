@@ -18,6 +18,7 @@ import { repairMeshoptFallbackOffsets } from "./meshoptFallback";
 import { collectContentBuffers } from "./transfer";
 import type {
   CompressedTextureFormat,
+  DecodeTextureTarget,
   DecodeTileRequest,
   DecodedMaterial,
   DecodedPrimitive,
@@ -49,7 +50,7 @@ interface DecodeDiagnosticsAccumulator {
   basisTranscodeMs: number;
   basisTranscodeSamplesMs: number[];
   basisTextures: number;
-  basisTarget: import("./types").DecodeTextureTarget | null;
+  basisTarget: DecodeTextureTarget | null;
 }
 
 const monotonicNow = (): number =>
@@ -1209,131 +1210,147 @@ const orientationValue = (value: string | Uint8Array | undefined): string => {
   return orientation;
 };
 
-const decodeTexture = async (
-  textureIndex: number,
-  gltf: ParsedGltf,
-  request: DecodeTileRequest,
-  options: DecodeTileOptions,
-  modules: Record<string, unknown>,
-  diagnostics: DecodeDiagnosticsAccumulator,
-): Promise<TextureResult> => {
-  const texture = requireIndex(gltf.json.textures, textureIndex, "texture");
-  const image = requireIndex(gltf.json.images, texture.source ?? -1, "image");
-  const imageData = await imageBytes(
-    gltf,
-    image,
-    request,
-    options.fetchDependency ?? fetchOkBytes,
-  );
-  const bytes = imageData.bytes;
-  const sampler = samplerFor(gltf.json, texture.sampler);
-  const mimeType = image.mimeType ?? imageData.mediaType;
-  if (mimeType === "image/ktx2") {
-    const ktx = readKtx2(bytes);
-    const descriptor = ktx.dataFormatDescriptor[0];
-    if (!descriptor) throw new Error("KTX2 has no data format descriptor");
-    const metadata: BasisMetadata = {
-      width: ktx.pixelWidth,
-      height: ktx.pixelHeight,
-      levels: ktx.levels.map((level) => ({
-        byteLength: level.levelData.byteLength,
-      })),
-      orientation: orientationValue(ktx.keyValue.KTXorientation),
-      srgb: descriptor.transferFunction === 2,
+/** What every step of one tile's texture and material decode shares. */
+type DecodeContext = {
+  readonly gltf: ParsedGltf;
+  readonly request: DecodeTileRequest;
+  readonly options: DecodeTileOptions;
+  readonly modules: Record<string, unknown>;
+  readonly diagnostics: DecodeDiagnosticsAccumulator;
+  /** One decode per image+sampler pair, shared by every material using it. */
+  readonly textureCache: Map<string, Promise<TextureResult>>;
+};
+
+const basisMetadata = (bytes: Uint8Array): BasisMetadata => {
+  const ktx = readKtx2(bytes);
+  const descriptor = ktx.dataFormatDescriptor[0];
+  if (!descriptor) throw new Error("KTX2 has no data format descriptor");
+  const metadata: BasisMetadata = {
+    width: ktx.pixelWidth,
+    height: ktx.pixelHeight,
+    levels: ktx.levels.map((level) => ({
+      byteLength: level.levelData.byteLength,
+    })),
+    orientation: orientationValue(ktx.keyValue.KTXorientation),
+    srgb: descriptor.transferFunction === 2,
+  };
+  if (
+    !Number.isInteger(metadata.width) ||
+    !Number.isInteger(metadata.height) ||
+    metadata.width <= 0 ||
+    metadata.height <= 0 ||
+    metadata.levels.length === 0
+  ) {
+    throw new Error("KTX2 dimensions or mip chain are invalid");
+  }
+  return metadata;
+};
+
+const transcodeBasisLevels = async (
+  bytes: Uint8Array,
+  metadata: BasisMetadata,
+  target: DecodeTextureTarget,
+  { options, modules, diagnostics }: DecodeContext,
+): Promise<BasisLevel[]> => {
+  const transcode = options.transcodeBasis ?? defaultBasisTranscoder;
+  const now = options.now ?? monotonicNow;
+  const runtimeProvider =
+    options.basisRuntimeProvider ??
+    (options.transcodeBasis ? null : defaultBasisRuntimeProvider);
+  let transcodeModules = modules;
+  if (runtimeProvider) {
+    const runtimeStarted = now();
+    const runtime = await runtimeProvider(modules);
+    const runtimeElapsed = Math.max(0, now() - runtimeStarted);
+    if (runtime.initializedNow) {
+      diagnostics.basisRuntimeInitializationMs += runtimeElapsed;
+    }
+    transcodeModules = {
+      ...modules,
+      basisEncoder: runtime.basisEncoder,
     };
-    if (
-      !Number.isInteger(metadata.width) ||
-      !Number.isInteger(metadata.height) ||
-      metadata.width <= 0 ||
-      metadata.height <= 0 ||
-      metadata.levels.length === 0
-    ) {
-      throw new Error("KTX2 dimensions or mip chain are invalid");
-    }
-    const target = capabilityTarget(request.textureCapabilities);
-    const transcode = options.transcodeBasis ?? defaultBasisTranscoder;
-    const now = options.now ?? monotonicNow;
-    let transcodeModules = modules;
-    const runtimeProvider =
-      options.basisRuntimeProvider ??
-      (options.transcodeBasis ? null : defaultBasisRuntimeProvider);
-    if (runtimeProvider) {
-      const runtimeStarted = now();
-      const runtime = await runtimeProvider(modules);
-      const runtimeElapsed = Math.max(0, now() - runtimeStarted);
-      if (runtime.initializedNow) {
-        diagnostics.basisRuntimeInitializationMs += runtimeElapsed;
-      }
-      transcodeModules = {
-        ...modules,
-        basisEncoder: runtime.basisEncoder,
-      };
-    }
-    const started = now();
-    const levels = await transcode(
-      bytes,
-      loadersBasisFormat(target),
-      metadata,
-      transcodeModules,
+  }
+  const started = now();
+  const levels = await transcode(
+    bytes,
+    loadersBasisFormat(target),
+    metadata,
+    transcodeModules,
+  );
+  const elapsed = Math.max(0, now() - started);
+  diagnostics.basisTranscodeMs += elapsed;
+  diagnostics.basisTranscodeSamplesMs.push(elapsed);
+  diagnostics.basisTextures += 1;
+  diagnostics.basisTarget = target;
+  if (levels.length !== metadata.levels.length) {
+    throw new Error(
+      "Basis transcode did not retain the complete source mip chain",
     );
-    const elapsed = Math.max(0, now() - started);
-    diagnostics.basisTranscodeMs += elapsed;
-    diagnostics.basisTranscodeSamplesMs.push(elapsed);
-    diagnostics.basisTextures += 1;
-    diagnostics.basisTarget = target;
-    if (levels.length !== metadata.levels.length) {
-      throw new Error(
-        "Basis transcode did not retain the complete source mip chain",
-      );
-    }
-    if (target === "rgba") {
-      const base = levels[0]!;
-      if (
-        base.compressed ||
-        base.data.byteLength !== metadata.width * metadata.height * 4
-      ) {
-        throw new Error(
-          "Basis RGBA fallback did not return full RGBA32 pixels",
-        );
-      }
-      return {
-        texture: {
-          kind: "rgba",
-          rgba: base.data.slice(),
-          width: metadata.width,
-          height: metadata.height,
-          colorSpace: "srgb",
-          sampler,
-        },
-        orientation: metadata.orientation,
-        sourceColorSpace: metadata.srgb ? "srgb" : "linear",
-      };
-    }
-    if (levels.some((level) => !level.compressed)) {
-      throw new Error("native Basis target returned an uncompressed mip");
+  }
+  return levels;
+};
+
+const decodeKtx2Texture = async (
+  bytes: Uint8Array,
+  sampler: SerializableSampler,
+  context: DecodeContext,
+): Promise<TextureResult> => {
+  const metadata = basisMetadata(bytes);
+  const target = capabilityTarget(context.request.textureCapabilities);
+  const levels = await transcodeBasisLevels(bytes, metadata, target, context);
+  const sourceColorSpace = metadata.srgb ? "srgb" : "linear";
+  if (target === "rgba") {
+    const base = levels[0]!;
+    if (
+      base.compressed ||
+      base.data.byteLength !== metadata.width * metadata.height * 4
+    ) {
+      throw new Error("Basis RGBA fallback did not return full RGBA32 pixels");
     }
     return {
       texture: {
-        kind: "compressed",
-        format: target as CompressedTextureFormat,
+        kind: "rgba",
+        rgba: base.data.slice(),
         width: metadata.width,
         height: metadata.height,
         colorSpace: "srgb",
-        levels: levels.map((level, index) => ({
-          // loaders.gl clamps dimensions to the compressed block. Preserve
-          // the logical KTX dimensions used by texture upload and sampling.
-          width: Math.max(1, metadata.width >> index),
-          height: Math.max(1, metadata.height >> index),
-          data: level.data.slice(),
-        })),
         sampler,
-        capabilityKey: request.textureCapabilities.capabilityKey,
       },
       orientation: metadata.orientation,
-      sourceColorSpace: metadata.srgb ? "srgb" : "linear",
+      sourceColorSpace,
     };
   }
+  if (levels.some((level) => !level.compressed)) {
+    throw new Error("native Basis target returned an uncompressed mip");
+  }
+  return {
+    texture: {
+      kind: "compressed",
+      format: target as CompressedTextureFormat,
+      width: metadata.width,
+      height: metadata.height,
+      colorSpace: "srgb",
+      levels: levels.map((level, index) => ({
+        // loaders.gl clamps dimensions to the compressed block. Preserve
+        // the logical KTX dimensions used by texture upload and sampling.
+        width: Math.max(1, metadata.width >> index),
+        height: Math.max(1, metadata.height >> index),
+        data: level.data.slice(),
+      })),
+      sampler,
+      capabilityKey: context.request.textureCapabilities.capabilityKey,
+    },
+    orientation: metadata.orientation,
+    sourceColorSpace,
+  };
+};
 
+const decodeRasterTexture = async (
+  bytes: Uint8Array,
+  mimeType: string | undefined,
+  sampler: SerializableSampler,
+  options: DecodeTileOptions,
+): Promise<TextureResult> => {
   const decoded = await (options.decodeRasterImage ?? defaultRasterDecoder)(
     bytes,
     mimeType ?? "application/octet-stream",
@@ -1361,6 +1378,26 @@ const decodeTexture = async (
   };
 };
 
+const decodeTexture = async (
+  textureIndex: number,
+  context: DecodeContext,
+): Promise<TextureResult> => {
+  const { gltf, request, options } = context;
+  const texture = requireIndex(gltf.json.textures, textureIndex, "texture");
+  const image = requireIndex(gltf.json.images, texture.source ?? -1, "image");
+  const { bytes, mediaType } = await imageBytes(
+    gltf,
+    image,
+    request,
+    options.fetchDependency ?? fetchOkBytes,
+  );
+  const sampler = samplerFor(gltf.json, texture.sampler);
+  const mimeType = image.mimeType ?? mediaType;
+  return mimeType === "image/ktx2"
+    ? decodeKtx2Texture(bytes, sampler, context)
+    : decodeRasterTexture(bytes, mimeType, sampler, options);
+};
+
 export const normalizeTextureCoordinates = (
   uvs: Float32Array | undefined,
   orientation: string,
@@ -1375,26 +1412,11 @@ export const normalizeTextureCoordinates = (
   }
 };
 
-const materialFor = async (
-  materialIndex: number | undefined,
-  primitive: RtcPrimitiveResult,
-  gltf: ParsedGltf,
-  request: DecodeTileRequest,
-  options: DecodeTileOptions,
-  modules: Record<string, unknown>,
-  textureCache: Map<string, Promise<TextureResult>>,
-  diagnostics: DecodeDiagnosticsAccumulator,
-): Promise<DecodedMaterial> => {
-  const material =
-    materialIndex === undefined
-      ? undefined
-      : requireIndex(gltf.json.materials, materialIndex, "material");
+const serializableMaterial = (
+  material: GltfMaterial | undefined,
+): SerializableMaterial => {
   const pbr = material?.pbrMetallicRoughness;
-  const factor = pbr?.baseColorFactor ?? [1, 1, 1, 1];
-  if (factor.length !== 4 || factor.some((value) => !Number.isFinite(value))) {
-    throw new Error("glTF baseColorFactor must contain four finite numbers");
-  }
-  const raw: SerializableMaterial = {
+  return {
     version: 1,
     kind: "gltf-material",
     ...(material?.name ? { name: material.name } : {}),
@@ -1413,32 +1435,45 @@ const materialFor = async (
       material?.emissiveFactor?.[2] ?? 0,
     ],
   };
-  const textureInfo = pbr?.baseColorTexture;
-  if (!textureInfo) {
-    return {
-      baseColorFactor: [...factor] as [number, number, number, number],
-      raw,
-    };
-  }
+};
+
+const cachedTexture = (
+  textureIndex: number,
+  context: DecodeContext,
+): Promise<TextureResult> => {
   const gltfTexture = requireIndex(
-    gltf.json.textures,
-    textureInfo.index,
+    context.gltf.json.textures,
+    textureIndex,
     "texture",
   );
   const key = `${gltfTexture.source ?? -1}:${gltfTexture.sampler ?? -1}`;
-  let decodedPromise = textureCache.get(key);
-  if (!decodedPromise) {
-    decodedPromise = decodeTexture(
-      textureInfo.index,
-      gltf,
-      request,
-      options,
-      modules,
-      diagnostics,
-    );
-    textureCache.set(key, decodedPromise);
+  const cached = context.textureCache.get(key);
+  if (cached) return cached;
+  const decoding = decodeTexture(textureIndex, context);
+  context.textureCache.set(key, decoding);
+  return decoding;
+};
+
+const materialFor = async (
+  materialIndex: number | undefined,
+  primitive: RtcPrimitiveResult,
+  context: DecodeContext,
+): Promise<DecodedMaterial> => {
+  const material =
+    materialIndex === undefined
+      ? undefined
+      : requireIndex(context.gltf.json.materials, materialIndex, "material");
+  const factor = material?.pbrMetallicRoughness?.baseColorFactor ?? [
+    1, 1, 1, 1,
+  ];
+  if (factor.length !== 4 || factor.some((value) => !Number.isFinite(value))) {
+    throw new Error("glTF baseColorFactor must contain four finite numbers");
   }
-  const decoded = await decodedPromise;
+  const baseColorFactor = [...factor] as [number, number, number, number];
+  const raw = serializableMaterial(material);
+  const textureInfo = material?.pbrMetallicRoughness?.baseColorTexture;
+  if (!textureInfo) return { baseColorFactor, raw };
+  const decoded = await cachedTexture(textureInfo.index, context);
   raw.baseColorTexture = {
     texture: textureInfo.index,
     texCoord: textureInfo.texCoord ?? 0,
@@ -1446,11 +1481,7 @@ const materialFor = async (
     sourceColorSpace: decoded.sourceColorSpace,
   };
   normalizeTextureCoordinates(primitive.uvs, decoded.orientation);
-  return {
-    baseColorFactor: [...factor] as [number, number, number, number],
-    baseColorTexture: decoded.texture,
-    raw,
-  };
+  return { baseColorFactor, baseColorTexture: decoded.texture, raw };
 };
 
 const totalByteLength = (buffers: ReadonlySet<ArrayBuffer>): number => {
@@ -1565,23 +1596,21 @@ const decodeTileContentInner = async (
   );
   const pending = applySceneRtc(parsed, sceneTransform);
   const origin = commonOrigin(pending);
-  const textureCache = new Map<string, Promise<TextureResult>>();
+  const context: DecodeContext = {
+    gltf: parsed,
+    request,
+    options,
+    modules,
+    diagnostics,
+    textureCache: new Map(),
+  };
   const primitives: DecodedPrimitive[] = await Promise.all(
     pending.map(async ({ rtc, materialIndex }) => ({
       positions: rebasePositions(rtc, origin),
       ...(rtc.normals ? { normals: rtc.normals } : {}),
       ...(rtc.uvs ? { uvs: rtc.uvs } : {}),
       ...(rtc.indices ? { indices: rtc.indices } : {}),
-      material: await materialFor(
-        materialIndex,
-        rtc,
-        parsed,
-        request,
-        options,
-        modules,
-        textureCache,
-        diagnostics,
-      ),
+      material: await materialFor(materialIndex, rtc, context),
     })),
   );
   return {
