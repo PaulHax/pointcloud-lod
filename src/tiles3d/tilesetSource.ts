@@ -444,6 +444,145 @@ type ParseContext = {
   readonly tileById: Map<string, TilesetTile>;
 };
 
+/**
+ * The implicit root. Everything about it is validated here rather than in
+ * `parseTile`, which only routes to it: an implicit root shares nothing with an
+ * explicit tile beyond its bounding volume and transform.
+ */
+const parseImplicitRootTile = (
+  raw: Record<string, unknown>,
+  path: string,
+  id: string,
+  parentTransform: readonly number[],
+  inheritedRefine: "REPLACE" | undefined,
+  context: ParseContext,
+): TilesetTile => {
+  if (id !== "root") {
+    throw new TilesetValidationError(
+      `${path}.implicitTiling`,
+      "implicit tiling is only allowed on the root",
+    );
+  }
+  if ("contents" in raw) {
+    throw new TilesetUnsupportedError("contents", `${path}.contents`);
+  }
+  const refine = raw.refine ?? inheritedRefine;
+  if (refine !== "REPLACE") {
+    throw new TilesetValidationError(`${path}.refine`, 'expected "REPLACE"');
+  }
+  if (raw.children !== undefined) {
+    throw new TilesetValidationError(
+      `${path}.children`,
+      "explicit children are not allowed on an implicit root",
+    );
+  }
+  if (raw.content === undefined) {
+    throw new TilesetValidationError(
+      `${path}.content`,
+      "implicit roots require one content URI template",
+    );
+  }
+  const content = objectAt(raw.content, `${path}.content`);
+  if ("url" in content) {
+    throw new TilesetUnsupportedError("content.url", `${path}.content.url`);
+  }
+  const contentPath = `${path}.content.uri`;
+  const contentValue = content.uri;
+  const contentExtension =
+    typeof contentValue === "string" &&
+    contentValue.toLowerCase().endsWith(".gltf")
+      ? ".gltf"
+      : ".glb";
+  const contentTemplate = implicitTemplate(
+    context.endpoint,
+    contentValue,
+    contentPath,
+    contentExtension,
+  );
+  const implicit = objectAt(raw.implicitTiling, `${path}.implicitTiling`);
+  if (implicit.subdivisionScheme !== "QUADTREE") {
+    throw new TilesetUnsupportedError(
+      `implicitTiling.${String(implicit.subdivisionScheme)}`,
+      `${path}.implicitTiling.subdivisionScheme`,
+    );
+  }
+  const subtreeLevels = integerAtLeast(
+    implicit.subtreeLevels,
+    1,
+    `${path}.implicitTiling.subtreeLevels`,
+  );
+  if (subtreeLevels !== 4) {
+    throw new TilesetValidationError(
+      `${path}.implicitTiling.subtreeLevels`,
+      "expected 4 for the supported producer profile",
+    );
+  }
+  const availableLevels = integerAtLeast(
+    implicit.availableLevels,
+    1,
+    `${path}.implicitTiling.availableLevels`,
+  );
+  // Tile IDs use 32-bit bitwise quadrant extraction. Levels 0..30 keep
+  // coordinates nonnegative and exactly representable throughout traversal.
+  if (availableLevels > 31) {
+    throw new TilesetValidationError(
+      `${path}.implicitTiling.availableLevels`,
+      "expected at most 31 for the supported producer profile",
+    );
+  }
+  const subtrees = objectAt(
+    implicit.subtrees,
+    `${path}.implicitTiling.subtrees`,
+  );
+  if ("url" in subtrees) {
+    throw new TilesetUnsupportedError(
+      "implicitTiling.subtrees.url",
+      `${path}.implicitTiling.subtrees.url`,
+    );
+  }
+  const subtreeTemplate = implicitTemplate(
+    context.endpoint,
+    subtrees.uri,
+    `${path}.implicitTiling.subtrees.uri`,
+    ".subtree",
+  );
+  const transform = affineMatrix(raw.transform, `${path}.transform`);
+  const worldTransform = multiplyTilesetMatrices(parentTransform, transform);
+  const descriptor: TilesetImplicitTiling = Object.freeze({
+    subdivisionScheme: "QUADTREE",
+    subtreeLevels,
+    availableLevels,
+    subtreeUriTemplate: subtreeTemplate.uri,
+    subtreeUrlTemplate: subtreeTemplate.url,
+    contentUriTemplate: contentTemplate.uri,
+    contentUrlTemplate: contentTemplate.url,
+    metadataSchema:
+      context.metadataSchema ??
+      (() => {
+        throw new TilesetValidationError(
+          "schema",
+          "implicit tilesets require an inline metadata schema",
+        );
+      })(),
+  });
+  const parsed: TilesetTile = Object.freeze({
+    id,
+    geometricError: finiteAtLeastZero(
+      raw.geometricError,
+      `${path}.geometricError`,
+    ),
+    boundingVolume: boundingBox(raw.boundingVolume, `${path}.boundingVolume`),
+    transform,
+    worldTransform,
+    children: Object.freeze([]),
+    implicitTiling: descriptor,
+    implicitAddress: Object.freeze({ level: 0, x: 0, y: 0 }),
+  });
+  context.tiles.push(parsed);
+  context.tileById.set(id, parsed);
+  return parsed;
+};
+
 const parseTile = (
   value: unknown,
   path: string,
@@ -454,130 +593,14 @@ const parseTile = (
 ): TilesetTile => {
   const raw = objectAt(value, path);
   if ("implicitTiling" in raw) {
-    if (id !== "root") {
-      throw new TilesetValidationError(
-        `${path}.implicitTiling`,
-        "implicit tiling is only allowed on the root",
-      );
-    }
-    if ("contents" in raw) {
-      throw new TilesetUnsupportedError("contents", `${path}.contents`);
-    }
-    const refine = raw.refine ?? inheritedRefine;
-    if (refine !== "REPLACE") {
-      throw new TilesetValidationError(`${path}.refine`, 'expected "REPLACE"');
-    }
-    if (raw.children !== undefined) {
-      throw new TilesetValidationError(
-        `${path}.children`,
-        "explicit children are not allowed on an implicit root",
-      );
-    }
-    if (raw.content === undefined) {
-      throw new TilesetValidationError(
-        `${path}.content`,
-        "implicit roots require one content URI template",
-      );
-    }
-    const content = objectAt(raw.content, `${path}.content`);
-    if ("url" in content) {
-      throw new TilesetUnsupportedError("content.url", `${path}.content.url`);
-    }
-    const contentPath = `${path}.content.uri`;
-    const contentValue = content.uri;
-    const contentExtension =
-      typeof contentValue === "string" &&
-      contentValue.toLowerCase().endsWith(".gltf")
-        ? ".gltf"
-        : ".glb";
-    const contentTemplate = implicitTemplate(
-      context.endpoint,
-      contentValue,
-      contentPath,
-      contentExtension,
-    );
-    const implicit = objectAt(raw.implicitTiling, `${path}.implicitTiling`);
-    if (implicit.subdivisionScheme !== "QUADTREE") {
-      throw new TilesetUnsupportedError(
-        `implicitTiling.${String(implicit.subdivisionScheme)}`,
-        `${path}.implicitTiling.subdivisionScheme`,
-      );
-    }
-    const subtreeLevels = integerAtLeast(
-      implicit.subtreeLevels,
-      1,
-      `${path}.implicitTiling.subtreeLevels`,
-    );
-    if (subtreeLevels !== 4) {
-      throw new TilesetValidationError(
-        `${path}.implicitTiling.subtreeLevels`,
-        "expected 4 for the supported producer profile",
-      );
-    }
-    const availableLevels = integerAtLeast(
-      implicit.availableLevels,
-      1,
-      `${path}.implicitTiling.availableLevels`,
-    );
-    // Tile IDs use 32-bit bitwise quadrant extraction. Levels 0..30 keep
-    // coordinates nonnegative and exactly representable throughout traversal.
-    if (availableLevels > 31) {
-      throw new TilesetValidationError(
-        `${path}.implicitTiling.availableLevels`,
-        "expected at most 31 for the supported producer profile",
-      );
-    }
-    const subtrees = objectAt(
-      implicit.subtrees,
-      `${path}.implicitTiling.subtrees`,
-    );
-    if ("url" in subtrees) {
-      throw new TilesetUnsupportedError(
-        "implicitTiling.subtrees.url",
-        `${path}.implicitTiling.subtrees.url`,
-      );
-    }
-    const subtreeTemplate = implicitTemplate(
-      context.endpoint,
-      subtrees.uri,
-      `${path}.implicitTiling.subtrees.uri`,
-      ".subtree",
-    );
-    const transform = affineMatrix(raw.transform, `${path}.transform`);
-    const worldTransform = multiplyTilesetMatrices(parentTransform, transform);
-    const descriptor: TilesetImplicitTiling = Object.freeze({
-      subdivisionScheme: "QUADTREE",
-      subtreeLevels,
-      availableLevels,
-      subtreeUriTemplate: subtreeTemplate.uri,
-      subtreeUrlTemplate: subtreeTemplate.url,
-      contentUriTemplate: contentTemplate.uri,
-      contentUrlTemplate: contentTemplate.url,
-      metadataSchema:
-        context.metadataSchema ??
-        (() => {
-          throw new TilesetValidationError(
-            "schema",
-            "implicit tilesets require an inline metadata schema",
-          );
-        })(),
-    });
-    const parsed: TilesetTile = Object.freeze({
+    return parseImplicitRootTile(
+      raw,
+      path,
       id,
-      geometricError: finiteAtLeastZero(
-        raw.geometricError,
-        `${path}.geometricError`,
-      ),
-      boundingVolume: boundingBox(raw.boundingVolume, `${path}.boundingVolume`),
-      transform,
-      worldTransform,
-      children: Object.freeze([]),
-      implicitTiling: descriptor,
-      implicitAddress: Object.freeze({ level: 0, x: 0, y: 0 }),
-    });
-    context.tiles.push(parsed);
-    context.tileById.set(id, parsed);
-    return parsed;
+      parentTransform,
+      inheritedRefine,
+      context,
+    );
   }
   if ("contents" in raw) {
     throw new TilesetUnsupportedError("contents", `${path}.contents`);
