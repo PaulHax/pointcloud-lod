@@ -857,8 +857,16 @@ const accessorFloats = (
   return output;
 };
 
-/** Indices loaders.gl already expanded, narrowed to the width they need. */
-const expandedIndices = (
+/**
+ * Indices loaders.gl already expanded. A Uint32Array is copied at its own
+ * width; every other accepted integer width is narrowed to Uint16Array when
+ * its largest index fits and widened to Uint32Array when it does not.
+ *
+ * Exported so index-width selection can be tested at every accepted source
+ * width; the decoder pins Draco to triangle-list output, which only ever
+ * reaches this through the Uint32Array branch.
+ */
+export const expandedIndices = (
   source: ArrayBufferView,
 ): Uint16Array | Uint32Array => {
   if (source instanceof Uint32Array) return source.slice();
@@ -873,12 +881,15 @@ const expandedIndices = (
   ) {
     throw new Error("expanded glTF indices have an invalid typed value");
   }
-  const values = Array.from(source);
-  if (values.some((value) => value < 0)) {
-    throw new Error("glTF indices must be unsigned");
+  // Scan for the width rather than spreading into Math.max: a spread this wide
+  // overflows the call stack, and compressed primitives reach that size.
+  let max = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    const value = source[index]!;
+    if (value < 0) throw new Error("glTF indices must be unsigned");
+    if (value > max) max = value;
   }
-  const max = Math.max(0, ...values);
-  return max <= 65_535 ? Uint16Array.from(values) : Uint32Array.from(values);
+  return max <= 65_535 ? new Uint16Array(source) : new Uint32Array(source);
 };
 
 const accessorIndices = (
