@@ -803,3 +803,10 @@ orthographic camera refines on zoom rather than on approach.
 ## License
 
 [MIT](./LICENSE)
+
+### Point rendering contract
+
+Tile mappers explicitly select `vtkPointGaussianMapper` simple-point mode with
+`scaleFactor: 0`. CSS-pixel conversion uses the fork's `pointSizeScale`
+extension. Adaptive density uses `maximumPointCount` to submit a prefix without
+reuploading resident buffers. Gaussian rendering is not required or enabled.

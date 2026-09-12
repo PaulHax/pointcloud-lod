@@ -115,7 +115,7 @@ describe("createRendererAdapter", () => {
     );
     expect(mapperInstances[0]!.inputData).toBe(polyDataInstances[0]);
     expect(mapperInstances[0]!.static).toBe(true);
-    expect(mapperInstances[0]!.scaleFactor).toBe(2);
+    expect(mapperInstances[0]!.pointSizeScale).toBe(2);
     expect(mapperInstances[0]!.maximumPointCount).toBe(2);
     expect(actorInstances[0]!.pointSize).toBe(3);
     // Identity base: the tile matrix is a plain translation to the origin.
@@ -170,7 +170,7 @@ describe("createRendererAdapter", () => {
     adapter.setPointDiameterCssPx(7);
     adapter.setDevicePixelRatio(2);
     expect(actorInstances.map((a) => a.pointSize)).toEqual([7, 7]);
-    expect(mapperInstances.map((m) => m.scaleFactor)).toEqual([2, 2]);
+    expect(mapperInstances.map((m) => m.pointSizeScale)).toEqual([2, 2]);
     expect(scheduleRender).toHaveBeenCalledTimes(2);
 
     // No-op updates do not schedule renders.
@@ -187,12 +187,12 @@ describe("createRendererAdapter", () => {
     });
     add(adapter, { key: KEY_A, tile: tile([0, 0, 0]) });
     expect(actorInstances[0]!.pointSize).toBe(2.5);
-    expect(mapperInstances[0]!.scaleFactor).toBe(1);
+    expect(mapperInstances[0]!.pointSizeScale).toBe(1);
 
     scheduleRender.mockClear();
     adapter.setDevicePixelRatio(2);
     expect(actorInstances[0]!.pointSize).toBe(2.5);
-    expect(mapperInstances[0]!.scaleFactor).toBe(2);
+    expect(mapperInstances[0]!.pointSizeScale).toBe(2);
     expect(scheduleRender).toHaveBeenCalledTimes(1);
   });
 

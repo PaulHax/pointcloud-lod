@@ -68,14 +68,14 @@ const drawingDiameterCssPx = (stats: ExampleStats): number =>
  *
  * The two halves are not interchangeable. The adapter leaves the actor property
  * in CSS pixels (`setPointSize(diameterCssPx)`) and gives the ratio to the
- * mapper (`setScaleFactor(devicePixelRatio)`), and the shader assigns
- * `gl_PointSize = getPointSize() * getScaleFactor()`. This product is the whole
+ * mapper (`setPointSizeScale(devicePixelRatio)`), and the shader assigns
+ * `gl_PointSize = getPointSize() * getPointSizeScale()`. This product is the whole
  * of what a ratio change may move, and the CSS half is the whole of what it
  * must leave alone — an adapter that premultiplied the ratio into the actor
  * property as well would draw every point ratio-squared too large.
  */
 const drawnDiameterDevicePx = (scene: SceneReading): number =>
-  scene.pointSizeDevicePx! * scene.mapperScaleFactor!;
+  scene.pointSizeDevicePx! * scene.mapperPointSizeScale!;
 
 /**
  * The scene's own account of the ratio, and the renderer's own count of what
@@ -104,7 +104,7 @@ const assertSceneDrawsAtRatio = async (
   ).toBe(0);
 
   expect(
-    scene.mapperScaleFactor,
+    scene.mapperPointSizeScale,
     `the mapper the renderer draws with is not scaling to ${ratio}\n${shown(stats)}`,
   ).toBe(ratio);
   expect(
