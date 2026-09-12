@@ -1,3 +1,3 @@
-import { makeMeshMapper } from "./vtkStub";
+import { makeMapper } from "./vtkStub";
 
-export default { newInstance: makeMeshMapper };
+export default { newInstance: makeMapper };

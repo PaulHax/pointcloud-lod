@@ -154,8 +154,6 @@ export const makeMapper = (): StubMapper => {
   return mapper;
 };
 
-export const makeMeshMapper = makeMapper;
-
 export type StubPolyData = {
   getPoints: () => { setData: (values: unknown, components: number) => void };
   getPointData: () => {

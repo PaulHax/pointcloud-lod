@@ -83,16 +83,16 @@ export const PLACES: readonly Place[] = [
   },
 ];
 
-/** ECEF to the place's ENU scene frame — the mesh member's placement. */
+/**
+ * ECEF to the place's ENU scene frame: the mesh member's placement, and the
+ * frame tile content lands in. Content-axis correction is internal.
+ */
 export const ecefToEnu = (place: Place): Mat4 =>
   createEcefToEnuTransform(
     place.longitude,
     place.latitude,
     place.napZeroHeight,
   );
-
-/** Tile ECEF to the place's ENU scene frame; content-axis correction is internal. */
-export const contentToScene = ecefToEnu;
 
 /**
  * RD New (x, y, NAP z) to the same ENU frame — the point cloud's model matrix.
