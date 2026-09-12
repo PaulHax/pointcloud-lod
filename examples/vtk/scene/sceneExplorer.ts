@@ -28,7 +28,7 @@ import { createLocalTilesSource } from "./localTiles";
 import {
   BAG3D_ENDPOINT,
   PLACES,
-  contentToScene,
+  ecefToEnu,
   rdToScene,
   type Place,
 } from "./places";
@@ -708,7 +708,7 @@ export const startSceneExplorer = (preset: ExplorerPreset): void => {
       revision: `${id}:${Date.now()}`,
       tilesetToScene:
         input.tilesetToScene ??
-        (input.place ? contentToScene(input.place) : IDENTITY),
+        (input.place ? ecefToEnu(input.place) : IDENTITY),
       maximumScreenSpaceErrorPx: Number(sse.value),
       wasm: decodeWasmUrls(),
       ...(input.fetchTileset ? { fetchTileset: input.fetchTileset } : {}),

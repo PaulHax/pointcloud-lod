@@ -5,7 +5,7 @@ import {
   wgs84ToEcef,
   type Mat4,
 } from "../../../src/tiles3d/rtc";
-import { PLACES, contentToScene, ecefToEnu, rdToScene } from "./places";
+import { PLACES, ecefToEnu, rdToScene } from "./places";
 
 const ROTTERDAM = PLACES[0]!;
 
@@ -86,7 +86,7 @@ describe("scene placement", () => {
       ROTTERDAM.latitude,
       ROTTERDAM.napZeroHeight + 1,
     );
-    const placed = transformPoint(contentToScene(ROTTERDAM), ecef);
+    const placed = transformPoint(ecefToEnu(ROTTERDAM), ecef);
     expect(placed[0]).toBeCloseTo(0, 6);
     expect(placed[1]).toBeCloseTo(0, 6);
     expect(placed[2]).toBeCloseTo(1, 6);
