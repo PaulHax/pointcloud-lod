@@ -99,6 +99,7 @@ type RecorderWindow = {
       governor: {
         viewQualityFraction: number;
         needsFrame: boolean;
+        frameMetrics: { frames: number };
         lastAdjustment: {
           atMs: number;
           reason: string;
@@ -112,17 +113,16 @@ type RecorderWindow = {
   };
   __budgetTrace?: {
     states: QualityState[];
-    measuredFrames: number;
+    startFrame: number;
     previousKey: string;
-    previousAtMs: number | null;
   };
 };
 
 /**
  * Record every distinct state of the budget loop, on the page's frame clock.
  *
- * The loop records a decision on every frame it measures, so the frames that
- * actually move the budget are one in tens: polling `lastAdjustment` from Node
+ * The frames that actually move the budget are one in tens: polling
+ * `lastAdjustment` from Node
  * samples the frames between the decisions and reports "nothing ever changed"
  * about a loop that changed the budget six times. It also cannot prove a
  * negative — an oscillation that completes between two polls is invisible —
@@ -135,21 +135,15 @@ const recordBudgetStates = (session: ExampleSession): Promise<void> =>
     if (view.__budgetTrace !== undefined) return;
     const trace = {
       states: [] as QualityState[],
-      measuredFrames: 0,
+      startFrame:
+        view.pointCloudExample.stats().governor?.frameMetrics.frames ?? 0,
       previousKey: "",
-      previousAtMs: null as number | null,
     };
     view.__budgetTrace = trace;
     const read = (): void => {
       const governor = view.pointCloudExample.stats().governor;
       if (governor !== null) {
         const adjustment = governor.lastAdjustment;
-        // Every measured frame is stamped, including the ones that decide to
-        // change nothing, so this counts frames the loop was fed.
-        if (adjustment !== null && adjustment.atMs !== trace.previousAtMs) {
-          trace.previousAtMs = adjustment.atMs;
-          trace.measuredFrames += 1;
-        }
         const state: QualityState = {
           viewQualityFraction: governor.viewQualityFraction,
           needsFrame: governor.needsFrame,
@@ -171,20 +165,22 @@ const recordBudgetStates = (session: ExampleSession): Promise<void> =>
   });
 
 /**
- * Take everything recorded since the last drain, so each phase reads its own
- * trace. The frame stamp survives a drain — a phase that must show no frames
- * were painted cannot have its counter reset into counting one.
+ * Take decisions and measured frames since the last drain. The governor's
+ * frame counter includes measurements that leave its last decision unchanged.
  */
 const drainBudgetStates = (session: ExampleSession): Promise<QualityTrace> =>
   session.page.evaluate(() => {
-    const trace = (window as unknown as RecorderWindow).__budgetTrace;
+    const view = window as unknown as RecorderWindow;
+    const trace = view.__budgetTrace;
     if (trace === undefined) return { states: [], measuredFrames: 0 };
+    const frames =
+      view.pointCloudExample.stats().governor?.frameMetrics.frames ?? 0;
     const taken = {
       states: trace.states,
-      measuredFrames: trace.measuredFrames,
+      measuredFrames: frames - trace.startFrame,
     };
     trace.states = [];
-    trace.measuredFrames = 0;
+    trace.startFrame = frames;
     trace.previousKey = "";
     return taken;
   }) as Promise<QualityTrace>;
@@ -255,7 +251,9 @@ const heldFor =
   (durationMs: number, frames: number) =>
   (trail: readonly Sample[]): boolean =>
     trail[trail.length - 1]!.at - trail[0]!.at >= durationMs &&
-    trail.length >= frames;
+    governorOf(trail[trail.length - 1]!.stats).frameMetrics.frames -
+      governorOf(trail[0]!.stats).frameMetrics.frames >=
+      frames;
 
 const shown = (trace: QualityTrace): string => JSON.stringify(trace, null, 2);
 
