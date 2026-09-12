@@ -857,32 +857,36 @@ const accessorFloats = (
   return output;
 };
 
-const accessorIndices = (
-  reference: number | ExpandedAccessor | undefined,
-  gltf: ParsedGltf,
-): Uint16Array | Uint32Array | undefined => {
-  if (reference === undefined) return undefined;
-  if (typeof reference !== "number") {
-    const source = reference.value;
-    if (source instanceof Uint32Array) return source.slice();
-    if (
+/** Indices loaders.gl already expanded, narrowed to the width they need. */
+const expandedIndices = (
+  source: ArrayBufferView,
+): Uint16Array | Uint32Array => {
+  if (source instanceof Uint32Array) return source.slice();
+  if (
+    !(
       source instanceof Uint16Array ||
       source instanceof Uint8Array ||
       source instanceof Int8Array ||
       source instanceof Int16Array ||
       source instanceof Int32Array
-    ) {
-      const values = Array.from(source);
-      if (values.some((value) => value < 0)) {
-        throw new Error("glTF indices must be unsigned");
-      }
-      const max = Math.max(0, ...values);
-      return max <= 65_535
-        ? Uint16Array.from(values)
-        : Uint32Array.from(values);
-    }
+    )
+  ) {
     throw new Error("expanded glTF indices have an invalid typed value");
   }
+  const values = Array.from(source);
+  if (values.some((value) => value < 0)) {
+    throw new Error("glTF indices must be unsigned");
+  }
+  const max = Math.max(0, ...values);
+  return max <= 65_535 ? Uint16Array.from(values) : Uint32Array.from(values);
+};
+
+const accessorIndices = (
+  reference: number | ExpandedAccessor | undefined,
+  gltf: ParsedGltf,
+): Uint16Array | Uint32Array | undefined => {
+  if (reference === undefined) return undefined;
+  if (typeof reference !== "number") return expandedIndices(reference.value);
   const accessor = requireIndex(gltf.json.accessors, reference, "accessor");
   if (
     accessor.type !== "SCALAR" ||
