@@ -22,6 +22,7 @@ import {
 } from ".";
 import {
   decodeTileContent,
+  expandedIndices,
   normalizeTextureCoordinates,
   resolveGltfDependencyUrl,
   type DecodeTileOptions,
@@ -490,6 +491,115 @@ describe("decoded tile contract", () => {
     expect(result.primitives[0]?.positions).toHaveLength(12);
     expect(result.primitives[0]?.indices).toHaveLength(6);
     expect(() => structuredClone(result)).not.toThrow();
+  });
+
+  it.each([
+    {
+      label: "empty",
+      source: new Uint16Array(0),
+      width: Uint16Array,
+      values: [],
+    },
+    {
+      label: "single index",
+      source: Uint8Array.from([7]),
+      width: Uint16Array,
+      values: [7],
+    },
+    {
+      label: "all zeros",
+      source: new Int16Array(4),
+      width: Uint16Array,
+      values: [0, 0, 0, 0],
+    },
+    {
+      label: "Uint8 ceiling",
+      source: Uint8Array.from([0, 255]),
+      width: Uint16Array,
+      values: [0, 255],
+    },
+    {
+      label: "Uint16 ceiling",
+      source: Uint16Array.from([1, 65_535]),
+      width: Uint16Array,
+      values: [1, 65_535],
+    },
+    {
+      label: "one past the Uint16 ceiling",
+      source: Int32Array.from([1, 65_536]),
+      width: Uint32Array,
+      values: [1, 65_536],
+    },
+    {
+      label: "widths beyond a signed short",
+      source: Int32Array.from([70_000, 3]),
+      width: Uint32Array,
+      values: [70_000, 3],
+    },
+  ])(
+    "selects the narrowest index width for $label",
+    ({ source, width, values }) => {
+      const result = expandedIndices(source);
+      expect(result).toBeInstanceOf(width);
+      expect(Array.from(result)).toEqual(values);
+    },
+  );
+
+  it.each([
+    { label: "first", source: Int16Array.from([-1, 5, 9]) },
+    { label: "middle", source: Int32Array.from([5, -1, 9]) },
+    { label: "last", source: Int8Array.from([5, 9, -1]) },
+    { label: "beside a wide index", source: Int32Array.from([70_000, -3]) },
+  ])(
+    "rejects an expanded index that is negative in $label position",
+    ({ source }) => {
+      expect(() => expandedIndices(source)).toThrow(/must be unsigned/u);
+    },
+  );
+
+  it("copies Uint32 indices at their own width and rejects non-integer sources", () => {
+    const source = Uint32Array.from([0, 1, 70_000]);
+    const copied = expandedIndices(source);
+    expect(copied).toBeInstanceOf(Uint32Array);
+    expect(copied).not.toBe(source);
+    expect(Array.from(copied)).toEqual([0, 1, 70_000]);
+    for (const invalid of [
+      Float32Array.from([0, 1]),
+      Float64Array.from([0, 1]),
+      BigInt64Array.from([0n, 1n]),
+      Uint8ClampedArray.from([0, 1]),
+      new DataView(new ArrayBuffer(8)),
+    ]) {
+      expect(() => expandedIndices(invalid)).toThrow(/invalid typed value/u);
+    }
+  });
+
+  // A spread of the index array overflowed the call stack somewhere past 125k
+  // elements, so width selection has to scan rather than apply Math.max.
+  it("selects an index width for a primitive larger than the argument-spread limit", () => {
+    const count = 300_000;
+    const narrow = Uint16Array.from(
+      { length: count },
+      (_, index) => index % 65_536,
+    );
+    const narrowResult = expandedIndices(narrow);
+    expect(narrowResult).toBeInstanceOf(Uint16Array);
+    expect(narrowResult).toHaveLength(count);
+    expect(narrowResult[count - 1]).toBe((count - 1) % 65_536);
+
+    const wide = Int32Array.from(
+      { length: count },
+      (_, index) => 65_536 + (index % 1_000),
+    );
+    const wideResult = expandedIndices(wide);
+    expect(wideResult).toBeInstanceOf(Uint32Array);
+    expect(wideResult).toHaveLength(count);
+    expect(wideResult[0]).toBe(65_536);
+
+    const negativeAtEnd = Int32Array.from({ length: count }, (_, index) =>
+      index === count - 1 ? -1 : index % 500,
+    );
+    expect(() => expandedIndices(negativeAtEnd)).toThrow(/must be unsigned/u);
   });
 
   it.each([
