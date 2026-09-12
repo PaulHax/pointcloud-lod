@@ -36,7 +36,7 @@ import {
 import { startStaticServer, type StaticServer } from "./server";
 import type { ViewerBox } from "./inputReplay";
 
-export { EXAMPLE_DIST, FIXTURES } from "./browserSession";
+export { FIXTURES } from "./browserSession";
 
 export type DatasetActivity = {
   readonly id: string;
@@ -157,7 +157,7 @@ const POLL_INTERVAL_MS = 100;
  * on the real GPU, because SwiftShader frame times describe SwiftShader. A
  * correctness check asks for headless and measures nothing.
  */
-export const benchmarkBrowser = (headless: boolean): Promise<Browser> =>
+const benchmarkBrowser = (headless: boolean): Promise<Browser> =>
   browserFor(headless ? "software" : "gpu");
 
 export const closeBenchmarkBrowser = closeBrowsers;

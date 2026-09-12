@@ -38,7 +38,7 @@ import {
  * while the physical counts only fall when the abandoned promise actually
  * settles. A leak of read slots shows up here and nowhere else.
  */
-export const assertLive = (stats: ExampleStats): boolean => {
+const assertLive = (stats: ExampleStats): boolean => {
   const cloud = stats.controller;
   // No controller means nothing to assert — the caller must not count this
   // sample toward any "the invariants were watched" guard, or a scenario that

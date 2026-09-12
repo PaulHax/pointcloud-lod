@@ -308,8 +308,7 @@ export const subtreeTileCount = (subtreeLevels: number): number => {
   return (4 ** subtreeLevels - 1) / 3;
 };
 
-export const subtreeLevelOffset = (level: number): number =>
-  (4 ** level - 1) / 3;
+const subtreeLevelOffset = (level: number): number => (4 ** level - 1) / 3;
 
 /** Morton index with x in the low bit and y in the high bit of each pair. */
 export const quadtreeMortonIndex = (

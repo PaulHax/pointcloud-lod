@@ -19,7 +19,6 @@
  */
 
 import { createControlSurface } from "./controlSurface";
-export { harnessRequested } from "./requested";
 import { installRecorderOverlay, recordingRequested } from "./captureOverlay";
 import { createInputRecorder, type InputRecorder } from "./inputRecorder";
 import type { SceneHandle } from "./sceneHandle";

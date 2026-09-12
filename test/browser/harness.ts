@@ -50,10 +50,10 @@ import {
 /** Failure messages in this suite carry the whole sample, pretty-printed. */
 export const shown = (value: unknown): string => JSON.stringify(value, null, 2);
 
-export { EXAMPLE_DIST, FIXTURES } from "./browserSession";
+export { FIXTURES } from "./browserSession";
 
 /** The committed fixture: small, single hierarchy page, always available. */
-export const FIXTURE_URL_PATH = "/fixtures/fixture.copc.laz";
+const FIXTURE_URL_PATH = "/fixtures/fixture.copc.laz";
 /**
  * The committed fixture whose hierarchy spans 73 pages over 4 levels. Every
  * real cloud on hand ships exactly one page, so this is the only asset that
@@ -62,14 +62,14 @@ export const FIXTURE_URL_PATH = "/fixtures/fixture.copc.laz";
  */
 export const MULTIPAGE_URL_PATH = "/fixtures/multipage.copc.laz";
 /** High-demand fixture used only by the adaptive feedback-loop scenarios. */
-export const ADAPTIVE_URL_PATH = "/fixtures/adaptive.copc.laz";
+const ADAPTIVE_URL_PATH = "/fixtures/adaptive.copc.laz";
 
 /**
  * Extra clouds to run the matrix against, as a path list in
  * `POINTCLOUD_LOD_BROWSER_CLOUDS`. Deliberately not named or defaulted here:
  * the datasets a deployment cares about are not this repository's to know.
  */
-export const extraClouds = (): string[] =>
+const extraClouds = (): string[] =>
   (process.env.POINTCLOUD_LOD_BROWSER_CLOUDS ?? "")
     .split(":")
     .map((entry) => entry.trim())
@@ -97,7 +97,7 @@ export type CloudUnderTest = {
   readonly multipage: boolean;
 };
 
-export const FIXTURE_CLOUD: CloudUnderTest = {
+const FIXTURE_CLOUD: CloudUnderTest = {
   name: "the fixture",
   urlPath: FIXTURE_URL_PATH,
   files: {},
@@ -149,7 +149,7 @@ export const cloudPair = (): [CloudUnderTest, CloudUnderTest] => {
 };
 
 /** A half-open byte range, the interval both copc's getter and HTTP name. */
-export type ByteRange = {
+type ByteRange = {
   readonly begin: number;
   readonly end: number;
 };
@@ -330,13 +330,12 @@ export const hierarchyPagesServed = async (
  */
 export const usingRealGpu = (): boolean => requestedRenderMode() === "gpu";
 
-export const browser = (): Promise<Browser> =>
-  browserFor(requestedRenderMode());
+const browser = (): Promise<Browser> => browserFor(requestedRenderMode());
 
 export const closeBrowser = closeBrowsers;
 
 /** The render viewport every session starts at. */
-export const DEFAULT_VIEWPORT: Viewport = { width: 1280, height: 720 };
+const DEFAULT_VIEWPORT: Viewport = { width: 1280, height: 720 };
 
 const POLL_INTERVAL_MS = 50;
 /** Selection is debounced, so convergence needs a quiet window, not an

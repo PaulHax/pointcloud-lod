@@ -17,7 +17,7 @@ import type { DecodeWasmUrls } from "../../../src/tiles3d/decode/types";
 const absolute = (path: string): string =>
   new URL(path, window.location.href).href;
 
-export const DECODE_WORKER_URL = "/tiles3d-decode-worker.js";
+const DECODE_WORKER_URL = "/tiles3d-decode-worker.js";
 
 export const decodeWasmUrls = (): DecodeWasmUrls => ({
   draco: {

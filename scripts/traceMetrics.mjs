@@ -21,7 +21,7 @@ export const percentile = (sorted, fraction) => {
   return sorted[low] + (sorted[high] - sorted[low]) * (rank - low);
 };
 
-export const summarize = (values) => {
+const summarize = (values) => {
   const sorted = [...values].sort((left, right) => left - right);
   return {
     count: sorted.length,
@@ -36,7 +36,7 @@ export const summarize = (values) => {
   };
 };
 
-export const meanOf = (values) =>
+const meanOf = (values) =>
   values.length === 0
     ? null
     : values.reduce((sum, value) => sum + value, 0) / values.length;
@@ -68,7 +68,7 @@ export const markerTimes = (trace) => {
  * The regime the governor was in when a frame was recorded. It names the two
  * "interaction" and "stationary".
  */
-export const regimeOf = (frame) =>
+const regimeOf = (frame) =>
   frame.state?.coordinator?.governor?.regime ??
   frame.state?.governor?.regime ??
   null;
@@ -76,7 +76,7 @@ export const regimeOf = (frame) =>
 export const isMoving = (frame) => regimeOf(frame) === "interaction";
 
 /** The one member an instrumented-page trace has, in coordinator shape. */
-export const membersOf = (frame) => {
+const membersOf = (frame) => {
   const state = frame.state;
   if (state === null || state === undefined) return [];
   if (Array.isArray(state.members)) return state.members;
