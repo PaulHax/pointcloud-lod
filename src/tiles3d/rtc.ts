@@ -22,20 +22,20 @@ export type Mat4 = [
   number,
 ];
 
-export interface RtcPrimitiveInput {
+export type RtcPrimitiveInput = {
   positions: Float32Array | Float64Array;
   normals?: Float32Array | Float64Array;
   uvs?: Float32Array;
   indices?: Uint16Array | Uint32Array;
-}
+};
 
-export interface RtcPrimitiveResult {
+export type RtcPrimitiveResult = {
   positions: Float32Array;
   normals?: Float32Array;
   uvs?: Float32Array;
   indices?: Uint16Array | Uint32Array;
   origin: Vec3;
-}
+};
 
 const AFFINE_EPSILON = 1e-12;
 const WGS84_SEMIMAJOR_METERS = 6_378_137;

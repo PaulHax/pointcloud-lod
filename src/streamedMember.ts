@@ -126,7 +126,7 @@ export const occlusionFromPick = (
       : { status: "clear" };
 
 /** Renderer-neutral lifecycle every streamed scene format implements. */
-export interface StreamedMember {
+export type StreamedMember = {
   setCamera(view: CameraView): void;
   setModelMatrix(matrix: Mat16 | null): void;
   setDevicePixelRatio(devicePixelRatio: number): void;
@@ -147,4 +147,4 @@ export interface StreamedMember {
   ): OcclusionResult | null;
   stats(): object;
   dispose(): void;
-}
+};

@@ -8,14 +8,14 @@ export type CompressedTextureFormat =
 
 export type DecodeTextureTarget = CompressedTextureFormat | "rgba";
 
-export interface TextureCapabilities {
+export type TextureCapabilities = {
   /** Stable identity supplied by the live render context. */
   capabilityKey: string;
   /** Canonical formats supported by that context; order is ignored. */
   compressedFormats: readonly CompressedTextureFormat[];
-}
+};
 
-export interface DecodeWasmUrls {
+export type DecodeWasmUrls = {
   draco?: {
     wrapperUrl: string;
     wasmUrl: string;
@@ -24,16 +24,16 @@ export interface DecodeWasmUrls {
     encoderUrl: string;
     wasmUrl: string;
   };
-}
+};
 
-export interface SerializableSampler {
+export type SerializableSampler = {
   magFilter: 9728 | 9729;
   minFilter: 9728 | 9729 | 9984 | 9985 | 9986 | 9987;
   wrapS: 33071 | 33648 | 10497;
   wrapT: 33071 | 33648 | 10497;
-}
+};
 
-export interface SerializableMaterial {
+export type SerializableMaterial = {
   version: 1;
   kind: "gltf-material";
   name?: string;
@@ -51,7 +51,7 @@ export interface SerializableMaterial {
     orientation: string;
     sourceColorSpace: "srgb" | "linear";
   };
-}
+};
 
 export type TileDecodeStage = "profile" | "decode";
 
@@ -93,13 +93,13 @@ export class TileUnsupportedExtensionError extends TileDecodeError {
   }
 }
 
-export interface CompressedTextureLevel {
+export type CompressedTextureLevel = {
   width: number;
   height: number;
   data: Uint8Array;
-}
+};
 
-export interface DecodedCompressedTexture {
+export type DecodedCompressedTexture = {
   kind: "compressed";
   format: CompressedTextureFormat;
   width: number;
@@ -108,34 +108,34 @@ export interface DecodedCompressedTexture {
   levels: CompressedTextureLevel[];
   sampler: SerializableSampler;
   capabilityKey: string;
-}
+};
 
-export interface DecodedRgbaTexture {
+export type DecodedRgbaTexture = {
   kind: "rgba";
   rgba: Uint8Array;
   width: number;
   height: number;
   colorSpace: "srgb";
   sampler: SerializableSampler;
-}
+};
 
 export type DecodedTexture = DecodedCompressedTexture | DecodedRgbaTexture;
 
-export interface DecodedMaterial {
+export type DecodedMaterial = {
   baseColorFactor: [number, number, number, number];
   baseColorTexture?: DecodedTexture;
   raw: SerializableMaterial;
-}
+};
 
-export interface DecodedPrimitive {
+export type DecodedPrimitive = {
   positions: Float32Array;
   normals?: Float32Array;
   uvs?: Float32Array;
   indices?: Uint16Array | Uint32Array;
   material: DecodedMaterial;
-}
+};
 
-export interface DecodedTileContent {
+export type DecodedTileContent = {
   primitives: DecodedPrimitive[];
   /** Float64 scene-local origin retained as JavaScript numbers. */
   origin: [number, number, number];
@@ -154,16 +154,16 @@ export interface DecodedTileContent {
     basisTextures: number;
     basisTarget: DecodeTextureTarget | null;
   };
-}
+};
 
-export interface BasisTargetTimingStats {
+export type BasisTargetTimingStats = {
   readonly count: number;
   readonly totalMs: number;
   /** Bounded tail of individual texture transcode durations. */
   readonly samplesMs: readonly number[];
-}
+};
 
-export interface DecodeTileRequest {
+export type DecodeTileRequest = {
   content: ArrayBuffer;
   contentUrl: string;
   /** Root below which external glTF dependencies may resolve. */
@@ -173,21 +173,21 @@ export interface DecodeTileRequest {
   tilesetToScene: Mat4;
   textureCapabilities: TextureCapabilities;
   wasm?: DecodeWasmUrls;
-}
+};
 
-export interface DecodeCacheIdentity {
+export type DecodeCacheIdentity = {
   contentUrl: string;
   revision: string;
   capabilityKey: string;
-}
+};
 
-export interface DecodeJob {
+export type DecodeJob = {
   promise: Promise<DecodedTileContent>;
   cancel(): void;
-}
+};
 
 /** Minimal pool surface supplied to renderer-neutral members. */
-export interface DecodeWorkerPoolHandle {
+export type DecodeWorkerPoolHandle = {
   readonly size: number;
   decode(request: DecodeTileRequest): DecodeJob;
   stats?(): {
@@ -210,4 +210,4 @@ export interface DecodeWorkerPoolHandle {
   };
   invalidate?(): void;
   dispose?(): void;
-}
+};

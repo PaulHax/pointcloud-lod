@@ -30,38 +30,38 @@ import type {
 } from "./types";
 import { TileDecodeError, TileUnsupportedExtensionError } from "./types";
 
-interface BasisMetadata {
+type BasisMetadata = {
   width: number;
   height: number;
   levels: readonly { byteLength: number }[];
   orientation: string;
   srgb: boolean;
-}
+};
 
-interface BasisLevel {
+type BasisLevel = {
   width: number;
   height: number;
   data: Uint8Array;
   compressed: boolean;
-}
+};
 
-interface DecodeDiagnosticsAccumulator {
+type DecodeDiagnosticsAccumulator = {
   basisRuntimeInitializationMs: number;
   basisTranscodeMs: number;
   basisTranscodeSamplesMs: number[];
   basisTextures: number;
   basisTarget: DecodeTextureTarget | null;
-}
+};
 
 const monotonicNow = (): number =>
   globalThis.performance?.now?.() ?? Date.now();
 
-interface BasisRuntimeProviderResult {
+type BasisRuntimeProviderResult = {
   basisEncoder: unknown;
   initializedNow: boolean;
-}
+};
 
-export interface DecodeTileOptions {
+export type DecodeTileOptions = {
   modules?: Record<string, unknown>;
   fetchDependency?: (url: string) => Promise<ArrayBuffer>;
   decodeRasterImage?: (
@@ -79,16 +79,16 @@ export interface DecodeTileOptions {
     modules: Record<string, unknown>,
   ) => Promise<BasisRuntimeProviderResult>;
   now?: () => number;
-}
+};
 
-interface ExpandedAccessor {
+type ExpandedAccessor = {
   value: ArrayBufferView;
   count?: number;
   type?: string;
   componentType?: number;
-}
+};
 
-interface GltfAccessor {
+type GltfAccessor = {
   bufferView?: number;
   byteOffset?: number;
   componentType: number;
@@ -96,27 +96,27 @@ interface GltfAccessor {
   type: string;
   normalized?: boolean;
   sparse?: unknown;
-}
+};
 
-interface GltfBufferView {
+type GltfBufferView = {
   buffer: number;
   byteOffset?: number;
   byteLength: number;
   byteStride?: number;
-}
+};
 
-interface GltfBuffer {
+type GltfBuffer = {
   arrayBuffer: ArrayBuffer;
   byteOffset: number;
   byteLength: number;
-}
+};
 
-interface GltfTextureInfo {
+type GltfTextureInfo = {
   index: number;
   texCoord?: number;
-}
+};
 
-interface GltfMaterial {
+type GltfMaterial = {
   name?: string;
   pbrMetallicRoughness?: {
     baseColorFactor?: number[];
@@ -131,7 +131,7 @@ interface GltfMaterial {
   extensions?: {
     KHR_materials_unlit?: Record<string, never>;
   };
-}
+};
 
 /**
  * Required extensions this decoder can actually honour.
@@ -171,49 +171,49 @@ const validateRequiredExtensions = (json: GltfJson, tileUri: string): void => {
   }
 };
 
-interface GltfPrimitive {
+type GltfPrimitive = {
   attributes: Record<string, number | ExpandedAccessor>;
   indices?: number | ExpandedAccessor;
   material?: number;
   mode?: number;
-}
+};
 
-interface GltfMesh {
+type GltfMesh = {
   primitives: GltfPrimitive[];
-}
+};
 
-interface GltfNode {
+type GltfNode = {
   mesh?: number;
   children?: number[];
   matrix?: number[];
   translation?: number[];
   rotation?: number[];
   scale?: number[];
-}
+};
 
-interface GltfScene {
+type GltfScene = {
   nodes?: number[];
-}
+};
 
-interface GltfImage {
+type GltfImage = {
   uri?: string;
   bufferView?: number;
   mimeType?: string;
-}
+};
 
-interface GltfTexture {
+type GltfTexture = {
   source?: number;
   sampler?: number;
-}
+};
 
-interface GltfSampler {
+type GltfSampler = {
   magFilter?: number;
   minFilter?: number;
   wrapS?: number;
   wrapT?: number;
-}
+};
 
-interface GltfJson {
+type GltfJson = {
   scene?: number;
   scenes?: GltfScene[];
   nodes?: GltfNode[];
@@ -226,7 +226,7 @@ interface GltfJson {
   materials?: GltfMaterial[];
   extensionsUsed?: string[];
   extensionsRequired?: string[];
-}
+};
 
 const GLTF_MAG_FILTERS = new Set([9728, 9729]);
 const GLTF_MIN_FILTERS = new Set([9728, 9729, 9984, 9985, 9986, 9987]);
@@ -245,21 +245,21 @@ const samplerValue = <T extends number>(
   return resolved as T;
 };
 
-interface ParsedGltf {
+type ParsedGltf = {
   json: GltfJson;
   buffers: GltfBuffer[];
-}
+};
 
-interface TextureResult {
+type TextureResult = {
   texture: DecodedTexture;
   orientation: string;
   sourceColorSpace: "srgb" | "linear";
-}
+};
 
-interface PendingPrimitive {
+type PendingPrimitive = {
   rtc: RtcPrimitiveResult;
   materialIndex?: number;
-}
+};
 
 const GLB_MAGIC = 0x46546c67;
 const GLB_JSON_CHUNK = 0x4e4f534a;
@@ -360,11 +360,11 @@ const validUrl = (value: string, label: string): string => {
   }
 };
 
-interface DataUriDescriptor {
+type DataUriDescriptor = {
   mediaType?: string;
   payload: string;
   base64: boolean;
-}
+};
 
 const dataUriDescriptor = (value: string): DataUriDescriptor | null => {
   if (!/^data:/iu.test(value)) return null;
