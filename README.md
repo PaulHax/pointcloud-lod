@@ -800,13 +800,17 @@ projections are first class: a perspective view shrinks a node's projected
 spacing with distance, a parallel one is set purely by `parallelScale`, so an
 orthographic camera refines on zoom rather than on approach.
 
-## License
-
-[MIT](./LICENSE)
-
 ### Point rendering contract
 
 Tile mappers explicitly select `vtkPointGaussianMapper` simple-point mode with
 `scaleFactor: 0`. CSS-pixel conversion uses the fork's `pointSizeScale`
 extension. Adaptive density uses `maximumPointCount` to submit a prefix without
 reuploading resident buffers. Gaussian rendering is not required or enabled.
+
+Custom host integrations must keep `scaleFactor` at zero when applying device
+pixel ratio. Use `pointSizeScale` for that conversion; a nonzero `scaleFactor`
+requests Gaussian rendering and is rejected by the pinned vtk.js mapper.
+
+## License
+
+[MIT](./LICENSE)
