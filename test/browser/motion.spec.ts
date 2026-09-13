@@ -275,12 +275,6 @@ describe("an orbit reversing as fast as the page will take it", () => {
 const MOTION_SECONDS = 6;
 /** A video-driven camera never jumps; it never stops either. */
 const MOTION_DEGREES_PER_FRAME = 0.15;
-/**
- * The regime is not asserted over the first moments of the drive: the first
- * camera a view supplies is a baseline rather than a movement, so nothing can
- * be inferred until a second frame has painted against it.
- */
-const REGIME_WARMUP_MS = 500;
 /** Motion debounce plus the settle window, with room for a slow paint. */
 const RELEASE_TIMEOUT_MS = 15_000;
 
@@ -297,24 +291,65 @@ describe("a camera fed small deltas at video cadence", () => {
           ).not.toBeNull();
           expect(start.governor!.regime).toBe("stationary");
 
-          const flowing = { asserted: 0, attributed: 0 };
-          const began = Date.now();
-          const { result: frames } = await watching(session, SAMPLE_MS, () =>
-            driveFrames(session, MOTION_SECONDS, async () => {
-              await session.azimuth(MOTION_DEGREES_PER_FRAME);
-              const view = (await session.stats()).governor;
-              if (Date.now() - began < REGIME_WARMUP_MS) return;
-              flowing.asserted += 1;
-              // Deltas are still arriving, so the governor has no grounds to
-              // treat the view as settled — this is the sample a latch-free
-              // regime must never miss.
-              expect(
-                view?.regime,
-                `the governor left the interaction regime while deltas were still arriving: ${JSON.stringify(view)}`,
-              ).toBe("interaction");
-              if (view?.motion.source !== null) flowing.attributed += 1;
-            }),
+          const { result } = await watching(session, SAMPLE_MS, () =>
+            session.page.evaluate(
+              ({ durationMs, degrees }) =>
+                new Promise<{
+                  frames: number;
+                  samples: { regime: string; source: string | null }[];
+                }>((resolve) => {
+                  const example = (
+                    window as unknown as {
+                      pointCloudExample: {
+                        camera: { azimuth(value: number): void };
+                        stats(): ExampleStats;
+                      };
+                    }
+                  ).pointCloudExample;
+                  const samples: { regime: string; source: string | null }[] =
+                    [];
+                  const began = performance.now();
+                  let frames = 0;
+                  const step = (): void => {
+                    // The render queued by the previous delta runs before this
+                    // callback, so the sample belongs to the camera just painted.
+                    if (frames > 1) {
+                      const view = example.stats().governor;
+                      if (view)
+                        samples.push({
+                          regime: view.regime,
+                          source: view.motion.source,
+                        });
+                    }
+                    if (performance.now() - began >= durationMs && frames > 1) {
+                      resolve({ frames, samples });
+                      return;
+                    }
+                    example.camera.azimuth(degrees);
+                    frames += 1;
+                    requestAnimationFrame(step);
+                  };
+                  requestAnimationFrame(step);
+                }),
+              {
+                durationMs: MOTION_SECONDS * 1000,
+                degrees: MOTION_DEGREES_PER_FRAME,
+              },
+            ),
           );
+          const frames = result.frames;
+          const flowing = {
+            asserted: result.samples.length,
+            attributed: result.samples.filter(
+              (sample) => sample.source !== null,
+            ).length,
+          };
+          for (const sample of result.samples) {
+            expect(
+              sample.regime,
+              `camera delta frame: ${JSON.stringify(sample)}`,
+            ).toBe("interaction");
+          }
 
           // Not a frame rate. A software rasteriser painting a few million
           // points manages single digits per second, which says nothing about
