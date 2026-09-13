@@ -146,7 +146,7 @@ const checkExampleBundle = () => {
     vtkOpenGLActor: registers(text, "vtkOpenGLActor"),
     // World-space point sizing is the fork feature the pinned commit adds.
     worldSize:
-      /["'`]scaleFactor["'`]\s*,\s*["'`]circle["'`]\s*,\s*["'`]worldSize["'`]/.test(
+      /["'`]pointSizeScale["'`]\s*,\s*["'`]circle["'`]\s*,\s*["'`]worldSize["'`]/.test(
         text,
       ),
     // Progressive density depends on this core mapper API reaching the bundle;
