@@ -1715,10 +1715,10 @@ Object.assign(window, {
         pointSizeDevicePx: first
           ? (first.getProperty().getPointSize() ?? null)
           : null,
-        mapperScaleFactor: first
+        mapperPointSizeScale: first
           ? ((
-              first.getMapper() as { getScaleFactor?: () => number }
-            ).getScaleFactor?.() ?? null)
+              first.getMapper() as { getPointSizeScale?: () => number }
+            ).getPointSizeScale?.() ?? null)
           : null,
       };
     },

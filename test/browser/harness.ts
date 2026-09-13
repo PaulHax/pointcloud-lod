@@ -183,7 +183,7 @@ export type Viewport = {
 export type SceneReading = {
   actors: number;
   pointSizeDevicePx: number | null;
-  mapperScaleFactor: number | null;
+  mapperPointSizeScale: number | null;
 };
 
 export type ExampleSession = {

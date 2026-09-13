@@ -296,8 +296,8 @@ export const createRendererAdapter = (
 
   const applyTileState = (keyString: string, entry: TileActors): void => {
     // The actor property remains in CSS pixels. The custom dense-point mapper
-    // multiplies it by scaleFactor before assigning physical gl_PointSize.
-    entry.mapper.setScaleFactor(devicePixelRatio);
+    // multiplies it by pointSizeScale before assigning physical gl_PointSize.
+    entry.mapper.setPointSizeScale(devicePixelRatio);
     entry.drawnPointCount = prefixFor(keyString, entry);
     entry.mapper.setMaximumPointCount(entry.drawnPointCount);
     entry.actor.getProperty().setPointSize(diameterCssPx);
@@ -318,7 +318,7 @@ export const createRendererAdapter = (
         }),
       );
     }
-    const mapper = vtkPointGaussianMapper.newInstance();
+    const mapper = vtkPointGaussianMapper.newInstance({ scaleFactor: 0 });
     mapper.setInputData(polyData);
     mapper.setStatic?.(true);
     const actor = vtkActor.newInstance();
@@ -465,7 +465,7 @@ export const createRendererAdapter = (
       if (!acceptsScalar(nextDevicePixelRatio, devicePixelRatio)) return;
       devicePixelRatio = nextDevicePixelRatio;
       for (const entry of tiles.values()) {
-        entry.mapper.setScaleFactor(nextDevicePixelRatio);
+        entry.mapper.setPointSizeScale(nextDevicePixelRatio);
       }
       scheduleRender();
     },

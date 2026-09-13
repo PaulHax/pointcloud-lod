@@ -97,13 +97,13 @@ export const makeActor = (): StubActor => {
 export type StubMapper = {
   setInputData: (data: unknown) => void;
   setStatic: (value: boolean) => void;
-  setScaleFactor: (scale: number) => void;
+  setPointSizeScale: (scale: number) => void;
   setMaximumPointCount: (count: number) => void;
   setViewSpecificProperties: (properties: StubViewSpecificProperties) => void;
   delete: () => void;
   inputData: unknown;
   static: boolean;
-  scaleFactor: number;
+  pointSizeScale: number;
   maximumPointCount: number;
   deleted: boolean;
   viewSpecificProperties: StubViewSpecificProperties;
@@ -127,7 +127,7 @@ export const makeMapper = (): StubMapper => {
   const mapper: StubMapper = {
     inputData: null,
     static: false,
-    scaleFactor: 1,
+    pointSizeScale: 1,
     maximumPointCount: -1,
     deleted: false,
     viewSpecificProperties: {},
@@ -137,8 +137,8 @@ export const makeMapper = (): StubMapper => {
     setStatic(value) {
       mapper.static = value;
     },
-    setScaleFactor(scale) {
-      mapper.scaleFactor = scale;
+    setPointSizeScale(scale) {
+      mapper.pointSizeScale = scale;
     },
     setMaximumPointCount(count) {
       mapper.maximumPointCount = count;
