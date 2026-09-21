@@ -101,9 +101,9 @@ describe("vtk mesh adapter", () => {
         numberOfComponents: number;
       };
       expect(scalars.numberOfComponents).toBe(4);
-      expect([...scalars.values.slice(0, 4)]).toEqual([
-        ...new Float32Array([0.5, 0.3, 0.175, 0.4]),
-      ]);
+      expect(scalars.values.slice(0, 4)).toEqual(
+        new Float32Array([0.5, 0.3, 0.175, 0.4]),
+      );
     }
     expect(
       mapperInstances.every(
