@@ -95,6 +95,10 @@ export const makeActor = (): StubActor => {
 };
 
 export type StubMapper = {
+  setColorModeToDirectScalars: () => void;
+  setScalarVisibility: (value: boolean) => void;
+  directScalars: boolean;
+  scalarVisibility: boolean;
   setInputData: (data: unknown) => void;
   setStatic: (value: boolean) => void;
   setPointSizeScale: (scale: number) => void;
@@ -125,6 +129,14 @@ export const mapperInstances: StubMapper[] = [];
 
 export const makeMapper = (): StubMapper => {
   const mapper: StubMapper = {
+    directScalars: false,
+    scalarVisibility: false,
+    setColorModeToDirectScalars() {
+      mapper.directScalars = true;
+    },
+    setScalarVisibility(value) {
+      mapper.scalarVisibility = value;
+    },
     inputData: null,
     static: false,
     pointSizeScale: 1,

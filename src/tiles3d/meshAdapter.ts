@@ -262,6 +262,7 @@ const retainedGeometryBytes = (
     triangles * 4 * Uint32Array.BYTES_PER_ELEMENT +
     primitive.positions.byteLength +
     (primitive.normals?.byteLength ?? 0) +
+    (primitive.colors?.byteLength ?? 0) +
     (primitive.uvs?.byteLength ?? 0)
   );
 };
@@ -361,6 +362,7 @@ const splits = (primitive: DecodedPrimitive, maxJobBytes: number): boolean =>
 const bytesPerTriangle = (primitive: DecodedPrimitive): number =>
   9 * Float32Array.BYTES_PER_ELEMENT +
   (primitive.normals ? 9 * Float32Array.BYTES_PER_ELEMENT : 0) +
+  (primitive.colors ? 12 * Float32Array.BYTES_PER_ELEMENT : 0) +
   (primitive.uvs ? 6 * Float32Array.BYTES_PER_ELEMENT : 0) +
   4 * Uint32Array.BYTES_PER_ELEMENT;
 
@@ -381,6 +383,9 @@ const primitiveChunk = (
   const normals = primitive.normals
     ? new Float32Array(triangleCount * 9)
     : undefined;
+  const colors = primitive.colors
+    ? new Float32Array(triangleCount * 12)
+    : undefined;
   const uvs = primitive.uvs ? new Float32Array(triangleCount * 6) : undefined;
   for (
     let localTriangle = 0;
@@ -400,6 +405,12 @@ const primitiveChunk = (
           (localTriangle * 3 + corner) * 3,
         );
       }
+      if (colors && primitive.colors) {
+        colors.set(
+          primitive.colors.subarray(vertex * 4, vertex * 4 + 4),
+          (localTriangle * 3 + corner) * 4,
+        );
+      }
       if (uvs && primitive.uvs) {
         uvs.set(
           primitive.uvs.subarray(vertex * 2, vertex * 2 + 2),
@@ -411,6 +422,7 @@ const primitiveChunk = (
   return {
     positions,
     ...(normals ? { normals } : {}),
+    ...(colors ? { colors } : {}),
     ...(uvs ? { uvs } : {}),
     material: primitive.material,
   };
@@ -589,11 +601,30 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
       actor.setMapper(mapper);
       const factor = primitive.material.baseColorFactor;
       const authored = primitive.material.raw;
+      if (primitive.colors) {
+        const colors = primitive.colors.map((value, index) =>
+          index % 4 === 3 && authored.alphaMode === "OPAQUE"
+            ? 1
+            : value * factor[index % 4]!,
+        );
+        polyData.getPointData().setScalars(
+          vtkDataArray.newInstance({
+            name: "Colors",
+            values: colors,
+            numberOfComponents: 4,
+          }),
+        );
+        mapper.setColorModeToDirectScalars();
+        mapper.setScalarVisibility(true);
+        logicalGeometryUploadBytes += colors.byteLength;
+      }
       actor.getProperty().setLighting(!authored.unlit);
       actor.getProperty().setColor(factor[0], factor[1], factor[2]);
       actor
         .getProperty()
-        .setOpacity(authored.alphaMode === "OPAQUE" ? 1 : factor[3]);
+        .setOpacity(
+          authored.alphaMode === "OPAQUE" || primitive.colors ? 1 : factor[3],
+        );
       actor.setForceOpaque(authored.alphaMode !== "BLEND");
       actor.setForceTranslucent(authored.alphaMode === "BLEND");
       const replacement = alphaShaderReplacement(authored);

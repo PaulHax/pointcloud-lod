@@ -18,6 +18,7 @@ export const collectContentBuffers = (
     for (const array of [
       primitive.positions,
       primitive.normals,
+      primitive.colors,
       primitive.uvs,
       primitive.indices,
     ]) {

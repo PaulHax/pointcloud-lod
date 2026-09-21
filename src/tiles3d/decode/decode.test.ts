@@ -1062,3 +1062,47 @@ describe("decoded tile contract", () => {
     });
   });
 });
+
+it.each(["VEC3", "VEC4"] as const)(
+  "preserves %s vertex colors in worker transfer and accounting",
+  async (type) => {
+    const document = new Document();
+    const buffer = document.createBuffer();
+    const positions = document
+      .createAccessor()
+      .setBuffer(buffer)
+      .setType("VEC3")
+      .setArray(new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]));
+    const values =
+      type === "VEC3"
+        ? [1, 0, 0, 0, 1, 0, 0, 0, 1]
+        : [1, 0, 0, 0.5, 0, 1, 0, 1, 0, 0, 1, 0.25];
+    const colors = document
+      .createAccessor()
+      .setBuffer(buffer)
+      .setType(type)
+      .setArray(new Float32Array(values));
+    const primitive = document
+      .createPrimitive()
+      .setAttribute("POSITION", positions)
+      .setAttribute("COLOR_0", colors);
+    document
+      .createScene()
+      .addChild(
+        document
+          .createNode()
+          .setMesh(document.createMesh().addPrimitive(primitive)),
+      );
+    const bytes = await new NodeIO().writeBinary(document);
+    const result = await decodeTileContent({
+      ...(await request("level-0-root.glb")),
+      content: Uint8Array.from(bytes).buffer,
+    });
+    const decoded = result.primitives[0]!.colors!;
+    expect([...decoded]).toEqual(
+      type === "VEC4" ? values : [1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 1],
+    );
+    expect(buildTransferList(result)).toContain(decoded.buffer);
+    expect(result.byteEstimate.geometry).toBe(36 + 48);
+  },
+);
