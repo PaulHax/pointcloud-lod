@@ -67,6 +67,53 @@ const alphaContent = (
 describe("vtk mesh adapter", () => {
   beforeEach(resetStubs);
 
+  it("keeps vertex colors through bounded geometry submissions", () => {
+    const scheduler = createSubmissionScheduler({
+      scheduleRender: vi.fn(),
+      maxBytesPerFrame: 128,
+      now: () => 0,
+    });
+    const adapter = createMeshAdapter({
+      renderer: { addActor: vi.fn(), removeActor: vi.fn() },
+      submissions: scheduler,
+      scheduleRender: vi.fn(),
+    });
+    const payload = content();
+    payload.primitives.splice(1);
+    const primitive = payload.primitives[0]!;
+    primitive.positions = new Float32Array([
+      ...primitive.positions,
+      ...primitive.positions,
+    ]);
+    delete primitive.normals;
+    delete primitive.uvs;
+    delete primitive.indices;
+    delete primitive.material.baseColorTexture;
+    primitive.colors = new Float32Array(
+      Array.from({ length: 6 }, () => [1, 0.5, 0.25, 0.5]).flat(),
+    );
+    adapter.submitTile("colored", payload);
+    while (scheduler.hasPending()) scheduler.prepareFrame();
+    expect(polyDataInstances).toHaveLength(2);
+    for (const polyData of polyDataInstances) {
+      const scalars = polyData.scalars as {
+        values: Float32Array;
+        numberOfComponents: number;
+      };
+      expect(scalars.numberOfComponents).toBe(4);
+      expect([...scalars.values.slice(0, 4)]).toEqual([
+        ...new Float32Array([0.5, 0.3, 0.175, 0.4]),
+      ]);
+    }
+    expect(
+      mapperInstances.every(
+        (mapper) => mapper.directScalars && mapper.scalarVisibility,
+      ),
+    ).toBe(true);
+    expect(actorInstances.every((actor) => actor.opacity === 1)).toBe(true);
+    adapter.dispose();
+  });
+
   it("reports admission and pooled memory without detailed diagnostics", () => {
     const scheduler = createSubmissionScheduler({
       scheduleRender: vi.fn(),

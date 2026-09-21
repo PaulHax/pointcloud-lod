@@ -130,6 +130,7 @@ export type DecodedMaterial = {
 export type DecodedPrimitive = {
   positions: Float32Array;
   normals?: Float32Array;
+  colors?: Float32Array;
   uvs?: Float32Array;
   indices?: Uint16Array | Uint32Array;
   material: DecodedMaterial;

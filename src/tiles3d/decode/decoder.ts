@@ -258,6 +258,7 @@ type TextureResult = {
 
 type PendingPrimitive = {
   rtc: RtcPrimitiveResult;
+  colors?: Float32Array;
   materialIndex?: number;
 };
 
@@ -798,7 +799,7 @@ const normalizedComponent = (value: number, componentType: number): number => {
 
 const accessorFloats = (
   reference: number | ExpandedAccessor | undefined,
-  expectedType: "VEC2" | "VEC3",
+  expectedType: "VEC2" | "VEC3" | "VEC4",
   gltf: ParsedGltf,
 ): Float32Array | undefined => {
   if (reference === undefined) return undefined;
@@ -1022,6 +1023,39 @@ const nodeMatrix = (node: GltfNode): Mat4 => {
   ];
 };
 
+const vertexColors = (
+  reference: number | ExpandedAccessor | undefined,
+  gltf: ParsedGltf,
+  vertexCount: number,
+): Float32Array | undefined => {
+  if (reference === undefined) return undefined;
+  const accessor =
+    typeof reference === "number"
+      ? requireIndex(gltf.json.accessors, reference, "color accessor")
+      : reference;
+  if (accessor.type !== "VEC3" && accessor.type !== "VEC4") {
+    throw new Error("glTF COLOR_0 must be VEC3 or VEC4");
+  }
+  const values = accessorFloats(reference, accessor.type, gltf)!;
+  const components = accessor.type === "VEC3" ? 3 : 4;
+  if (
+    values.length !== vertexCount * components ||
+    values.some((value) => !Number.isFinite(value) || value < 0 || value > 1)
+  ) {
+    throw new Error(
+      "glTF COLOR_0 must match POSITION and contain normalized colors",
+    );
+  }
+  const colors = new Float32Array(vertexCount * 4).fill(1);
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    colors.set(
+      values.subarray(vertex * components, (vertex + 1) * components),
+      vertex * 4,
+    );
+  }
+  return colors;
+};
+
 const applySceneRtc = (
   gltf: ParsedGltf,
   sceneTransform: Mat4,
@@ -1093,7 +1127,13 @@ const applySceneRtc = (
         }
         if (primitive.mode === 5)
           indices = triangulateStrip(indices, vertexCount);
+        const colors = vertexColors(
+          primitive.attributes.COLOR_0,
+          gltf,
+          vertexCount,
+        );
         pending.push({
+          ...(colors ? { colors } : {}),
           rtc: flattenPrimitiveToRtc(
             {
               positions,
@@ -1620,7 +1660,8 @@ const decodeTileContentInner = async (
     textureCache: new Map(),
   };
   const primitives: DecodedPrimitive[] = await Promise.all(
-    pending.map(async ({ rtc, materialIndex }) => ({
+    pending.map(async ({ rtc, materialIndex, colors }) => ({
+      ...(colors ? { colors } : {}),
       positions: rebasePositions(rtc, origin),
       ...(rtc.normals ? { normals: rtc.normals } : {}),
       ...(rtc.uvs ? { uvs: rtc.uvs } : {}),
