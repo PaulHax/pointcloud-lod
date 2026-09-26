@@ -228,11 +228,24 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
    * strip of ground with everything behind it clipped away.
    */
   let framingBounds: readonly number[] | null = null;
-  const refreshClippingRange = (): void => {
-    const visible = sceneIsEmpty()
-      ? null
-      : (renderer.computeVisiblePropBounds() as number[]);
-    const bounds = framingBounds ? [...framingBounds] : visible;
+  /**
+   * The visible props' bounds when last measured. Measuring asks every prop
+   * for its bounds, which with a tile per actor costs milliseconds.
+   */
+  let visibleBounds: readonly number[] | null = null;
+  /**
+   * Reset the range for the current camera against the bounds last measured.
+   * Before `prepareFrame` those are the last paint's: the camera may have moved
+   * since, and the measurement after `prepareFrame` covers whatever the frame
+   * adds before it paints.
+   */
+  const applyClippingRange = (): void => {
+    const visible = visibleBounds;
+    const bounds = framingBounds
+      ? [...framingBounds]
+      : visible
+        ? [...visible]
+        : null;
     if (!bounds) return;
     if (visible && framingBounds) {
       for (let axis = 0; axis < 3; axis += 1) {
@@ -244,6 +257,12 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
       }
     }
     renderer.resetCameraClippingRange(bounds);
+  };
+  const refreshClippingRange = (): void => {
+    visibleBounds = sceneIsEmpty()
+      ? null
+      : [...(renderer.computeVisiblePropBounds() as number[])];
+    applyClippingRange();
   };
 
   /**
@@ -300,7 +319,7 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
       // A gesture's own animation loop is already painting, and it drains
       // admission itself; a second paint here would double the drain.
       if (interactor.isAnimating()) return;
-      refreshClippingRange();
+      applyClippingRange();
       const view = cameraView();
       for (const listener of beforeFrameListeners)
         listener(view, currentDevicePixelRatio);
@@ -427,7 +446,7 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
   interactor.onStartAnimation(() => coordinator.beginInteraction());
   interactor.onAnimation(() => {
     // Fires before the gesture frame paints, which is where its drain belongs.
-    refreshClippingRange();
+    applyClippingRange();
     const view = cameraView();
     for (const listener of beforeFrameListeners)
       listener(view, currentDevicePixelRatio);
