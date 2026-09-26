@@ -104,7 +104,11 @@ export type ViewGovernorStats = {
     readonly rejected: number;
     readonly lastEligible: boolean | null;
   };
-  /** The target being steered to, raised if the display cannot beat it. */
+  /**
+   * The interval a frame may take and still be on time: the configured
+   * target rounded down to whole display refreshes, at least one, once the
+   * refresh period is known.
+   */
   readonly targetFrameTimeMs: number;
   /** The configured target, before the display quantum is taken into account. */
   readonly configuredFrameTimeMs: number;
