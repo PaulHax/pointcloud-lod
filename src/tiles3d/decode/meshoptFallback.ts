@@ -3,21 +3,17 @@
  * decoded, whether that content is a GLB or bare glTF JSON.
  *
  * `EXT_meshopt_compression` points each compressed buffer view at a *fallback*
- * buffer — storage that carries no bytes in the file and exists so a loader
- * without the extension has somewhere to look. Publishers exist that write
- * every compressed view at offset zero of one fallback buffer sized for them
- * all concatenated, which conformant renderers never notice because they
- * decode each view into storage of its own.
+ * buffer: storage that carries no bytes in the file and exists so a loader
+ * without the extension has somewhere to look. Some publishers write every
+ * compressed view at offset zero of one fallback buffer sized for them all
+ * concatenated. Conformant renderers decode each view into storage of its own
+ * and never notice, but loaders.gl decodes in place at the view's own offset,
+ * so overlapping views overwrite each other and the mesh comes out silently
+ * wrong. Nothing reports an error, so this runs in the decode path rather than
+ * being left to whoever supplies the content.
  *
- * loaders.gl decodes in place, into the fallback buffer at the view's own
- * offset, so a 152 KB vertex view lands on top of a 26 KB index view and the
- * tile draws as a fan of spikes radiating from whichever vertex the scrambled
- * indices happen to name. Nothing reports an error, which is why this runs in
- * the decode path rather than being left to whoever supplies the content: a
- * silently wrong mesh is the one failure a profile gate cannot catch.
- *
- * Giving each view a distinct offset — the layout the fallback buffer's size
- * says was intended — is enough, and it touches only the JSON chunk.
+ * Giving each view a distinct offset, the layout the fallback buffer's size
+ * says was intended, is enough, and it touches only the JSON chunk.
  */
 
 const GLB_MAGIC = 0x46546c67;
@@ -84,10 +80,8 @@ const repairOffsets = (gltf: Gltf): Gltf => {
     }
     const index = view.buffer!;
     const byteOffset = nextOffset.get(index) ?? 0;
-    // Padded, because an accessor may only start on a multiple of its
-    // component size and a compressed view's length is arbitrary — the
-    // 90,318-byte index view in a 3DBAG tile put the float attributes that
-    // follow it two bytes off, and the decode failed outright.
+    // Padded to 4 bytes, because an accessor must start on a multiple of its
+    // component size and a compressed view's length is arbitrary.
     nextOffset.set(index, padToFour(byteOffset + (view.byteLength ?? 0)));
     return { ...view, byteOffset };
   });

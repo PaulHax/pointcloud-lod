@@ -540,11 +540,6 @@ const normalizePresentation = (
 };
 
 /**
- * The one scalar that sizes each projection. Hosts feed views from untyped
- * JS, so an unrecognized discriminant reads as absent instead of silently
- * being treated as perspective.
- */
-/**
  * A camera whose numbers are not all finite would poison the frustum planes,
  * every screen-space error, and the selection comparisons that read them.
  */
@@ -707,10 +702,10 @@ export const createLodController = (
   const hierarchy = new Map<string, HierarchyEntry>();
 
   // Both priority metrics depend only on a node and the current view, so their
-  // values stay valid until the view moves. Selection and the ready-frontier
-  // walk both need them, and the frontier walk reruns on every tile arrival.
-  // A node whose hierarchy entry has not landed yet is deliberately NOT
-  // cached: it scores 0 now, and its page may arrive before the view moves.
+  // values stay valid until the view moves. Selection, request ordering and
+  // the terminal walk all read them, repeatedly within one pass. A node whose
+  // hierarchy entry has not landed yet is deliberately NOT cached: its page
+  // may arrive before the view moves.
   const sseByKey = new Map<string, number>();
   const centerOffsetByKey = new Map<string, number>();
   const sseFor = (keyString: string): number => {
@@ -1023,14 +1018,14 @@ export const createLodController = (
     clearReadCancellation(read);
   };
 
-  // Cancellation is advisory wherever it matters: `abort()` marks a result
-  // unwanted, but the COPC getter takes no signal, so the range read and the
-  // decode keep burning I/O and CPU until the promise settles. Concurrency is
-  // therefore counted on the physical operation — otherwise a
-  // look-away/look-back storm starts a fresh read per gesture while every
-  // abandoned one is still running, and the ceilings bound nothing at all.
-  // These drop only when a promise settles, epoch changes included: ignoring a
-  // result is not the same as stopping the work behind it.
+  // Cancellation is advisory: `abort()` marks a result unwanted, but a source
+  // may keep reading and decoding until its promise settles (a COPC decode
+  // already under way runs to the end). Concurrency is therefore counted on
+  // the physical operation; otherwise a look-away/look-back storm starts a
+  // fresh read per gesture while every abandoned one is still running, and
+  // the ceilings bound nothing at all. These drop only when a promise
+  // settles, epoch changes included: ignoring a result is not the same as
+  // stopping the work behind it.
   let physicalTileOperations = 0;
   let physicalHierarchyOperations = 0;
 
@@ -1331,30 +1326,19 @@ export const createLodController = (
   };
 
   /**
-   * Size Auto points for the selected density, not the subset that has happened
-   * to finish loading.
-   *
-   * The ready frontier is intentionally conservative: while any selected child
-   * is missing, its ready parent remains a terminal so the diagnostic describes
-   * what is on screen. Using that same frontier for one global point diameter
-   * makes streaming unstable, though. Several fine tiles can land under the
-   * coarse diameter, then the last sibling makes the parent cease to be a
-   * terminal and every actor shrinks at once. More fine tiles subsequently land,
-   * producing a dense → sparse → dense sequence with an unchanged selection.
-   *
-   * Selection already states the density the completed frame is converging on.
-   * Following its terminals moves the diameter once, with the selection, and
-   * leaves tile arrivals to add detail monotonically. Hierarchy- and
-   * budget-blocked branches still retain their closest sampled parent because
-   * no selected descendant describes a finer density there.
-   */
-  /**
    * The coarsest projected spacing any terminal leaves on screen, or null when
    * nothing is drawn. Auto sizing derives the point diameter from it, and it
    * is the one continuous measure of how finely the current view is resolved.
    */
   let largestTerminalSpacingCssPx: number | null = null;
 
+  /**
+   * Size Auto points for the density the selection is converging on, not the
+   * subset that has finished loading: the diameter moves once, with the
+   * selection, and tile arrivals only add detail. Hierarchy- and
+   * budget-blocked branches keep their closest sampled parent as a terminal,
+   * because no selected descendant describes a finer density there.
+   */
   const updateAutoDiameter = (): void => {
     if (
       view === null ||
@@ -1427,9 +1411,9 @@ export const createLodController = (
           clearReadCancellation(read);
           tileReads.delete(keyString);
           tileFailures.delete(keyString);
-          // Cancellation is advisory: the COPC getter takes no signal, so a
-          // cancelled read still delivers. If the key was reselected while it
-          // ran, this payload is exactly what the selection is waiting for.
+          // Cancellation is advisory, so a cancelled read can still deliver.
+          // If the key was reselected while it ran, this payload is exactly
+          // what the selection is waiting for.
           if (target.has(keyString) && !resident.has(keyString)) {
             takeResident(keyString, loadedTile);
             scheduleFlush();
@@ -1674,11 +1658,6 @@ export const createLodController = (
     updateDrawPlan();
   };
 
-  // Hosts feed the camera on every render, unconditionally; an unchanged view
-  // must be a no-op. Stamping it as a camera change would mark any render as
-  // "interacting" — including renders the settle-timer reselect itself
-  // triggers — flipping the regime back and oscillating between the two
-  // budgets forever.
   /** Bootstrap path for the root page, used before any camera exists. */
   const queueRootPage = (): void => queuePages([ROOT_KEY_STRING]);
 
@@ -1698,6 +1677,8 @@ export const createLodController = (
   return {
     setCamera(nextView) {
       if (disposed || !isFiniteView(nextView)) return;
+      // Hosts feed the camera on every render, so an unchanged view is a
+      // no-op rather than a reason to rerun selection.
       if (worldView !== null && sameCameraView(worldView, nextView)) return;
       worldView = nextView;
       applyWorldView();

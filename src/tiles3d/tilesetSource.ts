@@ -218,8 +218,10 @@ const affineMatrix = (value: unknown, path: string): readonly number[] => {
   return Object.freeze(matrix);
 };
 
-/** Column-major f64 matrix multiplication. */
-/** Unvalidated product: tile transforms are checked when the tileset is read. */
+/**
+ * Column-major f64 product, unvalidated: tile transforms are checked when the
+ * tileset is read.
+ */
 export const multiplyTilesetMatrices = (
   left: readonly number[],
   right: readonly number[],

@@ -59,9 +59,9 @@ export type MemoryPoolOptions = {
 
 export type MemoryPool = {
   /**
-   * Join the pool. `onChange` fires whenever this member's share moves —
-   * another member joined or left, or the total changed — but never during
-   * this `register` call itself.
+   * Join the pool. `onChange` fires whenever this member's share moves
+   * because another member joined or left, but never during this `register`
+   * call itself.
    */
   register(onChange?: () => void): MemoryPoolMember;
   memberCount(): number;

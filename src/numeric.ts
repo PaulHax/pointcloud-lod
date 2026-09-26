@@ -84,7 +84,7 @@ export const percentileOrNull = (
   p: number,
 ): number | null => (values.length === 0 ? null : percentile(values, p));
 
-/** Construction guard for bounded fractions (percentile, hysteresis, steps). */
+/** Construction guard for a bounded value, such as a tolerance or a step. */
 export const finiteWithin = (
   name: string,
   value: number,

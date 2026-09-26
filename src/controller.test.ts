@@ -1083,7 +1083,7 @@ describe("createLodController", () => {
   });
 });
 
-describe("createLodController — ready frontier and presentation", () => {
+describe("createLodController — terminal spacing and presentation", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
