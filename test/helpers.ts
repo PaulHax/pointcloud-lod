@@ -1,4 +1,5 @@
-import { IDENTITY, type PerspectiveCameraView } from "../src/camera";
+import type { PerspectiveCameraView } from "../src/camera";
+import { IDENTITY } from "../src/mat4";
 
 /** An identity view-projection at the origin over a 100x100 css-px viewport. */
 export const perspectiveView = (

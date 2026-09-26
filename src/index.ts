@@ -23,9 +23,10 @@ export {
   type CameraView,
   type PerspectiveCameraView,
   type OrthographicCameraView,
-  type Mat16,
   type CursorRay,
 } from "./camera";
+
+export { validateAffineMatrix, type Mat16, type Mat4 } from "./mat4";
 
 // The picking machinery itself (ray building, prefilter, sweep) is internal:
 // the public query is `LodController.pickPoint`, and only its result shape and
@@ -187,11 +188,7 @@ export {
   type TileDecodeStage,
 } from "./tiles3d/decode";
 
-export {
-  createEcefToEnuTransform,
-  wgs84ToEcef,
-  type Mat4,
-} from "./tiles3d/rtc";
+export { createEcefToEnuTransform, wgs84ToEcef } from "./tiles3d/rtc";
 
 // The vtk.js renderer adapter is deliberately NOT re-exported here. It imports
 // vtk.js at module scope, so re-exporting it would make this entry point throw

@@ -1,11 +1,12 @@
 /** StreamedMember implementation for the constrained 3D Tiles profile. */
 
+import { sameCameraView, type CameraView } from "../camera";
 import {
-  sameCameraView,
+  multiply,
   sameMatrix,
-  type CameraView,
+  validateAffineMatrix,
   type Mat16,
-} from "../camera";
+} from "../mat4";
 import { safeCall } from "../observers";
 import {
   CULLED,
@@ -30,14 +31,12 @@ import {
   type Tiles3dMemberStats,
 } from "./memberTypes";
 import {
-  finiteAffineMatrix,
   validateTiles3dMemberConfig,
   type ResolvedTiles3dConfig,
 } from "./memberConfig";
 import { createVerticalExaggerationTransform } from "./rtc";
 import {
   loadTileset,
-  multiplyTilesetMatrices,
   type TilesetSource,
   type TilesetTile,
 } from "./tilesetSource";
@@ -188,11 +187,11 @@ export const createTiles3dMember = (
     );
 
   const exaggeratedEcefToScene = (): readonly number[] =>
-    multiplyTilesetMatrices(verticalExaggeration(), config.tilesetToScene);
+    multiply(verticalExaggeration(), config.tilesetToScene);
 
   const traversalModelMatrix = (): readonly number[] =>
     modelMatrix
-      ? multiplyTilesetMatrices(modelMatrix, exaggeratedEcefToScene())
+      ? multiply(modelMatrix, exaggeratedEcefToScene())
       : exaggeratedEcefToScene();
 
   /**
@@ -202,7 +201,7 @@ export const createTiles3dMember = (
    */
   const placementMatrix = (): readonly number[] =>
     modelMatrix
-      ? multiplyTilesetMatrices(modelMatrix, verticalExaggeration())
+      ? multiply(modelMatrix, verticalExaggeration())
       : verticalExaggeration();
 
   const applyPlacement = (): void => {
@@ -879,9 +878,7 @@ export const createTiles3dMember = (
       if (sameMatrix(modelMatrix, matrix ?? null)) return;
       try {
         modelMatrix =
-          matrix === null
-            ? null
-            : finiteAffineMatrix(Array.from(matrix), "model matrix");
+          matrix === null ? null : validateAffineMatrix(matrix, "model matrix");
       } catch (error) {
         report(error);
         return;

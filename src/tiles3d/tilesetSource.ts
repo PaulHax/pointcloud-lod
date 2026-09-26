@@ -3,7 +3,7 @@
  * by the streamed-scene mesh member.
  */
 
-import { IDENTITY, multiply4 } from "../camera";
+import { IDENTITY, affineProblem, linearDeterminant, multiply } from "../mat4";
 
 export type TilesetFetchResponse = {
   readonly ok: boolean;
@@ -185,42 +185,17 @@ const determinant3 = (m: readonly number[]): number =>
 const affineMatrix = (value: unknown, path: string): readonly number[] => {
   if (value === undefined) return IDENTITY;
   const matrix = finiteArray(value, 16, path);
-  if (
-    Math.abs(matrix[3]!) > 1e-12 ||
-    Math.abs(matrix[7]!) > 1e-12 ||
-    Math.abs(matrix[11]!) > 1e-12 ||
-    Math.abs(matrix[15]! - 1) > 1e-12
-  ) {
+  if (affineProblem(matrix) !== null) {
     throw new TilesetValidationError(
       path,
       "expected a column-major affine matrix",
     );
   }
-  const linear = [
-    matrix[0]!,
-    matrix[1]!,
-    matrix[2]!,
-    matrix[4]!,
-    matrix[5]!,
-    matrix[6]!,
-    matrix[8]!,
-    matrix[9]!,
-    matrix[10]!,
-  ];
-  if (Math.abs(determinant3(linear)) <= Number.EPSILON) {
+  if (Math.abs(linearDeterminant(matrix)) <= Number.EPSILON) {
     throw new TilesetValidationError(path, "transform must be invertible");
   }
   return Object.freeze(matrix);
 };
-
-/**
- * Column-major f64 product, unvalidated: tile transforms are checked when the
- * tileset is read.
- */
-export const multiplyTilesetMatrices = (
-  left: readonly number[],
-  right: readonly number[],
-): readonly number[] => Object.freeze(multiply4(left, right));
 
 const normalizeEndpoint = (endpoint: string): string => {
   if (typeof endpoint !== "string" || endpoint.length === 0) {
@@ -538,7 +513,7 @@ const parseImplicitRootTile = (
     ".subtree",
   );
   const transform = affineMatrix(raw.transform, `${path}.transform`);
-  const worldTransform = multiplyTilesetMatrices(parentTransform, transform);
+  const worldTransform = Object.freeze(multiply(parentTransform, transform));
   const descriptor: TilesetImplicitTiling = Object.freeze({
     subdivisionScheme: "QUADTREE",
     subtreeLevels,
@@ -601,7 +576,7 @@ const parseTile = (
   }
 
   const transform = affineMatrix(raw.transform, `${path}.transform`);
-  const worldTransform = multiplyTilesetMatrices(parentTransform, transform);
+  const worldTransform = Object.freeze(multiply(parentTransform, transform));
   let uri: string | undefined;
   let resolved: string | undefined;
   if (raw.content !== undefined) {

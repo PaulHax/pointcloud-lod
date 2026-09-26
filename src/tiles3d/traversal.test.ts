@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 
-import { IDENTITY, type PerspectiveCameraView } from "../camera";
+import type { PerspectiveCameraView } from "../camera";
+import { IDENTITY } from "../mat4";
 import { parseTileset, type TilesetTile } from "./tilesetSource";
 import { createVerticalExaggerationTransform } from "./rtc";
 import {

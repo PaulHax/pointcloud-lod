@@ -1,4 +1,5 @@
-import type { CameraView, Mat16 } from "./camera";
+import type { CameraView } from "./camera";
+import type { Mat16 } from "./mat4";
 import type { MemoryPool } from "./memoryPool";
 import type { ScenePoint } from "./frames";
 import type { SubmissionScheduler } from "./submissionScheduler";

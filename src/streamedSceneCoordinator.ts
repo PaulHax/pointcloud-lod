@@ -1,9 +1,5 @@
-import {
-  sameCameraView,
-  sameMatrix,
-  type CameraView,
-  type Mat16,
-} from "./camera";
+import { sameCameraView, type CameraView } from "./camera";
+import { sameMatrix, type Mat16 } from "./mat4";
 import type { MemoryPool, MemoryPoolMember } from "./memoryPool";
 import { finiteNonNegative } from "./numeric";
 import { allocateViewQuality } from "./viewBudget";

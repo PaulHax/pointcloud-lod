@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { perspectiveView } from "../test/helpers";
-import type { CameraView, Mat16 } from "./camera";
+import type { CameraView } from "./camera";
+import type { Mat16 } from "./mat4";
 import { createMemoryPool } from "./memoryPool";
 import {
   createStreamedSceneCoordinator,

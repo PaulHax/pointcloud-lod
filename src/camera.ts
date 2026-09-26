@@ -1,20 +1,20 @@
 /**
- * Pure camera math for LOD selection: frustum extraction/culling from a
- * column-major view-projection matrix and screen-space error estimation.
- * No vtk.js imports — callers hand in plain arrays, so the module works in
- * any renderer, worker, or test without a GL context.
+ * Pure camera math for LOD selection: frustum extraction and culling from a
+ * column-major view-projection matrix, the screen-space error law, cursor
+ * rays, and camera comparisons. No vtk.js imports: callers hand in plain
+ * arrays, so the module works in any renderer, worker, or test without a GL
+ * context.
  */
 
+import {
+  invert,
+  multiply,
+  similarityScale,
+  transformPoint,
+  type Mat16,
+} from "./mat4";
 import { finitePositive } from "./numeric";
 import type { Bounds, Vec3 } from "./octree";
-
-/** Column-major 4x4 matrix, OpenGL layout (translation in indices 12..14). */
-export type Mat16 = ArrayLike<number>;
-
-/** Frozen: it is handed out as the default placement, not a scratch buffer. */
-export const IDENTITY: readonly number[] = Object.freeze([
-  1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
-]);
 
 type CameraViewCommon = {
   /** Column-major view-projection matrix. */
@@ -108,57 +108,19 @@ export const distanceToBounds = (point: Vec3, bounds: Bounds): number => {
   return Math.hypot(dx, dy, dz);
 };
 
-/**
- * Projected size of a world-space spacing, in pixels, under perspective
- * projection: how far apart this node's points land on screen. Distance is
- * clamped so a camera inside the node reports a very large (never infinite)
- * error.
- */
-export const perspectiveScreenSpaceError = (
-  spacing: number,
-  distance: number,
-  viewportHeightCssPx: number,
-  fovY: number,
-): number =>
-  (spacing * viewportHeightCssPx) /
-  (2 * Math.max(distance, 1e-9) * Math.tan(fovY / 2));
-
-/**
- * Projected size of a world-space spacing, in pixels, under parallel
- * projection. Distance does not appear: every point projects at the same
- * scale, fixed only by how much world height the viewport spans. Scale is
- * clamped for the same reason distance is above.
- */
-export const orthographicScreenSpaceError = (
-  spacing: number,
-  viewportHeightCssPx: number,
-  parallelScale: number,
-): number =>
-  (spacing * viewportHeightCssPx) / (2 * Math.max(parallelScale, 1e-9));
-
-/**
- * Screen-space error of one octree node, under whichever projection the view
- * declares: its level's point spacing projected at the node's distance from
- * the camera, or — under a parallel camera, where distance does not enter the
- * law at all — at the world height the viewport spans.
- */
-export const nodeScreenSpaceError = (
-  bounds: Bounds,
-  spacing: number,
+/** The one screen-space error law; see `PreparedView.screenSpaceError`. */
+const screenSpaceErrorLaw = (
   view: CameraView,
-): number =>
-  view.projection === "orthographic"
-    ? orthographicScreenSpaceError(
-        spacing,
-        view.viewportHeightCssPx,
-        view.parallelScale,
-      )
-    : perspectiveScreenSpaceError(
-        spacing,
-        distanceToBounds(view.position, bounds),
-        view.viewportHeightCssPx,
-        view.fovY,
-      );
+): ((length: number, distance: number) => number) => {
+  const heightCssPx = view.viewportHeightCssPx;
+  if (view.projection === "orthographic") {
+    const parallelScale = Math.max(view.parallelScale, 1e-9);
+    return (length) => (length * heightCssPx) / (2 * parallelScale);
+  }
+  const tanHalfFov = Math.tan(view.fovY / 2);
+  return (length, distance) =>
+    (length * heightCssPx) / (2 * Math.max(distance, 1e-9) * tanHalfFov);
+};
 
 /**
  * A homogeneous w at or below this is unusable: the point sits at or behind
@@ -222,67 +184,6 @@ export type CursorRay = {
   readonly direction: Vec3;
 };
 
-/** Cofactor inverse of a column-major 4x4; null when singular or non-finite. */
-const invert4 = (m: Mat16): number[] | null => {
-  const a00 = m[0]!,
-    a01 = m[1]!,
-    a02 = m[2]!,
-    a03 = m[3]!;
-  const a10 = m[4]!,
-    a11 = m[5]!,
-    a12 = m[6]!,
-    a13 = m[7]!;
-  const a20 = m[8]!,
-    a21 = m[9]!,
-    a22 = m[10]!,
-    a23 = m[11]!;
-  const a30 = m[12]!,
-    a31 = m[13]!,
-    a32 = m[14]!,
-    a33 = m[15]!;
-
-  const b00 = a00 * a11 - a01 * a10;
-  const b01 = a00 * a12 - a02 * a10;
-  const b02 = a00 * a13 - a03 * a10;
-  const b03 = a01 * a12 - a02 * a11;
-  const b04 = a01 * a13 - a03 * a11;
-  const b05 = a02 * a13 - a03 * a12;
-  const b06 = a20 * a31 - a21 * a30;
-  const b07 = a20 * a32 - a22 * a30;
-  const b08 = a20 * a33 - a23 * a30;
-  const b09 = a21 * a32 - a22 * a31;
-  const b10 = a21 * a33 - a23 * a31;
-  const b11 = a22 * a33 - a23 * a32;
-
-  const det =
-    b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
-  if (!Number.isFinite(det) || det === 0) return null;
-  const d = 1 / det;
-
-  const inverse = [
-    (a11 * b11 - a12 * b10 + a13 * b09) * d,
-    (a02 * b10 - a01 * b11 - a03 * b09) * d,
-    (a31 * b05 - a32 * b04 + a33 * b03) * d,
-    (a22 * b04 - a21 * b05 - a23 * b03) * d,
-    (a12 * b08 - a10 * b11 - a13 * b07) * d,
-    (a00 * b11 - a02 * b08 + a03 * b07) * d,
-    (a32 * b02 - a30 * b05 - a33 * b01) * d,
-    (a20 * b05 - a22 * b02 + a23 * b01) * d,
-    (a10 * b10 - a11 * b08 + a13 * b06) * d,
-    (a01 * b08 - a00 * b10 - a03 * b06) * d,
-    (a30 * b04 - a31 * b02 + a33 * b00) * d,
-    (a21 * b02 - a20 * b04 - a23 * b00) * d,
-    (a11 * b07 - a10 * b09 - a12 * b06) * d,
-    (a00 * b09 - a01 * b07 + a02 * b06) * d,
-    (a31 * b01 - a30 * b03 - a32 * b00) * d,
-    (a20 * b03 - a21 * b01 + a22 * b00) * d,
-  ];
-  for (const value of inverse) {
-    if (!Number.isFinite(value)) return null;
-  }
-  return inverse;
-};
-
 /** `inverse * [ndc, 1]`, homogenized; null when w collapses or goes wild. */
 const unprojectNdc = (
   inverse: readonly number[],
@@ -334,7 +235,7 @@ export const cursorRay = (
   ) {
     return null;
   }
-  const inverse = invert4(viewProj);
+  const inverse = invert(viewProj);
   if (inverse === null) return null;
   const ndcX = (2 * cursorXCssPx) / viewportWidthCssPx - 1;
   const ndcY = 1 - (2 * cursorYCssPx) / viewportHeightCssPx;
@@ -353,21 +254,13 @@ export const cursorRay = (
 };
 
 /**
- * Angular offset between a node's 3D centre and the camera's centre ray.
- * Zero is the innermost cone; larger values form concentric cones moving away
- * from the view centre. Selection only compares nodes at the same octree
- * level, where their bounds have equal size, so centres give the unblurred
- * spatial order without large coarse bounding spheres masking one another.
- *
- * Perspective views return radians. Parallel views have no angular spread,
- * so they return perpendicular world-space clearance normalized by the
- * viewport half-height. Both are dimensionless and ordered centre-out; their
- * magnitudes are never compared across different camera views.
+ * The ray through the viewport centre. A valid perspective eye lies on the
+ * centre line recovered from the matrix, so the explicit eye is its origin
+ * (the cone's true apex), unless an untyped host supplied an eye and a matrix
+ * that disagree: the matrix's own point is kept then, rather than inventing a
+ * skewed centre ray.
  */
-export const boundsCenterRayOffset = (
-  bounds: Bounds,
-  view: CameraView,
-): number => {
+const centerRay = (view: CameraView): CursorRay | null => {
   const ray = cursorRay(
     view.viewProj,
     view.viewportWidthCssPx / 2,
@@ -375,37 +268,31 @@ export const boundsCenterRayOffset = (
     view.viewportWidthCssPx,
     view.viewportHeightCssPx,
   );
-  if (ray === null) return Number.POSITIVE_INFINITY;
+  if (ray === null || view.projection !== "perspective") return ray;
+  const eyeDx = view.position[0] - ray.origin[0];
+  const eyeDy = view.position[1] - ray.origin[1];
+  const eyeDz = view.position[2] - ray.origin[2];
+  const eyeAlong =
+    eyeDx * ray.direction[0] +
+    eyeDy * ray.direction[1] +
+    eyeDz * ray.direction[2];
+  const eyeDistanceSquared = eyeDx * eyeDx + eyeDy * eyeDy + eyeDz * eyeDz;
+  const eyeOffAxis = Math.sqrt(
+    Math.max(0, eyeDistanceSquared - eyeAlong * eyeAlong),
+  );
+  return eyeOffAxis <= 1e-9 * Math.max(1, Math.sqrt(eyeDistanceSquared))
+    ? { origin: view.position, direction: ray.direction }
+    : ray;
+};
 
-  const center: Vec3 = [
-    (bounds.min[0] + bounds.max[0]) / 2,
-    (bounds.min[1] + bounds.max[1]) / 2,
-    (bounds.min[2] + bounds.max[2]) / 2,
-  ];
-  let origin = ray.origin;
-  if (view.projection === "perspective") {
-    // A valid perspective eye lies on the centre line recovered from the
-    // matrix. Prefer the explicit eye (the cone's true apex), but keep the
-    // matrix-derived point when an untyped host supplies an inconsistent eye
-    // and matrix rather than inventing a skewed centre ray.
-    const eyeDx = view.position[0] - ray.origin[0];
-    const eyeDy = view.position[1] - ray.origin[1];
-    const eyeDz = view.position[2] - ray.origin[2];
-    const eyeAlong =
-      eyeDx * ray.direction[0] +
-      eyeDy * ray.direction[1] +
-      eyeDz * ray.direction[2];
-    const eyeDistanceSquared = eyeDx * eyeDx + eyeDy * eyeDy + eyeDz * eyeDz;
-    const eyeOffAxis = Math.sqrt(
-      Math.max(0, eyeDistanceSquared - eyeAlong * eyeAlong),
-    );
-    if (eyeOffAxis <= 1e-9 * Math.max(1, Math.sqrt(eyeDistanceSquared))) {
-      origin = view.position;
-    }
-  }
-  const dx = center[0] - origin[0];
-  const dy = center[1] - origin[1];
-  const dz = center[2] - origin[2];
+const offsetFromRay = (
+  ray: CursorRay,
+  view: CameraView,
+  bounds: Bounds,
+): number => {
+  const dx = (bounds.min[0] + bounds.max[0]) / 2 - ray.origin[0];
+  const dy = (bounds.min[1] + bounds.max[1]) / 2 - ray.origin[1];
+  const dz = (bounds.min[2] + bounds.max[2]) / 2 - ray.origin[2];
   const along =
     dx * ray.direction[0] + dy * ray.direction[1] + dz * ray.direction[2];
   const distanceSquared = dx * dx + dy * dy + dz * dz;
@@ -418,6 +305,112 @@ export const boundsCenterRayOffset = (
   const distance = Math.sqrt(distanceSquared);
   if (distance === 0) return 0;
   return Math.atan2(perpendicular, along);
+};
+
+/** A node the view measures: its bounds, and the spacing of its points. */
+export type MeasuredNode = {
+  readonly bounds: Bounds;
+  readonly spacing: number;
+};
+
+/**
+ * One camera view with everything derived from it computed once: the
+ * frustum planes, the centre ray, and the screen-space error law both
+ * formats measure detail with.
+ */
+export type PreparedView = {
+  readonly view: CameraView;
+  readonly planes: readonly Plane[];
+  /**
+   * Projected size, in css pixels, of a world length whose nearest point lies
+   * `distance` from the eye: how far apart points that far apart land on
+   * screen. A parallel view has no distance in its law, because every point
+   * projects at the scale its viewport height spans. Both clamp their
+   * denominator, so a camera inside a node or a degenerate parallel scale
+   * reads as a very large, never infinite, error.
+   */
+  readonly screenSpaceError: (length: number, distance: number) => number;
+  /**
+   * A node's point spacing projected at its distance from the eye.
+   * Memoized per node object, like `centerRayOffset`.
+   */
+  readonly nodeScreenSpaceError: (node: MeasuredNode) => number;
+  /**
+   * How far a node's bounds centre lies off the centre ray. Zero is the
+   * innermost cone; larger values form concentric cones moving away from the
+   * view centre. Selection only compares nodes at the same octree level,
+   * where their bounds have equal size, so centres give the unblurred spatial
+   * order without large coarse bounding spheres masking one another.
+   *
+   * Perspective views return radians. Parallel views have no angular spread,
+   * so they return perpendicular world-space clearance normalized by the
+   * parallel scale. Both are dimensionless and ordered centre-out; their
+   * magnitudes are never compared across different views. Infinite when the
+   * view-projection has no centre ray.
+   *
+   * Memoized per node object: selection, request ordering and the terminal
+   * walk read it repeatedly within one pass, and a hierarchy entry replaced
+   * by a new object is measured afresh.
+   */
+  readonly centerRayOffset: (node: { readonly bounds: Bounds }) => number;
+};
+
+const memoizedPerObject = <T extends object>(
+  measure: (node: T) => number,
+): ((node: T) => number) => {
+  const values = new WeakMap<T, number>();
+  return (node) => {
+    const cached = values.get(node);
+    if (cached !== undefined) return cached;
+    const value = measure(node);
+    values.set(node, value);
+    return value;
+  };
+};
+
+export const prepareView = (view: CameraView): PreparedView => {
+  const screenSpaceError = screenSpaceErrorLaw(view);
+  const ray = centerRay(view);
+  return {
+    view,
+    planes: frustumPlanes(view.viewProj),
+    screenSpaceError,
+    nodeScreenSpaceError: memoizedPerObject((node: MeasuredNode) =>
+      screenSpaceError(
+        node.spacing,
+        distanceToBounds(view.position, node.bounds),
+      ),
+    ),
+    centerRayOffset: memoizedPerObject((node: { readonly bounds: Bounds }) =>
+      ray === null
+        ? Number.POSITIVE_INFINITY
+        : offsetFromRay(ray, view, node.bounds),
+    ),
+  };
+};
+
+/**
+ * Whether every number a view carries is usable. One that is not would poison
+ * the frustum planes, every screen-space error, and the selection comparisons
+ * that read them. A field of view at or past a half-turn has no usable
+ * tangent, and a non-positive parallel scale inverts the projected spacing.
+ */
+export const usableView = (view: CameraView): boolean => {
+  if (
+    !finitePositive(projectionScalar(view)) ||
+    (view.projection === "perspective" && view.fovY >= Math.PI) ||
+    !finitePositive(view.viewportWidthCssPx) ||
+    !finitePositive(view.viewportHeightCssPx)
+  ) {
+    return false;
+  }
+  for (const coordinate of view.position) {
+    if (!Number.isFinite(coordinate)) return false;
+  }
+  for (let index = 0; index < view.viewProj.length; index += 1) {
+    if (!Number.isFinite(view.viewProj[index])) return false;
+  }
+  return true;
 };
 
 /**
@@ -501,10 +494,9 @@ export const cameraMoved = (
 
 /**
  * A model transform tiles draw under, resolved once: the matrix, its inverse,
- * and the uniform scale of the similarity. The frustum/SSE math in this
- * module assumes a uniform-scale transform — an affine bottom row, orthogonal
- * columns, equal column lengths — so a matrix that is not a similarity has no
- * usable frame and resolves to null.
+ * and the uniform scale of the similarity. The frustum and SSE math in this
+ * module assumes a uniform-scale transform, so a matrix that is not a
+ * similarity has no usable frame and resolves to null.
  */
 export type ModelFrame = {
   readonly matrix: readonly number[];
@@ -512,82 +504,11 @@ export type ModelFrame = {
   readonly scale: number;
 };
 
-/**
- * The uniform scale of a similarity transform, or null when the matrix is
- * not one.
- */
-const similarityScale = (m: Mat16): number | null => {
-  if (m.length !== 16) return null;
-  for (let index = 0; index < 16; index += 1) {
-    if (!Number.isFinite(m[index]!)) return null;
-  }
-  if (
-    Math.abs(m[3]!) > 1e-9 ||
-    Math.abs(m[7]!) > 1e-9 ||
-    Math.abs(m[11]!) > 1e-9 ||
-    Math.abs(m[15]! - 1) > 1e-9
-  ) {
-    return null;
-  }
-  const columns: Vec3[] = [
-    [m[0]!, m[1]!, m[2]!],
-    [m[4]!, m[5]!, m[6]!],
-    [m[8]!, m[9]!, m[10]!],
-  ];
-  const lengths = columns.map((column) => Math.hypot(...column));
-  const scale = lengths[0]!;
-  const tolerance = Math.max(1e-9, scale * 1e-6);
-  if (
-    !finitePositive(scale) ||
-    lengths.some((length) => Math.abs(length - scale) > tolerance)
-  ) {
-    return null;
-  }
-  for (let left = 0; left < 3; left += 1) {
-    for (let right = left + 1; right < 3; right += 1) {
-      const dot = columns[left]!.reduce(
-        (sum, value, axis) => sum + value * columns[right]![axis]!,
-        0,
-      );
-      if (Math.abs(dot) > scale * tolerance) return null;
-    }
-  }
-  return scale;
-};
-
-/** Column-major product `a × b`. */
-export const multiply4 = (a: Mat16, b: Mat16): number[] => {
-  // prettier-ignore
-  const out: number[] = [
-    0, 0, 0, 0,
-    0, 0, 0, 0,
-    0, 0, 0, 0,
-    0, 0, 0, 0,
-  ];
-  for (let column = 0; column < 4; column += 1) {
-    for (let row = 0; row < 4; row += 1) {
-      out[column * 4 + row] =
-        a[row]! * b[column * 4]! +
-        a[4 + row]! * b[column * 4 + 1]! +
-        a[8 + row]! * b[column * 4 + 2]! +
-        a[12 + row]! * b[column * 4 + 3]!;
-    }
-  }
-  return out;
-};
-
-/** Apply an affine column-major matrix to a point. */
-export const transformPointBy = (m: Mat16, point: Vec3): Vec3 => [
-  m[0]! * point[0] + m[4]! * point[1] + m[8]! * point[2] + m[12]!,
-  m[1]! * point[0] + m[5]! * point[1] + m[9]! * point[2] + m[13]!,
-  m[2]! * point[0] + m[6]! * point[1] + m[10]! * point[2] + m[14]!,
-];
-
 /** Resolve a model matrix into a frame, or null when it is not a similarity. */
 export const modelFrameOf = (m: Mat16): ModelFrame | null => {
   const scale = similarityScale(m);
   if (scale === null) return null;
-  const inverse = invert4(m);
+  const inverse = invert(m);
   if (inverse === null) return null;
   return { matrix: Array.from(m), inverse, scale };
 };
@@ -605,8 +526,8 @@ export const viewInModelFrame = (
 ): CameraView => {
   const local = {
     ...view,
-    viewProj: multiply4(view.viewProj, frame.matrix),
-    position: transformPointBy(frame.inverse, view.position),
+    viewProj: multiply(view.viewProj, frame.matrix),
+    position: transformPoint(frame.inverse, view.position),
   };
   return local.projection === "orthographic"
     ? { ...local, parallelScale: local.parallelScale / frame.scale }
@@ -653,34 +574,6 @@ export const sameCameraView = (a: CameraView, b: CameraView): boolean => {
   return true;
 };
 
-/** Element-wise matrix equality, treating null as its own value. */
-export const sameMatrix = (a: Mat16 | null, b: Mat16 | null): boolean => {
-  if (a === null || b === null) return a === null && b === null;
-  if (a.length !== b.length) return false;
-  for (let index = 0; index < a.length; index += 1) {
-    if (a[index] !== b[index]) return false;
-  }
-  return true;
-};
-
-/**
- * `base · translate(origin)`: only the last column differs from `base`.
- *
- * Tile geometry is stored relative to a tile origin, so every tile actor's
- * matrix is the member's placement with that origin folded in.
- */
-export const translatedMatrix = (base: Mat16, origin: Vec3): number[] => {
-  const out = Array.from(base);
-  for (let row = 0; row < 4; row += 1) {
-    out[12 + row] =
-      base[row]! * origin[0] +
-      base[4 + row]! * origin[1] +
-      base[8 + row]! * origin[2] +
-      base[12 + row]!;
-  }
-  return out;
-};
-
 /** Screen-space extent of a projected box, css pixels, y down. */
 export type ScreenAabbCssPx = {
   readonly minXCssPx: number;
@@ -712,7 +605,7 @@ export const projectedBoundsAabbCssPx = (
         const corner: Vec3 = [x, y, z];
         const projected = projectPointToCssPx(
           viewProj,
-          matrix === null ? corner : transformPointBy(matrix, corner),
+          matrix === null ? corner : transformPoint(matrix, corner),
           viewportWidthCssPx,
           viewportHeightCssPx,
         );

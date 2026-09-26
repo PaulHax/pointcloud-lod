@@ -1,16 +1,13 @@
 /** Pure camera-driven traversal for explicit and implicit REPLACE hierarchies. */
 
 import {
-  IDENTITY,
-  frustumPlanes,
-  orthographicScreenSpaceError,
-  perspectiveScreenSpaceError,
-  transformPointBy,
+  prepareView,
   type CameraView,
   type Plane,
+  type PreparedView,
 } from "../camera";
+import { IDENTITY, multiply, transformPoint, transformVector } from "../mat4";
 import {
-  multiplyTilesetMatrices,
   substituteImplicitTemplate,
   type ImplicitTileAddress,
   type TilesetBox,
@@ -103,12 +100,6 @@ type TilePlacement = {
   bounds: WorldBox;
 };
 
-const transformVector = (matrix: readonly number[], vector: Vec3): Vec3 => [
-  matrix[0]! * vector[0] + matrix[4]! * vector[1] + matrix[8]! * vector[2],
-  matrix[1]! * vector[0] + matrix[5]! * vector[1] + matrix[9]! * vector[2],
-  matrix[2]! * vector[0] + matrix[6]! * vector[1] + matrix[10]! * vector[2],
-];
-
 /**
  * How far a point projects from the viewport centre, in half viewport
  * heights; a point at or behind the eye is infinitely far. Only an ordering
@@ -129,7 +120,7 @@ const centreOffset = (camera: CameraView, point: Vec3): number => {
 const worldBox = (box: TilesetBox, matrix: readonly number[]): WorldBox => {
   const h = box.halfAxes;
   return {
-    center: transformPointBy(matrix, box.center),
+    center: transformPoint(matrix, box.center),
     axes: [
       transformVector(matrix, [h[0], h[1], h[2]]),
       transformVector(matrix, [h[3], h[4], h[5]]),
@@ -193,26 +184,17 @@ const screenSpaceError = (
   tile: TilesetTile,
   matrix: readonly number[],
   box: WorldBox,
-  camera: CameraView,
+  view: PreparedView,
   errorScale: GeometricErrorScale,
 ): number => {
   const scale =
     errorScale === "horizontal"
       ? horizontalScale(matrix)
       : maximumScale(matrix);
-  const error = tile.geometricError * scale;
-  return camera.projection === "orthographic"
-    ? orthographicScreenSpaceError(
-        error,
-        camera.viewportHeightCssPx,
-        camera.parallelScale,
-      )
-    : perspectiveScreenSpaceError(
-        error,
-        boxDistance(box, camera.position),
-        camera.viewportHeightCssPx,
-        camera.fovY,
-      );
+  return view.screenSpaceError(
+    tile.geometricError * scale,
+    boxDistance(box, view.view.position),
+  );
 };
 
 type VisitResult = {
@@ -488,7 +470,7 @@ const traverseHierarchy = (
     );
   }
   const effective = options.maximumScreenSpaceErrorPx / Math.max(quality, 0.05);
-  const planes = frustumPlanes(options.camera.viewProj);
+  const view = prepareView(options.camera);
   const neededSubtrees = new Map<string, TileContentRequest>();
 
   const hasSubmittedDescendant = (tile: TilesetTile): boolean =>
@@ -510,10 +492,7 @@ const traverseHierarchy = (
   ): VisitResult => {
     let placement = placements.get(tile);
     if (!placement) {
-      const transform = multiplyTilesetMatrices(
-        parentTransform,
-        tile.transform,
-      );
+      const transform = multiply(parentTransform, tile.transform);
       placement = {
         transform,
         bounds: worldBox(tile.boundingVolume, transform),
@@ -521,7 +500,7 @@ const traverseHierarchy = (
       placements.set(tile, placement);
     }
     const { transform: accumulated, bounds } = placement;
-    if (!boxIntersectsFrustum(bounds, planes)) {
+    if (!boxIntersectsFrustum(bounds, view.planes)) {
       return {
         visible: false,
         coverageSubmitted: true,
@@ -556,13 +535,8 @@ const traverseHierarchy = (
     const refine =
       tile.children.length > 0 &&
       (!contentful ||
-        (screenSpaceError(
-          tile,
-          accumulated,
-          bounds,
-          options.camera,
-          errorScale,
-        ) > effective &&
+        (screenSpaceError(tile, accumulated, bounds, view, errorScale) >
+          effective &&
           (options.refinable?.(tile.id) ?? true)));
     const childResults = refine
       ? tile.children.map((child) => visit(child, accumulated, depth + 1))
@@ -639,16 +613,13 @@ const traverseHierarchy = (
     const [rightDepth, rightOffset] = requestOrder.get(right)!;
     return leftDepth - rightDepth || leftOffset - rightOffset;
   });
-  const rootAccumulated = multiplyTilesetMatrices(
-    rootParent,
-    hierarchy.root.transform,
-  );
+  const rootAccumulated = multiply(rootParent, hierarchy.root.transform);
   const rootSse = result.visible
     ? screenSpaceError(
         hierarchy.root,
         rootAccumulated,
         worldBox(hierarchy.root.boundingVolume, rootAccumulated),
-        options.camera,
+        view,
         errorScale,
       )
     : 0;

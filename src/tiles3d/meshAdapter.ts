@@ -10,7 +10,7 @@ import {
   type Submission,
   type SubmissionScheduler,
 } from "../submissionScheduler";
-import { IDENTITY, translatedMatrix, type Mat16 } from "../camera";
+import { IDENTITY, translatedMatrix, type Mat16 } from "../mat4";
 import { safeCall } from "../observers";
 import type { Bounds } from "../octree";
 import type {

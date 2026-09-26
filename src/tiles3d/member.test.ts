@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 
 import { perspectiveView } from "../../test/helpers";
-import { IDENTITY } from "../camera";
+import { IDENTITY } from "../mat4";
 import { createMemoryPool } from "../memoryPool";
 import { createSubmissionScheduler } from "../submissionScheduler";
 import type { StreamedMemberContext } from "../streamedMember";

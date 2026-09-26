@@ -1,10 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  transformPoint,
-  wgs84ToEcef,
-  type Mat4,
-} from "../../../src/tiles3d/rtc";
+import { transformPoint, type Mat4 } from "../../../src/mat4";
+import { wgs84ToEcef } from "../../../src/tiles3d/rtc";
 import { PLACES, ecefToEnu, rdToScene } from "./places";
 
 const ROTTERDAM = PLACES[0]!;
