@@ -1647,6 +1647,38 @@ describe("createLodController — failing sources", () => {
     vi.useRealTimers();
   });
 
+  it("reports a tile waiting out a retry delay as pending work", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { controller, deferred } = makeController(
+      { "0-0-0-0": { pointCount: 100 } },
+      { onError: () => {} },
+    );
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    deferred.get("0-0-0-0")!.reject(new Error("500"));
+    await settle();
+
+    // Nothing is running or queued, but the tile is asked for again shortly.
+    expect(controller.stats()).toMatchObject({
+      physicalTileOperations: 0,
+      queuedTiles: 0,
+      restingTiles: 0,
+      workPending: true,
+    });
+    expect(controller.governorInputs().workPending).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    deferred.get("0-0-0-0")!.resolve();
+    await settle();
+    expect(controller.stats().workPending).toBe(false);
+    expect(controller.governorInputs().workPending).toBe(false);
+
+    controller.dispose();
+    vi.useRealTimers();
+  });
+
   it("stops claiming pending work for tiles that are out of attempts", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
@@ -2032,6 +2064,7 @@ describe("createLodController — selection stats", () => {
       const stats = controller.stats();
       expect(controller.governorInputs()).toEqual({
         workRevision: stats.workRevision,
+        workPending: stats.workPending,
         memoryBudgetBytes: stats.memoryBudgetBytes,
         memoryCeilingPoints: stats.memoryCeilingPoints,
         projectedImportance: stats.selection.projectedImportance,
