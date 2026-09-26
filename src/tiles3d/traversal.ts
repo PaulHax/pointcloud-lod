@@ -109,6 +109,23 @@ const transformVector = (matrix: readonly number[], vector: Vec3): Vec3 => [
   matrix[2]! * vector[0] + matrix[6]! * vector[1] + matrix[10]! * vector[2],
 ];
 
+/**
+ * How far a point projects from the viewport centre, in half viewport
+ * heights; a point at or behind the eye is infinitely far. Only an ordering
+ * key, so the aspect-corrected distance is all it needs.
+ */
+const centreOffset = (camera: CameraView, point: Vec3): number => {
+  const m = camera.viewProj;
+  const [x, y, z] = point;
+  const w = m[3]! * x + m[7]! * y + m[11]! * z + m[15]!;
+  if (!(w > 0)) return Number.POSITIVE_INFINITY;
+  const aspect = camera.viewportWidthCssPx / camera.viewportHeightCssPx;
+  return Math.hypot(
+    ((m[0]! * x + m[4]! * y + m[8]! * z + m[12]!) / w) * aspect,
+    (m[1]! * x + m[5]! * y + m[9]! * z + m[13]!) / w,
+  );
+};
+
 const worldBox = (box: TilesetBox, matrix: readonly number[]): WorldBox => {
   const h = box.halfAxes;
   return {
@@ -481,9 +498,15 @@ const traverseHierarchy = (
         hasSubmittedDescendant(child),
     );
 
+  // Where each visible tile sits in the request order: coarser levels first,
+  // so a view never waits on detail while it still has holes, then nearest
+  // the centre of the view, where the user is looking.
+  const requestOrder = new Map<string, readonly [number, number]>();
+
   const visit = (
     tile: TilesetTile,
     parentTransform: readonly number[],
+    depth: number,
   ): VisitResult => {
     let placement = placements.get(tile);
     if (!placement) {
@@ -507,6 +530,10 @@ const traverseHierarchy = (
         drawn: [],
       };
     }
+    requestOrder.set(tile.id, [
+      depth,
+      centreOffset(options.camera, bounds.center),
+    ]);
 
     const unknownRequest = hierarchy.unknownRequestByTileId.get(tile.id);
     if (unknownRequest) {
@@ -538,7 +565,7 @@ const traverseHierarchy = (
         ) > effective &&
           (options.refinable?.(tile.id) ?? true)));
     const childResults = refine
-      ? tile.children.map((child) => visit(child, accumulated))
+      ? tile.children.map((child) => visit(child, accumulated, depth + 1))
       : [];
     const visibleChildren = childResults.filter((child) => child.visible);
 
@@ -560,7 +587,7 @@ const traverseHierarchy = (
       // Fresh coarse startup does not request the entire hierarchy.
       const fallbacks =
         !submitted && hasSubmittedDescendant(tile)
-          ? tile.children.map((child) => visit(child, accumulated))
+          ? tile.children.map((child) => visit(child, accumulated, depth + 1))
           : [];
       const visibleFallbacks = fallbacks.filter((child) => child.visible);
       return {
@@ -606,7 +633,12 @@ const traverseHierarchy = (
   };
 
   const rootParent = options.modelMatrix ?? IDENTITY;
-  const result = visit(hierarchy.root, rootParent);
+  const result = visit(hierarchy.root, rootParent, 0);
+  const requested = [...result.requested].sort((left, right) => {
+    const [leftDepth, leftOffset] = requestOrder.get(left)!;
+    const [rightDepth, rightOffset] = requestOrder.get(right)!;
+    return leftDepth - rightDepth || leftOffset - rightOffset;
+  });
   const rootAccumulated = multiplyTilesetMatrices(
     rootParent,
     hierarchy.root.transform,
@@ -622,7 +654,7 @@ const traverseHierarchy = (
     : 0;
   return Object.freeze({
     desiredTileIds: Object.freeze(result.desired),
-    requestedTileIds: Object.freeze(result.requested),
+    requestedTileIds: Object.freeze(requested),
     drawnTileIds: Object.freeze(result.drawn),
     effectiveScreenSpaceErrorPx: effective,
     rootScreenSpaceErrorPx: rootSse,
