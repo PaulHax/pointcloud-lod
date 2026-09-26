@@ -4,8 +4,8 @@
  * Its decisions are pure functions over read-only views of the state it
  * holds: `selectPoints` chooses the tiles, `planDraw` thins them and
  * `largestTerminalSpacing` sizes Auto points. The controller owns the impure
- * rest: lazy hierarchy pages, a bounded fetch queue with cancellation, an LRU
- * for deselected tiles, and batched delivery to the consumer.
+ * rest: one loader for hierarchy pages and one for tiles, an LRU for
+ * deselected tiles, and batched delivery to the consumer.
  */
 
 import {
@@ -25,6 +25,7 @@ import {
   samePrefixes,
   type DrawPlan,
 } from "./drawPlan";
+import { createLoader, type LoaderCounts } from "./loader";
 import { sameMatrix, transformPoint, type Mat16 } from "./mat4";
 import { scenePoint } from "./frames";
 import { createLruCache } from "./lru";
@@ -53,7 +54,13 @@ import {
   type HierarchyEntry,
   type PointSelection,
 } from "./pointSelection";
-import { tileBytes, type TileData, type TileSource } from "./tileSource";
+import type { RetryPolicy } from "./retryPolicy";
+import {
+  tileBytes,
+  type NodeInfo,
+  type TileData,
+  type TileSource,
+} from "./tileSource";
 
 export type TileBatch = {
   readonly added: readonly { key: VoxelKey; tile: TileData }[];
@@ -256,7 +263,7 @@ export type LodControllerStats = {
  */
 export type LodGovernorInputs = {
   readonly workRevision: number;
-  /** Costs at most one look per tile waiting on a retry. */
+  /** Read from counts the loaders keep, so it walks nothing. */
   readonly workPending: boolean;
   readonly memoryBudgetBytes: number;
   readonly memoryCeilingPoints: number;
@@ -426,8 +433,29 @@ export type LodController = {
   dispose(): void;
 };
 
-const isAbortError = (error: unknown): boolean =>
-  error instanceof Error && error.name === "AbortError";
+/**
+ * Three attempts a second apart, then a rest of 30 s that doubles with each
+ * spent allowance, up to five minutes. A permanently dead endpoint then costs
+ * three requests per key every five minutes, an outage that ends recovers on
+ * the first rest, and a blip repaints without waiting on the user.
+ */
+const POINT_RETRY_POLICY: RetryPolicy = {
+  attempts: 3,
+  retryDelayMs: () => 1_000,
+  restMs: (round) => Math.min(300_000, 30_000 * 2 ** round),
+};
+
+/**
+ * Required current-view work has not drained: reads running or queued, or a
+ * selected tile waiting out a retry delay. A tile inside its rest does not
+ * count (see `restingTiles`), and neither does a page waiting to be retried.
+ */
+const workPendingIn = (tiles: LoaderCounts, pages: LoaderCounts): boolean =>
+  tiles.physical > 0 ||
+  pages.physical > 0 ||
+  tiles.queued > 0 ||
+  pages.queued > 0 ||
+  tiles.retrying > 0;
 
 export const createLodController = (
   options: LodControllerOptions,
@@ -507,8 +535,6 @@ export const createLodController = (
   const currentBudget = (): number =>
     active ? Math.min(pointBudget, memoryCeilingPoints()) : 0;
 
-  // Bumped on setSource/dispose; every async continuation checks it.
-  let epoch = 0;
   let workRevision = 0;
   let workChangeScheduled = false;
   const markWork = (): void => {
@@ -528,173 +554,6 @@ export const createLodController = (
   /** Before the first camera only the root page can be asked for. */
   const byFrontierPriority = (keyStrings: readonly string[]): string[] =>
     view === null ? [...keyStrings] : frontierOrder(keyStrings, nodes, view);
-
-  /** Hierarchy pages requested whose result is still wanted. */
-  const pagesInFlight = new Map<string, AbortController>();
-  let pageQueue: string[] = [];
-
-  // Selection re-requests whatever it still needs, so an endpoint that always
-  // fails would be re-issued on every pass forever. Non-abort failures are
-  // counted per key and the key rests once it runs out of attempts. The rest
-  // is a backoff, not an eviction: a transient outage must not blank a tile
-  // for the life of the controller, so a rested key gets its allowance back.
-  //
-  // Each spent allowance rests longer than the one before it, to MAX_REST_MS.
-  // An endpoint that is permanently gone therefore costs three requests per
-  // key every 30 s at first and three every five minutes in the steady state,
-  // rather than three every 30 s for as long as the page is open, while an
-  // outage that ends recovers on the first rest — the case worth being quick
-  // about.
-  //
-  // Restoring the allowance only makes a key fetchable — something still has
-  // to ask. A selection pass cannot be that something: on a converged scene
-  // the camera is still, the budget has settled and nothing lands, so no pass
-  // ever runs and one HTTP 500 would hold a parent-density hole (or an
-  // unrefinable subtree) open until the user touched the camera. Each
-  // non-abort failure therefore arms a timer for that key — RETRY_SOON_MS
-  // while attempts remain, the remainder of the backoff once the key is
-  // resting — which re-queues it and pumps, so the ordinary arrival path
-  // repaints. A key nothing wants any more when its timer fires is dropped
-  // silently, and dropEverything/dispose cancel every armed timer, so no
-  // retry can carry work across an epoch.
-  // A new source (dropEverything) is a fresh start. Aborts never count —
-  // deselection, setSource, and dispose cancel normally and stay retryable.
-  const MAX_ATTEMPTS = 3;
-  const FIRST_REST_MS = 30_000;
-  const MAX_REST_MS = 300_000;
-  // Long enough that three attempts at a struggling endpoint are not one
-  // burst, short enough that a blip repaints without waiting on the user.
-  const RETRY_SOON_MS = 1_000;
-  type FailureRecord = {
-    /** Failures in the current round. The allowance is MAX_ATTEMPTS. */
-    count: number;
-    /** Allowances already spent on this key; each one lengthens the rest. */
-    rounds: number;
-    lastMs: number;
-  };
-  const pageFailures = new Map<string, FailureRecord>();
-  const tileFailures = new Map<string, FailureRecord>();
-
-  const restMs = (record: FailureRecord): number =>
-    Math.min(MAX_REST_MS, FIRST_REST_MS * 2 ** record.rounds);
-
-  const recordFailure = (
-    failures: Map<string, FailureRecord>,
-    keyString: string,
-  ): void => {
-    const prior = failures.get(keyString);
-    // A failure arriving on a key whose allowance is already spent means its
-    // rest elapsed and the attempt that followed failed too: open a new round,
-    // and rest longer for it.
-    const spent = prior !== undefined && prior.count >= MAX_ATTEMPTS;
-    failures.set(keyString, {
-      count: spent ? 1 : (prior?.count ?? 0) + 1,
-      rounds: spent ? prior.rounds + 1 : (prior?.rounds ?? 0),
-      lastMs: Date.now(),
-    });
-  };
-  /**
-   * Whether the key is inside its rest.
-   *
-   * Pure: the allowance comes back on the clock rather than by being read, so
-   * a diagnostic can ask this without changing what the controller fetches
-   * next. The record itself is dropped when the key succeeds, and by
-   * dropEverything.
-   */
-  const resting = (
-    failures: Map<string, FailureRecord>,
-    keyString: string,
-  ): boolean => {
-    const record = failures.get(keyString);
-    if (record === undefined || record.count < MAX_ATTEMPTS) return false;
-    return Date.now() - record.lastMs < restMs(record);
-  };
-
-  /** When the key may be asked for again: soon, or when its rest is over. */
-  const retryDelayMs = (
-    failures: Map<string, FailureRecord>,
-    keyString: string,
-  ): number => {
-    const record = failures.get(keyString);
-    if (record === undefined || record.count < MAX_ATTEMPTS) {
-      return RETRY_SOON_MS;
-    }
-    return Math.max(0, record.lastMs + restMs(record) - Date.now());
-  };
-
-  const tileRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  const pageRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-
-  const clearRetryTimers = (): void => {
-    for (const timer of tileRetryTimers.values()) clearTimeout(timer);
-    tileRetryTimers.clear();
-    for (const timer of pageRetryTimers.values()) clearTimeout(timer);
-    pageRetryTimers.clear();
-  };
-
-  /** At most one armed retry per key, always at the earliest legal moment. */
-  const armRetry = (
-    timers: Map<string, ReturnType<typeof setTimeout>>,
-    failures: Map<string, FailureRecord>,
-    keyString: string,
-    run: (keyString: string) => void,
-  ): void => {
-    const pending = timers.get(keyString);
-    if (pending !== undefined) clearTimeout(pending);
-    timers.set(
-      keyString,
-      setTimeout(
-        () => {
-          timers.delete(keyString);
-          if (!disposed) run(keyString);
-        },
-        retryDelayMs(failures, keyString),
-      ),
-    );
-  };
-
-  const scheduleTileRetry = (keyString: string): void =>
-    armRetry(tileRetryTimers, tileFailures, keyString, retryTile);
-
-  const retryTile = (keyString: string): void => {
-    // Anything that already answers for the key — deselection, an adopted
-    // read, a payload that landed anyway — makes this retry pointless.
-    if (
-      !selection.target.has(keyString) ||
-      resident.has(keyString) ||
-      tileReads.has(keyString)
-    ) {
-      return;
-    }
-    // A key inside its rest waits rather than spending an attempt early.
-    if (resting(tileFailures, keyString)) {
-      scheduleTileRetry(keyString);
-      return;
-    }
-    // At the head: this key is a hole in the current frame, not new detail.
-    queue.unshift(keyString);
-    pump();
-  };
-
-  const schedulePageRetry = (keyString: string): void =>
-    armRetry(pageRetryTimers, pageFailures, keyString, retryPage);
-
-  const retryPage = (keyString: string): void => {
-    // Nothing is fetched while hidden; reactivation reselects from scratch.
-    if (!active) return;
-    if (loadedPages.has(keyString) || pagesInFlight.has(keyString)) return;
-    if (resting(pageFailures, keyString)) {
-      schedulePageRetry(keyString);
-      return;
-    }
-    // Whether a page is still needed is selection's answer, not a set this
-    // side keeps, so rerun it: it re-derives the page queue from the current
-    // camera, which both re-requests this page and drops the ones the camera
-    // has moved past. Before the first camera selection cannot run at all,
-    // and the bootstrap page is then the only page there is to ask for.
-    if (view !== null) runSelection();
-    else if (keyString === ROOT_KEY_STRING) queueRootPage();
-  };
 
   /** Tiles currently delivered to the consumer. */
   const resident = new Map<string, TileData>();
@@ -756,58 +615,6 @@ export const createLodController = (
   const drawnPointsOf = (keyString: string, tile: TileData): number =>
     Math.min(tile.pointCount, plan.prefixes.get(keyString) ?? 0);
 
-  type TileRead = {
-    readonly abort: AbortController;
-    wanted: boolean;
-    cancelTimer: ReturnType<typeof setTimeout> | null;
-  };
-
-  /**
-   * The one physical read a key may have running. Camera deselection gives it
-   * one selection interval to be adopted again before aborting. That bounds
-   * how long stale work can occupy a slot while avoiding a cancel/refetch pair
-   * when an orbit or pan crosses back over a recent tile. Lifecycle changes
-   * retain their existing immediate-cancellation semantics.
-   */
-  const tileReads = new Map<string, TileRead>();
-  let queue: string[] = [];
-
-  const clearReadCancellation = (read: TileRead): void => {
-    if (read.cancelTimer === null) return;
-    clearTimeout(read.cancelTimer);
-    read.cancelTimer = null;
-  };
-
-  const cancelRead = (read: TileRead, immediately = false): void => {
-    read.wanted = false;
-    if (immediately || selectionDelayMs === 0) {
-      clearReadCancellation(read);
-      read.abort.abort();
-      return;
-    }
-    if (read.cancelTimer !== null) return;
-    read.cancelTimer = setTimeout(() => {
-      read.cancelTimer = null;
-      if (!read.wanted) read.abort.abort();
-    }, selectionDelayMs);
-  };
-
-  const adoptRead = (read: TileRead): void => {
-    read.wanted = true;
-    clearReadCancellation(read);
-  };
-
-  // Cancellation is advisory: `abort()` marks a result unwanted, but a source
-  // may keep reading and decoding until its promise settles (a COPC decode
-  // already under way runs to the end). Concurrency is therefore counted on
-  // the physical operation; otherwise a look-away/look-back storm starts a
-  // fresh read per gesture while every abandoned one is still running, and
-  // the ceilings bound nothing at all. These drop only when a promise
-  // settles, epoch changes included: ignoring a result is not the same as
-  // stopping the work behind it.
-  let physicalTileOperations = 0;
-  let physicalHierarchyOperations = 0;
-
   // Decoded single ownership: a key's payload lives in exactly one place —
   // a live request, the CPU cache, or renderer residency. A second copy would
   // double-count decoded bytes and spend cache capacity on a tile the
@@ -832,47 +639,10 @@ export const createLodController = (
     cache.set(keyString, tile, tileBytes(tile));
   };
 
-  /** Park a decoded payload only when nothing else owns the key. */
+  /** Park a decoded payload unless residency already owns the key. */
   const cacheDecoded = (keyString: string, tile: TileData): void => {
-    if (resident.has(keyString) || tileReads.has(keyString)) return;
+    if (resident.has(keyString)) return;
     cache.set(keyString, tile, tileBytes(tile));
-  };
-
-  /**
-   * Required current-view work has not drained: I/O running or queued, or a
-   * selected tile without a payload waiting out a retry delay. A tile inside
-   * its rest does not count (see `restingTiles`). Selection queues every other
-   * such tile, a read holds it, or a failure arms its retry, so only armed
-   * retries need checking, never the selection.
-   */
-  const workPending = (): boolean => {
-    if (
-      physicalTileOperations > 0 ||
-      physicalHierarchyOperations > 0 ||
-      queue.length > 0 ||
-      pageQueue.length > 0
-    ) {
-      return true;
-    }
-    for (const keyString of tileRetryTimers.keys()) {
-      if (
-        selection.target.has(keyString) &&
-        nodes.get(keyString)?.pointCount !== 0 &&
-        !resident.has(keyString) &&
-        !cache.has(keyString) &&
-        !resting(tileFailures, keyString)
-      ) {
-        return true;
-      }
-    }
-    return false;
-  };
-
-  /** Reads whose result the controller still wants. */
-  const wantedTileReads = (): number => {
-    let count = 0;
-    for (const read of tileReads.values()) if (read.wanted) count += 1;
-    return count;
   };
 
   /** Promote a cached payload into residency. */
@@ -920,85 +690,67 @@ export const createLodController = (
     });
   };
 
-  /** Worth asking for: not held, not already asked for, not resting. */
-  const pageWanted = (keyString: string): boolean =>
-    !loadedPages.has(keyString) &&
-    !pagesInFlight.has(keyString) &&
-    !resting(pageFailures, keyString);
+  const pages = createLoader<readonly NodeInfo[]>({
+    load: (keyString, signal) =>
+      source.nodes(keyFromString(keyString), { signal }),
+    concurrency: hierarchyConcurrency,
+    retry: POINT_RETRY_POLICY,
+    // A page survives deactivation in the hierarchy, so cancelling one would
+    // only buy a refetch of the same bytes.
+    cancelGraceMs: Number.POSITIVE_INFINITY,
+    onLoaded: (keyString, infos) => {
+      loadedPages.add(keyString);
+      for (const info of infos) {
+        // A fresh entry object, so the prepared view measures it afresh
+        // rather than reusing the page reference's values.
+        nodes.set(keyToString(info.key), {
+          pointCount: info.pointCount,
+          bounds: info.bounds,
+          spacing: info.spacing,
+          children: info.children ?? null,
+          pageRef: info.pageRef === true,
+        });
+      }
+      // A page reshapes the subtree below it, so the next page queue is the
+      // one selection derives from it.
+      runSelection();
+    },
+    onFailed: (_keyString, error) => onError(error),
+    onChange: markWork,
+  });
 
-  /**
-   * Replace the page queue with what selection needs now, highest priority
-   * first. Like the tile queue this is rebuilt rather than appended to: a page
-   * the camera has moved past must not keep its slot reservation.
-   */
-  const queuePages = (keyStrings: readonly string[]): void => {
-    pageQueue = byFrontierPriority([...new Set(keyStrings)].filter(pageWanted));
-    pumpPages();
-  };
+  const tiles = createLoader<TileData>({
+    load: (keyString, signal) =>
+      source.loadTile(keyFromString(keyString), { signal }),
+    concurrency: fetchConcurrency,
+    retry: POINT_RETRY_POLICY,
+    // One selection interval, in which an orbit or pan crossing back over a
+    // recent tile adopts its read instead of cancelling and refetching it.
+    cancelGraceMs: selectionDelayMs,
+    onLoaded: (keyString, tile) => {
+      // Cancellation is advisory, so a cancelled read can still deliver. If
+      // the key was reselected while it ran, this payload is exactly what the
+      // selection is waiting for.
+      if (selection.target.has(keyString) && !resident.has(keyString)) {
+        takeResident(keyString, tile);
+        scheduleFlush();
+      } else {
+        cacheDecoded(keyString, tile);
+      }
+    },
+    onFailed: (_keyString, error) => onError(error),
+    onChange: markWork,
+  });
 
-  const pumpPages = (): void => {
-    while (
-      !disposed &&
-      physicalHierarchyOperations < hierarchyConcurrency &&
-      pageQueue.length > 0
-    ) {
-      const keyString = pageQueue.shift()!;
-      if (!pageWanted(keyString)) continue;
-      const abort = new AbortController();
-      pagesInFlight.set(keyString, abort);
-      const requestEpoch = epoch;
-      physicalHierarchyOperations += 1;
-      markWork();
-      source.nodes(keyFromString(keyString), { signal: abort.signal }).then(
-        (infos) => {
-          physicalHierarchyOperations -= 1;
-          markWork();
-          if (pagesInFlight.get(keyString) === abort) {
-            pagesInFlight.delete(keyString);
-          }
-          if (disposed || requestEpoch !== epoch) {
-            pumpPages();
-            return;
-          }
-          loadedPages.add(keyString);
-          pageFailures.delete(keyString);
-          for (const info of infos) {
-            // A fresh entry object, so the prepared view measures it afresh
-            // rather than reusing the page reference's values.
-            nodes.set(keyToString(info.key), {
-              pointCount: info.pointCount,
-              bounds: info.bounds,
-              spacing: info.spacing,
-              children: info.children ?? null,
-              pageRef: info.pageRef === true,
-            });
-          }
-          // A page reshapes the subtree below it, so the next queue is the one
-          // selection derives from it; pump again for the inactive/no-camera
-          // case where selection cannot run.
-          runSelection();
-          pumpPages();
-        },
-        (error) => {
-          physicalHierarchyOperations -= 1;
-          markWork();
-          if (pagesInFlight.get(keyString) === abort) {
-            pagesInFlight.delete(keyString);
-          }
-          if (disposed || requestEpoch !== epoch) {
-            pumpPages();
-            return;
-          }
-          if (!isAbortError(error)) {
-            recordFailure(pageFailures, keyString);
-            onError(error);
-            schedulePageRetry(keyString);
-          }
-          pumpPages();
-        },
-      );
-    }
-  };
+  /** Ask for the pages selection needs, highest priority first. */
+  const queuePages = (keyStrings: readonly string[]): void =>
+    pages.want(
+      byFrontierPriority(
+        [...new Set(keyStrings)].filter(
+          (keyString) => !loadedPages.has(keyString),
+        ),
+      ),
+    );
 
   /** Re-plan the prefixes, and hand them on only when one of them moved. */
   const updateDrawPlan = (): void => {
@@ -1038,89 +790,6 @@ export const createLodController = (
     }
   };
 
-  const pump = (): void => {
-    while (
-      !disposed &&
-      physicalTileOperations < fetchConcurrency &&
-      queue.length > 0
-    ) {
-      const keyString = queue.shift()!;
-      if (
-        !selection.target.has(keyString) ||
-        resident.has(keyString) ||
-        tileReads.has(keyString)
-      ) {
-        continue;
-      }
-      // The payload can have landed in the cache while this key waited for a
-      // slot — a cancelled read that resolved anyway, or a deselect/reselect.
-      // Reading it again would be pure duplicate I/O, and a failure of that
-      // read would settle the cloud with a hole over a payload it already has.
-      if (promoteCached(keyString)) {
-        scheduleFlush();
-        continue;
-      }
-      const abort = new AbortController();
-      const read: TileRead = { abort, wanted: true, cancelTimer: null };
-      tileReads.set(keyString, read);
-      const requestEpoch = epoch;
-      const key = keyFromString(keyString);
-      physicalTileOperations += 1;
-      markWork();
-      source.loadTile(key, { signal: abort.signal }).then(
-        (loadedTile) => {
-          physicalTileOperations -= 1;
-          markWork();
-          // An epoch change is the only thing that takes a key's read entry
-          // away while the read runs, and it also makes the payload worthless:
-          // it came from a source nobody is displaying any more.
-          if (disposed || requestEpoch !== epoch) {
-            pump();
-            return;
-          }
-          clearReadCancellation(read);
-          tileReads.delete(keyString);
-          tileFailures.delete(keyString);
-          // Cancellation is advisory, so a cancelled read can still deliver.
-          // If the key was reselected while it ran, this payload is exactly
-          // what the selection is waiting for.
-          if (selection.target.has(keyString) && !resident.has(keyString)) {
-            takeResident(keyString, loadedTile);
-            scheduleFlush();
-          } else {
-            cacheDecoded(keyString, loadedTile);
-          }
-          pump();
-        },
-        (error) => {
-          physicalTileOperations -= 1;
-          markWork();
-          if (disposed || requestEpoch !== epoch) {
-            pump();
-            return;
-          }
-          clearReadCancellation(read);
-          tileReads.delete(keyString);
-          if (!isAbortError(error)) {
-            recordFailure(tileFailures, keyString);
-            onError(error);
-            if (selection.target.has(keyString) && !resident.has(keyString)) {
-              scheduleTileRetry(keyString);
-            }
-          } else if (
-            selection.target.has(keyString) &&
-            !resident.has(keyString)
-          ) {
-            // A source that honours the signal really stopped, and the key was
-            // reselected while the read was cancelled: it needs a fresh one.
-            queue.unshift(keyString);
-          }
-          pump();
-        },
-      );
-    }
-  };
-
   const runSelection = (seed?: ReadonlySet<string>): void => {
     if (disposed || !active || view === null) return;
     const previous = selection.target;
@@ -1146,8 +815,8 @@ export const createLodController = (
     // through neededPages: that path needs a hierarchy entry, and only the
     // root page can create one. Without this, a failed bootstrap leaves the
     // controller with nothing to draw and no way to ask again. Level 0 sorts
-    // to the front, and queuePages drops anything already held, in flight, or
-    // resting, so this costs nothing on the normal path.
+    // to the front, and a page already held, in flight, or resting is not
+    // read again, so this costs nothing on the normal path.
     queuePages(
       loadedPages.has(ROOT_KEY_STRING)
         ? selection.neededPages
@@ -1156,49 +825,24 @@ export const createLodController = (
 
     // Deselected submitted tiles leave renderer/GPU residency immediately.
     // `releaseResident` deletes only the key it is handed, which is safe to do
-    // while iterating the map it deletes from — no snapshot needed.
+    // while iterating the map it deletes from.
     for (const keyString of resident.keys()) {
-      if (selection.target.has(keyString)) continue;
+      if (target.has(keyString)) continue;
       releaseResident(keyString);
     }
 
-    // Give camera-deselected reads one selection interval to be adopted again.
-    // The read keeps its physical slot until it settles: dropping its entry
-    // would let a reselect race a second read against work still running.
-    for (const [keyString, read] of tileReads) {
-      if (selection.target.has(keyString)) continue;
-      cancelRead(read);
-    }
-
-    // Reuse cached tiles immediately; queue the rest, coarse levels first.
-    const toFetch: string[] = [];
+    // Reuse decoded payloads at once; ask for the rest, coarse levels first.
+    // A key whose read is still running is adopted rather than read twice.
+    const missing: string[] = [];
     for (const keyString of target) {
       if (resident.has(keyString)) continue;
-      const read = tileReads.get(keyString);
-      if (read !== undefined) {
-        // Adopt the live read instead of starting a rival one. If it outran
-        // its cancellation the payload claims residency when it lands; if the
-        // source really stopped, the abort path re-queues this key at the
-        // head. Either way there is never a second read of the same bytes.
-        adoptRead(read);
-        continue;
-      }
       // Structural hierarchy nodes participate in selection but carry no tile.
       if (nodes.get(keyString)?.pointCount === 0) continue;
       if (promoteCached(keyString)) continue;
-      if (resting(tileFailures, keyString)) {
-        // Its rest ends on the clock, not on a selection pass: a key that
-        // spent its last attempt while deselected has no retry armed, and a
-        // still camera would never ask for it again.
-        if (!tileRetryTimers.has(keyString)) scheduleTileRetry(keyString);
-        continue;
-      }
-      toFetch.push(keyString);
+      missing.push(keyString);
     }
-    queue = byFrontierPriority(toFetch);
-
     scheduleFlush();
-    pump();
+    tiles.want(byFrontierPriority(missing));
   };
 
   /**
@@ -1252,26 +896,13 @@ export const createLodController = (
   };
 
   const dropEverything = (): void => {
-    // The epoch bump is what makes every outstanding result irrelevant. The
-    // physical operation counts are deliberately left alone: the reads and
-    // decodes behind those results are still running, and pretending
-    // otherwise is how a source swap under a moving camera doubles real I/O.
-    epoch += 1;
-    // Armed retries belong to the epoch that scheduled them: one firing after
-    // the swap would re-queue a key of the old source against the new one.
-    clearRetryTimers();
-    for (const read of tileReads.values()) {
-      cancelRead(read, true);
-    }
-    tileReads.clear();
-    for (const abort of pagesInFlight.values()) abort.abort();
-    pagesInFlight.clear();
-    queue = [];
-    pageQueue = [];
+    // Every outstanding result becomes irrelevant, but the reads behind them
+    // keep their slots until they settle: pretending otherwise is how a
+    // source swap under a moving camera doubles real I/O.
+    tiles.reset();
+    pages.reset();
     nodes.clear();
     loadedPages.clear();
-    pageFailures.clear();
-    tileFailures.clear();
     cache.clear();
     clearSelection();
     resident.clear();
@@ -1408,15 +1039,11 @@ export const createLodController = (
 
       clearSelectionTimer();
       // No new work while hidden. Hierarchy pages already in flight are left
-      // to land: unlike tiles they survive deactivation in `hierarchy`, so
-      // cancelling one only buys a refetch of the same bytes on reactivation.
-      queue = [];
-      pageQueue = [];
-      // Hiding cancels tile reads but keeps their physical slots: a hide/show
+      // to land: they survive deactivation in the hierarchy.
+      pages.want([]);
+      // Hiding aborts tile reads but keeps their physical slots: a hide/show
       // pair must adopt the read that is still running, not race it.
-      for (const read of tileReads.values()) {
-        cancelRead(read, true);
-      }
+      tiles.abandon();
 
       clearSelection();
       selectionGeneration += 1;
@@ -1429,19 +1056,23 @@ export const createLodController = (
     },
 
     governorInputs() {
+      const tileCounts = tiles.counts();
+      const pageCounts = pages.counts();
       return {
         workRevision,
-        workPending: workPending(),
+        workPending: workPendingIn(tileCounts, pageCounts),
         memoryBudgetBytes: memoryBudgetBytes(),
         memoryCeilingPoints: memoryCeilingPoints(),
         projectedImportance: selection.rootSseCssPx,
         demandPoints: selection.targetPoints + selection.budgetSkippedPoints,
-        physicalTileOperations,
-        physicalHierarchyOperations,
+        physicalTileOperations: tileCounts.physical,
+        physicalHierarchyOperations: pageCounts.physical,
       };
     },
 
     stats() {
+      const tileCounts = tiles.counts();
+      const pageCounts = pages.counts();
       const cachedBytes = cache.totalBytes();
       let targetUndecodedTiles = 0;
       let restingTiles = 0;
@@ -1452,12 +1083,8 @@ export const createLodController = (
           !cache.has(keyString)
         ) {
           targetUndecodedTiles += 1;
-          if (resting(tileFailures, keyString)) restingTiles += 1;
+          if (tiles.resting(keyString)) restingTiles += 1;
         }
-      }
-      let restingPages = 0;
-      for (const keyString of pageFailures.keys()) {
-        if (resting(pageFailures, keyString)) restingPages += 1;
       }
       let drawnPoints = 0;
       for (const [keyString, tile] of submitted) {
@@ -1471,16 +1098,16 @@ export const createLodController = (
         decodedTiles: resident.size + cache.count(),
         decodedBytes: residentBytes + cachedBytes,
         cachedBytes,
-        inFlight: wantedTileReads(),
-        queuedTiles: queue.length,
-        physicalTileOperations,
-        hierarchyInFlight: pagesInFlight.size,
-        queuedPages: pageQueue.length,
-        physicalHierarchyOperations,
+        inFlight: tileCounts.wantedReading,
+        queuedTiles: tileCounts.queued,
+        physicalTileOperations: tileCounts.physical,
+        hierarchyInFlight: pageCounts.reading,
+        queuedPages: pageCounts.queued,
+        physicalHierarchyOperations: pageCounts.physical,
         workRevision,
-        workPending: workPending(),
+        workPending: workPendingIn(tileCounts, pageCounts),
         restingTiles,
-        restingPages,
+        restingPages: pages.restingCount(),
         selectionPending: selectionTimer !== null,
         fetchConcurrency,
         hierarchyConcurrency,
