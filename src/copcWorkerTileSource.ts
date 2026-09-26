@@ -19,7 +19,7 @@ type PendingRequest = {
   readonly resolve: (response: CopcWorkerResponse) => void;
   readonly reject: (error: unknown) => void;
   readonly signal: AbortSignal | undefined;
-  readonly onAbort: (() => void) | undefined;
+  readonly onAbort: () => void;
   aborted: boolean;
 };
 
@@ -53,11 +53,8 @@ export const createCopcWorkerTileSource = async (
   let nextId = 0;
   let disposed = false;
 
-  const detach = (request: PendingRequest): void => {
-    if (request.onAbort !== undefined) {
-      request.signal?.removeEventListener("abort", request.onAbort);
-    }
-  };
+  const detach = (request: PendingRequest): void =>
+    request.signal?.removeEventListener("abort", request.onAbort);
 
   const rejectAll = (error: unknown): void => {
     for (const request of pending.values()) {
@@ -107,15 +104,12 @@ export const createCopcWorkerTileSource = async (
     if (disposed) return Promise.reject(new Error("COPC source is disposed"));
     if (signal?.aborted) return Promise.reject(abortReason(signal));
     return new Promise((resolve, reject) => {
-      const onAbort =
-        signal === undefined
-          ? undefined
-          : (): void => {
-              const current = pending.get(request.id);
-              if (current === undefined || current.aborted) return;
-              current.aborted = true;
-              worker.postMessage({ type: "cancel", id: request.id });
-            };
+      const onAbort = (): void => {
+        const current = pending.get(request.id);
+        if (current === undefined || current.aborted) return;
+        current.aborted = true;
+        worker.postMessage({ type: "cancel", id: request.id });
+      };
       pending.set(request.id, {
         resolve,
         reject,
@@ -123,9 +117,7 @@ export const createCopcWorkerTileSource = async (
         onAbort,
         aborted: false,
       });
-      if (signal !== undefined && onAbort !== undefined) {
-        signal.addEventListener("abort", onAbort, { once: true });
-      }
+      signal?.addEventListener("abort", onAbort, { once: true });
       worker.postMessage(request);
     });
   };

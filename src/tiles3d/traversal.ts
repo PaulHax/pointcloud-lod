@@ -314,14 +314,8 @@ const implicitHierarchy = (
       address: ImplicitTileAddress,
     ): TilesetTile => {
       const tileIndex = subtreeTileIndex(localLevel, localX, localY);
-      const bounds = parsed.tileBoundingBoxes[tileIndex];
-      if (!bounds) {
-        // parseSubtree enforces metadata for every available tile. This guard
-        // keeps custom test parsers from materializing an under-bounded tile.
-        throw new Error(
-          `available implicit tile ${tileIndex} has no metadata bounds`,
-        );
-      }
+      // parseSubtree gives every available tile its metadata bounds.
+      const bounds = parsed.tileBoundingBoxes[tileIndex]!;
       const children: TilesetTile[] = [];
       if (address.level + 1 < descriptor.availableLevels) {
         if (localLevel + 1 < descriptor.subtreeLevels) {
