@@ -129,6 +129,12 @@ export type ViewGovernorStats = {
 export type ViewGovernor = {
   /** Current fraction for the active motion regime. */
   qualityFraction(): number;
+  /** The regime frames are attributed to now. */
+  regime(): QualityRegime;
+  /** The current regime's last adjustment held within hysteresis or at a clamp. */
+  converged(): boolean;
+  /** Presentations recorded so far. */
+  frameCount(): number;
   /** Aggregate work from every active member, including fixed-quality members. */
   setWorkState(state: GovernorWorkState): void;
   setOptions(options?: ViewGovernorOptions): void;
@@ -443,11 +449,7 @@ export const createViewGovernor = (
   };
 
   const converged = (): boolean => {
-    const current =
-      regime() === "interaction"
-        ? quality.stats().interaction
-        : quality.stats().stationary;
-    const reason = current.lastAdjustment?.reason;
+    const reason = quality.lastAdjustment(interacting())?.reason;
     return reason === "within-hysteresis" || reason === "clamped";
   };
 
@@ -629,6 +631,9 @@ export const createViewGovernor = (
 
   return {
     qualityFraction: () => quality.fraction(interacting()),
+    regime,
+    converged,
+    frameCount: () => frameCount,
 
     invalidateCapacity() {
       if (disposed) return;

@@ -396,6 +396,47 @@ describe("createViewGovernor", () => {
     expect(governor.needsFrame()).toBe(false);
   });
 
+  it("answers regime, convergence and frame count as its snapshot does", () => {
+    const governor = createViewGovernor({ minSamples: 1, cooldownMs: 0 });
+    const read = () => ({
+      regime: governor.regime(),
+      converged: governor.converged(),
+      frames: governor.frameCount(),
+    });
+    const snapshot = () => {
+      const stats = governor.stats();
+      const reason = stats.lastAdjustment?.reason;
+      return {
+        regime: stats.regime,
+        converged: reason === "within-hysteresis" || reason === "clamped",
+        frames: stats.frameMetrics.frames,
+      };
+    };
+    expect(read()).toEqual({
+      regime: "stationary",
+      converged: false,
+      frames: 0,
+    });
+    expect(read()).toEqual(snapshot());
+    governor.recordHostFrame({ hostFrameMs: 1, now: 0 });
+    expect(read()).toEqual({
+      regime: "stationary",
+      converged: true,
+      frames: 1,
+    });
+    expect(read()).toEqual(snapshot());
+    const motion = governor.beginMotion("explicit");
+    expect(read()).toEqual({
+      regime: "interaction",
+      converged: false,
+      frames: 1,
+    });
+    expect(read()).toEqual(snapshot());
+    motion.release();
+    expect(read()).toEqual(snapshot());
+    governor.dispose();
+  });
+
   it("learns the display quantum and grants the target whole refreshes", () => {
     const governor = createViewGovernor({
       initialFraction: 0.5,

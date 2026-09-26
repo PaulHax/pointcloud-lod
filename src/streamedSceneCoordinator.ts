@@ -245,7 +245,7 @@ export const createStreamedSceneCoordinator = (
   const governor = createViewGovernor(governorOptions());
 
   const invalidateCapacity = (): void => {
-    if (disposed || governor.stats().frameMetrics.frames === 0) return;
+    if (disposed || governor.frameCount() === 0) return;
     governor.invalidateCapacity();
     // Reject the presentation spanning the mutation as well as the previous
     // workload's samples. A style or visibility change may enqueue no work.
@@ -256,7 +256,7 @@ export const createStreamedSceneCoordinator = (
   const applyAllocations = (): void => {
     if (disposed) return;
     const regime =
-      governor.stats().regime === "interaction" ? "moving" : "stationary";
+      governor.regime() === "interaction" ? "moving" : "stationary";
     const contenders = [];
     for (const state of members) {
       if (isAdaptive(state))
