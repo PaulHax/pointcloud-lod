@@ -18,10 +18,12 @@ import type {
   DecodedTexture,
   DecodedTileContent,
 } from "./decode";
-import type {
-  PickAlphaTexture,
-  SubmittedMeshPrimitive,
-  SubmittedMeshTile,
+import {
+  triangleCount,
+  vertexAt,
+  type PickAlphaTexture,
+  type SubmittedMeshPrimitive,
+  type SubmittedMeshTile,
 } from "./meshPicking";
 
 export type MeshAdapterOptions = {
@@ -222,26 +224,26 @@ const hasExactCpuAlphaSampler = (
   return (minFilter === 9728 || minFilter === 9729) && minFilter === magFilter;
 };
 
+const VTK_MIN_FILTERS = {
+  9728: "nearest",
+  9729: "linear",
+  9984: "nearest-mipmap-nearest",
+  9985: "linear-mipmap-nearest",
+  9986: "nearest-mipmap-linear",
+  9987: "linear-mipmap-linear",
+} as const;
+
+const VTK_WRAP_MODES = {
+  33071: "clamp-to-edge",
+  33648: "mirrored-repeat",
+  10497: "repeat",
+} as const;
+
 const vtkSampler = (sampler: DecodedTexture["sampler"]) => ({
   magFilter: sampler.magFilter === 9728 ? "nearest" : "linear",
-  minFilter: {
-    9728: "nearest",
-    9729: "linear",
-    9984: "nearest-mipmap-nearest",
-    9985: "linear-mipmap-nearest",
-    9986: "nearest-mipmap-linear",
-    9987: "linear-mipmap-linear",
-  }[sampler.minFilter],
-  wrapS: {
-    33071: "clamp-to-edge",
-    33648: "mirrored-repeat",
-    10497: "repeat",
-  }[sampler.wrapS],
-  wrapT: {
-    33071: "clamp-to-edge",
-    33648: "mirrored-repeat",
-    10497: "repeat",
-  }[sampler.wrapT],
+  minFilter: VTK_MIN_FILTERS[sampler.minFilter],
+  wrapS: VTK_WRAP_MODES[sampler.wrapS],
+  wrapT: VTK_WRAP_MODES[sampler.wrapT],
 });
 
 /**
@@ -254,7 +256,7 @@ const retainedGeometryBytes = (
   primitive: DecodedPrimitive,
   maxJobBytes: number,
 ): number => {
-  const triangles = trianglesIn(primitive);
+  const triangles = triangleCount(primitive);
   if (splits(primitive, maxJobBytes)) {
     return triangles * bytesPerTriangle(primitive);
   }
@@ -328,22 +330,14 @@ const boundsOf = (content: DecodedTileContent): Bounds | undefined => {
   return count ? { min, max } : undefined;
 };
 
-const trianglesIn = (
-  primitive: Pick<DecodedPrimitive, "positions" | "indices">,
-): number =>
-  Math.floor((primitive.indices?.length ?? primitive.positions.length / 3) / 3);
-
 const cellsFor = (primitive: DecodedPrimitive): Uint32Array => {
-  const count = Math.floor(
-    (primitive.indices?.length ?? primitive.positions.length / 3) / 3,
-  );
+  const count = triangleCount(primitive);
   const cells = new Uint32Array(count * 4);
   for (let triangle = 0; triangle < count; triangle += 1) {
     const output = triangle * 4;
     cells[output] = 3;
     for (let corner = 0; corner < 3; corner += 1) {
-      cells[output + corner + 1] =
-        primitive.indices?.[triangle * 3 + corner] ?? triangle * 3 + corner;
+      cells[output + corner + 1] = vertexAt(primitive, triangle, corner);
     }
   }
   return cells;
@@ -356,7 +350,7 @@ const cellsFor = (primitive: DecodedPrimitive): Uint32Array => {
  * larger estimate is small enough under its own.
  */
 const splits = (primitive: DecodedPrimitive, maxJobBytes: number): boolean =>
-  trianglesIn(primitive) >
+  triangleCount(primitive) >
   Math.max(1, Math.floor(maxJobBytes / bytesPerTriangle(primitive)));
 
 const bytesPerTriangle = (primitive: DecodedPrimitive): number =>
@@ -366,64 +360,41 @@ const bytesPerTriangle = (primitive: DecodedPrimitive): number =>
   (primitive.uvs ? 6 * Float32Array.BYTES_PER_ELEMENT : 0) +
   4 * Uint32Array.BYTES_PER_ELEMENT;
 
-const sourceVertex = (
+/** One attribute of a triangle interval, deindexed: `width` values a corner. */
+const gather = (
+  source: Float32Array,
+  width: number,
   primitive: DecodedPrimitive,
-  triangle: number,
-  corner: number,
-): number =>
-  primitive.indices?.[triangle * 3 + corner] ?? triangle * 3 + corner;
+  firstTriangle: number,
+  count: number,
+): Float32Array => {
+  const out = new Float32Array(count * 3 * width);
+  for (let triangle = 0; triangle < count; triangle += 1) {
+    for (let corner = 0; corner < 3; corner += 1) {
+      const vertex = vertexAt(primitive, firstTriangle + triangle, corner);
+      out.set(
+        source.subarray(vertex * width, vertex * width + width),
+        (triangle * 3 + corner) * width,
+      );
+    }
+  }
+  return out;
+};
 
 /** Copy one bounded triangle interval; called only inside its charged job. */
 const primitiveChunk = (
   primitive: DecodedPrimitive,
   firstTriangle: number,
-  triangleCount: number,
+  count: number,
 ): DecodedPrimitive => {
-  const positions = new Float32Array(triangleCount * 9);
-  const normals = primitive.normals
-    ? new Float32Array(triangleCount * 9)
-    : undefined;
-  const colors = primitive.colors
-    ? new Float32Array(triangleCount * 12)
-    : undefined;
-  const uvs = primitive.uvs ? new Float32Array(triangleCount * 6) : undefined;
-  for (
-    let localTriangle = 0;
-    localTriangle < triangleCount;
-    localTriangle += 1
-  ) {
-    const sourceTriangle = firstTriangle + localTriangle;
-    for (let corner = 0; corner < 3; corner += 1) {
-      const vertex = sourceVertex(primitive, sourceTriangle, corner);
-      positions.set(
-        primitive.positions.subarray(vertex * 3, vertex * 3 + 3),
-        (localTriangle * 3 + corner) * 3,
-      );
-      if (normals && primitive.normals) {
-        normals.set(
-          primitive.normals.subarray(vertex * 3, vertex * 3 + 3),
-          (localTriangle * 3 + corner) * 3,
-        );
-      }
-      if (colors && primitive.colors) {
-        colors.set(
-          primitive.colors.subarray(vertex * 4, vertex * 4 + 4),
-          (localTriangle * 3 + corner) * 4,
-        );
-      }
-      if (uvs && primitive.uvs) {
-        uvs.set(
-          primitive.uvs.subarray(vertex * 2, vertex * 2 + 2),
-          (localTriangle * 3 + corner) * 2,
-        );
-      }
-    }
-  }
+  const chunk = (source: Float32Array, width: number): Float32Array =>
+    gather(source, width, primitive, firstTriangle, count);
+  const { normals, colors, uvs } = primitive;
   return {
-    positions,
-    ...(normals ? { normals } : {}),
-    ...(colors ? { colors } : {}),
-    ...(uvs ? { uvs } : {}),
+    positions: chunk(primitive.positions, 3),
+    ...(normals ? { normals: chunk(normals, 3) } : {}),
+    ...(colors ? { colors: chunk(colors, 4) } : {}),
+    ...(uvs ? { uvs: chunk(uvs, 2) } : {}),
     material: primitive.material,
   };
 };
@@ -505,6 +476,16 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
   let logicalGeometryUploadBytes = 0;
   let logicalTextureUploadBytes = 0;
   const budgetPreapproved = new Set<string>();
+
+  const pendingJobs = (): number => {
+    let jobs = 0;
+    for (const tile of pending.values()) jobs += tile.remainingJobs;
+    return jobs;
+  };
+  const drawnResources = (): TileResources[] =>
+    [...drawn]
+      .map((id) => submitted.get(id))
+      .filter((tile): tile is TileResources => tile !== undefined);
 
   const setActorState = (
     tile: TileResources,
@@ -865,17 +846,18 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         if (texture)
           formats.add(texture.kind === "compressed" ? texture.format : "rgba");
       }
-      try {
-        for (const primitive of content.primitives) {
-          if (bytesPerTriangle(primitive) > maxJobBytes) {
-            throw new Error(
-              `one mesh triangle requires ${bytesPerTriangle(primitive)} bytes, exceeding the ${maxJobBytes}-byte submission cap`,
-            );
-          }
-        }
-      } catch (error) {
+      const oversized = content.primitives.find(
+        (primitive) => bytesPerTriangle(primitive) > maxJobBytes,
+      );
+      if (oversized) {
         failed.add(id);
-        safeCall(() => options.onError?.(error));
+        safeCall(() =>
+          options.onError?.(
+            new Error(
+              `one mesh triangle requires ${bytesPerTriangle(oversized)} bytes, exceeding the ${maxJobBytes}-byte submission cap`,
+            ),
+          ),
+        );
         return "failed";
       }
       const resources: TileResources = {
@@ -982,13 +964,8 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
           );
         }
         content.primitives.forEach((primitive) => {
-          const totalTriangles = trianglesIn(primitive);
+          const totalTriangles = triangleCount(primitive);
           const perTriangle = bytesPerTriangle(primitive);
-          if (perTriangle > maxJobBytes) {
-            throw new Error(
-              `one mesh triangle requires ${perTriangle} bytes, exceeding the ${maxJobBytes}-byte submission cap`,
-            );
-          }
           const trianglesPerChunk = Math.max(
             1,
             Math.floor(maxJobBytes / perTriangle),
@@ -1229,23 +1206,18 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
     },
 
     submittedTiles() {
-      return [...drawn]
-        .map((id) => submitted.get(id))
-        .filter((tile): tile is TileResources => tile !== undefined)
-        .map((tile) => ({
-          id: tile.id,
-          origin: tile.origin,
-          primitives: tile.primitives.map((entry) => entry.primitive),
-          ...(tile.bounds ? { bounds: tile.bounds } : {}),
-        }));
+      return drawnResources().map((tile) => ({
+        id: tile.id,
+        origin: tile.origin,
+        primitives: tile.primitives.map((entry) => entry.primitive),
+        ...(tile.bounds ? { bounds: tile.bounds } : {}),
+      }));
     },
 
     workState() {
-      let pendingJobs = 0;
-      for (const tile of pending.values()) pendingJobs += tile.remainingJobs;
       return {
         workRevision,
-        pendingJobs,
+        pendingJobs: pendingJobs(),
         residentBytes: sumOf(submittedBytes) + sumOf(pooledBytes),
       };
     },
@@ -1253,9 +1225,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
     stats() {
       const submittedResources = [...submitted.values()];
       const resident = [...submittedResources, ...pooled.values()];
-      const drawnResources = [...drawn]
-        .map((id) => submitted.get(id))
-        .filter((tile): tile is TileResources => tile !== undefined);
+      const drawnTiles = drawnResources();
       const formats = new Set<string>();
       for (const tile of resident)
         for (const format of tile.formats) formats.add(format);
@@ -1264,10 +1234,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
       return {
         workRevision,
         pendingTiles: pending.size,
-        pendingJobs: [...pending.values()].reduce(
-          (sum, tile) => sum + tile.remainingJobs,
-          0,
-        ),
+        pendingJobs: pendingJobs(),
         submittedTiles: submittedResources.length,
         submittedTileIds: [...submitted.keys()],
         submittedPrimitives: submittedResources.reduce(
@@ -1289,25 +1256,25 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         residentTextureBytes: submittedBytes.texture + pooledBytes.texture,
         residentBytes: sumOf(submittedBytes) + sumOf(pooledBytes),
         resourceCeilingBytes,
-        drawnTiles: drawnResources.length,
+        drawnTiles: drawnTiles.length,
         drawnTileIds: [...drawn],
-        drawnPrimitives: drawnResources.reduce(
+        drawnPrimitives: drawnTiles.reduce(
           (sum, tile) => sum + tile.primitiveCount,
           0,
         ),
-        drawnActors: drawnResources.reduce(
+        drawnActors: drawnTiles.reduce(
           (sum, tile) => sum + tile.primitives.length,
           0,
         ),
-        drawnTextureBytes: drawnResources.reduce(
+        drawnTextureBytes: drawnTiles.reduce(
           (sum, tile) => sum + tile.textureBytes,
           0,
         ),
-        drawnTriangles: drawnResources.reduce(
+        drawnTriangles: drawnTiles.reduce(
           (sum, tile) =>
             sum +
             tile.primitives.reduce(
-              (inner, entry) => inner + trianglesIn(entry.primitive),
+              (inner, entry) => inner + triangleCount(entry.primitive),
               0,
             ),
           0,

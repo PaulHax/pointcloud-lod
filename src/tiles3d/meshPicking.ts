@@ -39,6 +39,20 @@ export type SubmittedMeshPrimitive = Pick<
     | { readonly kind: "unknown" };
 };
 
+/** Triangles a primitive draws: indexed triples, or consecutive vertex triples. */
+export const triangleCount = (
+  primitive: Pick<DecodedPrimitive, "positions" | "indices">,
+): number =>
+  Math.floor((primitive.indices?.length ?? primitive.positions.length / 3) / 3);
+
+/** The vertex one corner of a triangle names. */
+export const vertexAt = (
+  primitive: Pick<DecodedPrimitive, "indices">,
+  triangle: number,
+  corner: number,
+): number =>
+  primitive.indices?.[triangle * 3 + corner] ?? triangle * 3 + corner;
+
 export type SubmittedMeshTile = {
   readonly id: string;
   readonly origin: readonly [number, number, number];
@@ -138,13 +152,6 @@ const triangleHit = (
     ? { depth, u, v }
     : null;
 };
-
-const vertexAt = (
-  primitive: SubmittedMeshPrimitive,
-  triangleIndex: number,
-  corner: number,
-): number =>
-  primitive.indices?.[triangleIndex * 3 + corner] ?? triangleIndex * 3 + corner;
 
 const wrapped = (value: number, size: number, mode: number): number => {
   if (mode === 10497) return ((value % size) + size) % size;
@@ -266,10 +273,8 @@ export const pickSubmittedTriangles = (
       continue;
     for (const primitive of tile.primitives) {
       const availableVertices = Math.floor(primitive.positions.length / 3);
-      const triangleCount = Math.floor(
-        (primitive.indices?.length ?? availableVertices) / 3,
-      );
-      for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+      const triangles = triangleCount(primitive);
+      for (let triangle = 0; triangle < triangles; triangle += 1) {
         const ia = vertexAt(primitive, triangle, 0);
         const ib = vertexAt(primitive, triangle, 1);
         const ic = vertexAt(primitive, triangle, 2);
