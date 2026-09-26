@@ -10,5 +10,5 @@
     "allowJs": true,
     "types": ["node"]
   },
-  "include": ["test/browser", "scripts", "src"]
+  "include": ["test/browser", "test/types", "scripts", "src"]
 }
