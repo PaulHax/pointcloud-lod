@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { IDENTITY } from "../camera";
 import {
   createEcefToEnuTransform,
   createVerticalExaggerationTransform,
@@ -9,8 +10,6 @@ import {
   wgs84ToEcef,
   type Mat4,
 } from "./rtc";
-
-const identity: Mat4 = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 
 const translation = (x: number, y: number, z: number): Mat4 => [
   1,
@@ -91,7 +90,7 @@ describe("3D Tiles RTC conversion", () => {
     expect(
       transformPoint(createVerticalExaggerationTransform(3, 5), [0, 0, 5]),
     ).toEqual([0, 0, 5]);
-    expect(createVerticalExaggerationTransform()).toEqual(identity);
+    expect(createVerticalExaggerationTransform()).toEqual(IDENTITY);
   });
 
   it("subtracts a Float64 tile origin before Float32 conversion", () => {
@@ -101,7 +100,7 @@ describe("3D Tiles RTC conversion", () => {
         normals: new Float32Array([0, 0, 1, 0, 0, 1]),
       },
       translation(6_378_137.125, -4_841_403.375, 3_985_381.625),
-      identity,
+      IDENTITY,
     );
 
     expect(result.origin).toEqual([
@@ -128,7 +127,7 @@ describe("3D Tiles RTC conversion", () => {
           invSqrt2,
         ]),
       },
-      identity,
+      IDENTITY,
       local,
     );
 
@@ -156,7 +155,7 @@ describe("3D Tiles RTC conversion", () => {
         normals: new Float32Array([invSqrt2, 0, invSqrt2]),
       },
       scene,
-      identity,
+      IDENTITY,
     );
 
     expect(result.origin).toEqual([97, 203, 38]);
@@ -171,29 +170,29 @@ describe("3D Tiles RTC conversion", () => {
     expect(() =>
       flattenPrimitiveToRtc(
         { positions },
-        [...identity.slice(0, 15), NaN] as Mat4,
-        identity,
+        [...IDENTITY.slice(0, 15), NaN] as Mat4,
+        IDENTITY,
       ),
     ).toThrow(/finite/i);
     expect(() =>
       flattenPrimitiveToRtc(
         { positions, normals: new Float32Array([0, 0, 1]) },
-        identity,
+        IDENTITY,
         [0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
       ),
     ).toThrow(/degenerate/i);
     expect(() =>
       flattenPrimitiveToRtc(
         { positions: new Float32Array([0, 1]) },
-        identity,
-        identity,
+        IDENTITY,
+        IDENTITY,
       ),
     ).toThrow(/positions/i);
     expect(() =>
       flattenPrimitiveToRtc(
         { positions, normals: new Float32Array([0, 1]) },
-        identity,
-        identity,
+        IDENTITY,
+        IDENTITY,
       ),
     ).toThrow(/normals/i);
   });

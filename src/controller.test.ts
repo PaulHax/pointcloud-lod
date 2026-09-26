@@ -6,7 +6,9 @@ import {
   levelOf,
   type PageGraphSource,
 } from "../test/fixtures/pageGraph";
+import { perspectiveView } from "../test/helpers";
 import {
+  IDENTITY,
   boundsCenterRayOffset,
   distanceToBounds,
   type CameraView,
@@ -34,31 +36,18 @@ import type {
   TileSourceMetadata,
 } from "./tileSource";
 
-const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 /** Pushes everything 10 units off in clip x: nothing is visible. */
 const LOOK_AWAY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -10, 0, 0, 1];
 
-const VIEW: PerspectiveCameraView = {
-  projection: "perspective",
-  viewProj: IDENTITY,
-  position: [0, 0, 0],
-  fovY: Math.PI / 2,
-  viewportWidthCssPx: 100,
-  viewportHeightCssPx: 100,
-};
+const VIEW = perspectiveView();
 
-const FRAMED_VIEW: PerspectiveCameraView = {
-  projection: "perspective",
+const FRAMED_VIEW = perspectiveView({
   // Symmetric 90° perspective camera at the origin, looking down -Z.
   viewProj: [
     1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1.002002002002002, -1, 0, 0,
     -0.20020020020020018, 0,
   ],
-  position: [0, 0, 0],
-  fovY: Math.PI / 2,
-  viewportWidthCssPx: 100,
-  viewportHeightCssPx: 100,
-};
+});
 
 /** Same framing, parallel projection: half-height 1 over a 100 px viewport. */
 const ORTHOGRAPHIC_VIEW: OrthographicCameraView = {

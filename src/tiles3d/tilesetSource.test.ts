@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { IDENTITY } from "../camera";
 import {
   TilesetFetchError,
   TilesetUnsupportedError,
@@ -8,14 +9,13 @@ import {
   resolveTilesetContentUri,
 } from "./tilesetSource";
 
-const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 const box = [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1];
 
 const tile = (uri = "content/root.glb", children: unknown[] = []) => ({
   boundingVolume: { box },
   geometricError: children.length === 0 ? 0 : 8,
   refine: "REPLACE",
-  transform: identity,
+  transform: IDENTITY,
   content: { uri },
   ...(children.length > 0 ? { children } : {}),
 });
@@ -26,11 +26,11 @@ const document = () => ({
   root: tile("content/root.glb", [
     {
       ...tile("content/west.glb"),
-      transform: [...identity.slice(0, 12), -1, 0, 0, 1],
+      transform: [...IDENTITY.slice(0, 12), -1, 0, 0, 1],
     },
     {
       ...tile("content/east.gltf"),
-      transform: [...identity.slice(0, 12), 1, 0, 0, 1],
+      transform: [...IDENTITY.slice(0, 12), 1, 0, 0, 1],
     },
   ]),
 });
@@ -64,7 +64,7 @@ const implicitDocument = () => ({
     boundingVolume: { box },
     geometricError: 16,
     refine: "REPLACE",
-    transform: identity,
+    transform: IDENTITY,
     content: { uri: "content/{level}/{x}/{y}.glb" },
     implicitTiling: {
       subdivisionScheme: "QUADTREE",
@@ -108,7 +108,7 @@ describe("loadTileset", () => {
       0,
       0,
       0.5e-12,
-      ...identity.slice(4, 15),
+      ...IDENTITY.slice(4, 15),
       1 + 0.5e-12,
     ]);
     await expect(
@@ -342,13 +342,13 @@ describe("loadTileset", () => {
       "nonfinite transform",
       {
         ...document(),
-        root: { ...tile(), transform: [...identity.slice(0, 15), Infinity] },
+        root: { ...tile(), transform: [...IDENTITY.slice(0, 15), Infinity] },
       },
       "root.transform",
     ],
     [
       "non-affine transform",
-      documentWithRootTransform([1, 0, 0, 1, ...identity.slice(4)]),
+      documentWithRootTransform([1, 0, 0, 1, ...IDENTITY.slice(4)]),
       "root.transform",
     ],
     [

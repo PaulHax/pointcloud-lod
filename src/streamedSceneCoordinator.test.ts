@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { perspectiveView } from "../test/helpers";
 import type { CameraView, Mat16 } from "./camera";
 import { createMemoryPool } from "./memoryPool";
 import {
@@ -14,14 +15,7 @@ import type {
   OcclusionResult,
 } from "./streamedMember";
 
-const VIEW: CameraView = {
-  projection: "perspective",
-  viewProj: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
-  position: [0, 0, 0],
-  fovY: Math.PI / 2,
-  viewportWidthCssPx: 100,
-  viewportHeightCssPx: 100,
-};
+const VIEW = perspectiveView();
 
 /** A coordinator over its own small page pool unless a test shares one. */
 const makeCoordinator = ({

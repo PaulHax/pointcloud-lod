@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 
-import type { PerspectiveCameraView } from "../camera";
+import { IDENTITY, type PerspectiveCameraView } from "../camera";
 import { parseTileset, type TilesetTile } from "./tilesetSource";
 import { createVerticalExaggerationTransform } from "./rtc";
 import {
@@ -20,11 +20,10 @@ import {
 const traverseTileset = (options: TilesetTraversalOptions) =>
   createTilesetTraversal()(options);
 
-const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] as const;
 const lookAway = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -10, 0, 0, 1] as const;
 const view = (
   position: [number, number, number],
-  viewProj: ArrayLike<number> = identity,
+  viewProj: ArrayLike<number> = IDENTITY,
 ): PerspectiveCameraView => ({
   projection: "perspective",
   viewProj,
@@ -57,7 +56,7 @@ const makeTile = (
   id: string,
   geometricError: number,
   children: TilesetTile[] = [],
-  transform: readonly number[] = identity,
+  transform: readonly number[] = IDENTITY,
 ): TilesetTile => ({
   id,
   geometricError,
@@ -602,7 +601,7 @@ describe("traverseTileset", () => {
 
     const orthographic = {
       projection: "orthographic" as const,
-      viewProj: identity,
+      viewProj: IDENTITY,
       position: [0, 0, 100] as [number, number, number],
       parallelScale: 100,
       viewportWidthCssPx: 100,
@@ -674,7 +673,7 @@ describe("traverseTileset", () => {
       {
         camera: {
           projection: "orthographic",
-          viewProj: identity,
+          viewProj: IDENTITY,
           position: [0, 0, 100],
           parallelScale: 100,
           viewportWidthCssPx: 100,
