@@ -31,6 +31,12 @@ class FakeWorker {
     this.terminated = true;
   }
 
+  crash(message: string): void {
+    for (const listener of this.listeners.get("error") ?? []) {
+      listener({ message });
+    }
+  }
+
   respond(message: CopcWorkerResponse): void {
     for (const listener of this.listeners.get("message") ?? []) {
       listener({ data: message });
@@ -288,19 +294,42 @@ describe("COPC worker tile source", () => {
     source.dispose?.();
   });
 
-  it("fails the whole source when a decoder cannot open", async () => {
+  it("keeps loading on the hierarchy worker when a decoder cannot open", async () => {
     const workers = [new FakeWorker(), new FakeWorker()];
     const [hierarchy, decoder] = workers as [FakeWorker, FakeWorker];
     const source = await openSource(...workers);
-    const nodesPromise = source.nodes(ROOT_KEY);
     decoder.respond({
       type: "error",
       id: decoder.sent[0]!.id,
       error: { name: "RuntimeError", message: "no wasm" },
     });
-    await expect(nodesPromise).rejects.toMatchObject({ message: "no wasm" });
-    expect(hierarchy.terminated).toBe(true);
+    await drainMicrotasks();
     expect(decoder.terminated).toBe(true);
-    await expect(source.loadTile(ROOT_KEY)).rejects.toThrow(/disposed/);
+    expect(hierarchy.terminated).toBe(false);
+    await readRootPage(source, hierarchy);
+    leaveInFlight(source.loadTile(keyFromString(CHILDREN[0]!)));
+    expect(hierarchy.sent.at(-1)).toMatchObject({ type: "load-tile" });
+    source.dispose?.();
+  });
+
+  it("fails only a crashed decoder's tiles and sends the next to the rest", async () => {
+    const workers = [new FakeWorker(), new FakeWorker()];
+    const [hierarchy, decoder] = workers as [FakeWorker, FakeWorker];
+    const source = await openSource(...workers);
+    await openDecoders(decoder);
+    await readRootPage(source, hierarchy);
+    const onHierarchy = source.loadTile(keyFromString(CHILDREN[0]!));
+    const onDecoder = source.loadTile(keyFromString(CHILDREN[1]!));
+    expect(decoder.sent.at(-1)).toMatchObject({ type: "load-tile" });
+    decoder.crash("out of memory");
+    await expect(onDecoder).rejects.toThrow("out of memory");
+    expect(decoder.terminated).toBe(true);
+    expect(hierarchy.terminated).toBe(false);
+    leaveInFlight(onHierarchy);
+    leaveInFlight(source.loadTile(keyFromString(CHILDREN[2]!)));
+    expect(
+      hierarchy.sent.filter((request) => request.type === "load-tile"),
+    ).toHaveLength(2);
+    source.dispose?.();
   });
 });
