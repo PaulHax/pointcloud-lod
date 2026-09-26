@@ -1464,6 +1464,11 @@ export const createLodController = (
     }
   };
 
+  const rootVisible = (planes: ReturnType<typeof frustumPlanes>): boolean => {
+    const root = hierarchy.get(ROOT_KEY_STRING);
+    return root !== undefined && boundsIntersectsFrustum(planes, root.bounds);
+  };
+
   const runSelection = (seed?: ReadonlySet<string>): void => {
     if (disposed || !active || view === null) return;
     const budget = currentBudget();
@@ -1535,7 +1540,11 @@ export const createLodController = (
       sseStoppedNodes,
       budgetSkippedNodes: selection.budgetSkippedNodes,
       budgetSkippedPoints: selection.budgetSkippedPoints,
-      projectedImportance: target.size > 0 ? sse(ROOT_KEY) : 0,
+      // Importance says whether the cloud is in view, not whether the budget
+      // admitted anything. A root larger than the budget selects nothing, and
+      // reporting that as culled would earn the cloud no quality, and so no
+      // budget that could ever admit its root.
+      projectedImportance: rootVisible(planes) ? sse(ROOT_KEY) : 0,
     };
     updateDrawPlan();
     updateAutoDiameter();
