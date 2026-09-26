@@ -130,6 +130,20 @@ const select = (
   });
 
 describe("traverseTileset", () => {
+  it("requests coarser tiles first, then those nearest the view centre", () => {
+    const root = makeTile("root", 8, [
+      makeTile("root/0", 0, [], matrix(-0.6)),
+      makeTile("root/1", 0, [], matrix(0.6)),
+      makeTile("root/2", 0, [], matrix(0.1)),
+    ]);
+    expect(select(root).requestedTileIds).toEqual([
+      "root",
+      "root/2",
+      "root/0",
+      "root/1",
+    ]);
+  });
+
   it("reuses hierarchy across camera changes and invalidates replaced or evicted subtrees", () => {
     const root = implicitRoot();
     const parsed = parseSubtree(
@@ -527,8 +541,8 @@ describe("traverseTileset", () => {
     expect(waiting.desiredTileIds).toEqual(["root/0/0", "root/1/0"]);
     expect(waiting.drawnTileIds).toEqual(["root/0/0", "root/1"]);
     expect(waiting.requestedTileIds).toEqual([
-      "root/0/0",
       "root/1",
+      "root/0/0",
       "root/1/0",
     ]);
 
