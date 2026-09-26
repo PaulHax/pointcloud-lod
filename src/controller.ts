@@ -619,8 +619,6 @@ export const createLodController = (
     onLoaded: (keyString, infos) => {
       loadedPages.add(keyString);
       for (const info of infos) {
-        // A fresh entry object, so the prepared view measures it afresh
-        // rather than reusing the page reference's values.
         nodes.set(keyToString(info.key), {
           pointCount: info.pointCount,
           bounds: info.bounds,

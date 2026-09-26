@@ -330,10 +330,7 @@ export type PreparedView = {
    * reads as a very large, never infinite, error.
    */
   readonly screenSpaceError: (length: number, distance: number) => number;
-  /**
-   * A node's point spacing projected at its distance from the eye.
-   * Memoized per node object, like `centerRayOffset`.
-   */
+  /** A node's point spacing projected at its distance from the eye. */
   readonly nodeScreenSpaceError: (node: MeasuredNode) => number;
   /**
    * How far a node's bounds centre lies off the centre ray. Zero is the
@@ -347,25 +344,8 @@ export type PreparedView = {
    * parallel scale. Both are dimensionless and ordered centre-out; their
    * magnitudes are never compared across different views. Infinite when the
    * view-projection has no centre ray.
-   *
-   * Memoized per node object: selection, request ordering and the terminal
-   * walk read it repeatedly within one pass, and a hierarchy entry replaced
-   * by a new object is measured afresh.
    */
   readonly centerRayOffset: (node: { readonly bounds: Bounds }) => number;
-};
-
-const memoizedPerObject = <T extends object>(
-  measure: (node: T) => number,
-): ((node: T) => number) => {
-  const values = new WeakMap<T, number>();
-  return (node) => {
-    const cached = values.get(node);
-    if (cached !== undefined) return cached;
-    const value = measure(node);
-    values.set(node, value);
-    return value;
-  };
 };
 
 export const prepareView = (view: CameraView): PreparedView => {
@@ -375,17 +355,15 @@ export const prepareView = (view: CameraView): PreparedView => {
     view,
     planes: frustumPlanes(view.viewProj),
     screenSpaceError,
-    nodeScreenSpaceError: memoizedPerObject((node: MeasuredNode) =>
+    nodeScreenSpaceError: (node) =>
       screenSpaceError(
         node.spacing,
         distanceToBounds(view.position, node.bounds),
       ),
-    ),
-    centerRayOffset: memoizedPerObject((node: { readonly bounds: Bounds }) =>
+    centerRayOffset: (node) =>
       ray === null
         ? Number.POSITIVE_INFINITY
         : offsetFromRay(ray, view, node.bounds),
-    ),
   };
 };
 
