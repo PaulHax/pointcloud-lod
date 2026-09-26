@@ -83,6 +83,17 @@ describe("parsePct1", () => {
     expect(tile.rgb).toBeUndefined();
   });
 
+  it("reads only the RGB flag, whatever other header bits are set", () => {
+    const spec: Pct1Spec = {
+      origin: [1, 2, 3],
+      positions: [1, 2, 3, 4, 5, 6],
+      rgb: [10, 20, 30, 40, 50, 60],
+    };
+    expect(parsePct1(makePct1({ ...spec, extraFlags: 2 }))).toEqual(
+      parsePct1(makePct1(spec)),
+    );
+  });
+
   it("rejects a wrong magic", () => {
     expect(() =>
       parsePct1(makePct1({ origin: [0, 0, 0], positions: [], magic: "NOPE" })),
@@ -210,27 +221,6 @@ describe("createHttpTileSource", () => {
       expect(tile.positions[index * 3 + 2]).toBe(point * 3);
       expect(tile.rgb![index * 3]).toBe(point);
     }
-  });
-
-  it("orders a payload whose header carries flag bits it does not know", async () => {
-    // Only bit 0 (RGB present) is part of the format; the parser ignores the
-    // rest, and no header bit can excuse a payload from progressive order.
-    const points = Array.from({ length: 300 }, (_, index) => index);
-    const payload = makePct1({
-      origin: [0, 0, 0],
-      positions: points.flatMap((point) => [point, point * 2, point * 3]),
-      rgb: points.flatMap((point) => [point % 256, 0, 0]),
-      extraFlags: 2,
-    });
-    const source = sourceOn(
-      "/pc/a/rev1",
-      vi.fn(async () => new Response(payload, { status: 200 })),
-    );
-
-    const tile = await source.loadTile({ level: 1, x: 1, y: 0, z: 0 });
-    const delivered = points.map((_, index) => tile.positions[index * 3]!);
-    expect([...delivered].sort((a, b) => a - b)).toEqual(points);
-    expect(delivered).not.toEqual(points);
   });
 
   it("maps HTTP 410 to RevisionGoneError", async () => {

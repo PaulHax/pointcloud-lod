@@ -2769,19 +2769,6 @@ describe("createLodController — bounded physical work", () => {
     expect(graph.tileCalls.length).toBe(readsBefore);
     controller.dispose();
   });
-
-  it("rejects an invalid hierarchy concurrency at construction", () => {
-    for (const value of [Number.NaN, Number.POSITIVE_INFINITY, 0, -1]) {
-      expect(() =>
-        createLodController({
-          source: createPageGraphSource().source,
-          onTiles: () => {},
-          scheduleRender: () => {},
-          hierarchyConcurrency: value,
-        }),
-      ).toThrow(/hierarchyConcurrency/);
-    }
-  });
 });
 
 describe("createLodController — numeric configuration", () => {
@@ -2806,6 +2793,9 @@ describe("createLodController — numeric configuration", () => {
       expect(() => make({ cacheBytes: value })).toThrow(/cacheBytes/);
       expect(() => make({ fetchConcurrency: value })).toThrow(
         /fetchConcurrency/,
+      );
+      expect(() => make({ hierarchyConcurrency: value })).toThrow(
+        /hierarchyConcurrency/,
       );
     }
     for (const value of [...NON_FINITE, -1, -1e9]) {
