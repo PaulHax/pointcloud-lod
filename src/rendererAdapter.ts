@@ -33,6 +33,7 @@ import type { TileBatch } from "./payloadResidency";
 import { IDENTITY, sameMatrix, translatedMatrix } from "./mat4";
 import { finiteAbove, finiteNonNegative } from "./numeric";
 import { keyToString } from "./octree";
+import { setActorPointSize } from "./drawState";
 import { tileBytes, type TileData } from "./tileSource";
 
 export type RendererAdapterOptions = {
@@ -302,7 +303,7 @@ export const createRendererAdapter = (
     entry.mapper.setPointSizeScale(devicePixelRatio);
     entry.drawnPointCount = prefixFor(keyString, entry);
     entry.mapper.setMaximumPointCount(entry.drawnPointCount);
-    entry.actor.getProperty().setPointSize(diameterCssPx);
+    setActorPointSize(entry.actor, diameterCssPx);
     entry.actor.setVisibility(visible);
     entry.actor.setUserMatrix(translatedMatrix(baseMatrix, entry.tile.origin));
   };
@@ -461,7 +462,7 @@ export const createRendererAdapter = (
       if (!acceptsScalar(nextDiameterCssPx, diameterCssPx)) return;
       diameterCssPx = nextDiameterCssPx;
       for (const entry of tiles.values()) {
-        entry.actor.getProperty().setPointSize(nextDiameterCssPx);
+        setActorPointSize(entry.actor, nextDiameterCssPx);
       }
       scheduleRender();
     },
