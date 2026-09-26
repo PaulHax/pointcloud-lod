@@ -26,6 +26,7 @@ import {
   keyFromString,
   keyToString,
   nodeBounds,
+  nodeCube,
   type VoxelKey,
 } from "./octree";
 import type { TileBatch } from "./payloadResidency";
@@ -2667,9 +2668,7 @@ describe("createLodController — bounded physical work", () => {
     const expected = childKeys(ROOT_KEY)
       .map((key) => ({
         keyString: keyToString(key),
-        centerOffset: prepared.centerRayOffset({
-          bounds: nodeBounds(ROOT_CUBE, key),
-        }),
+        centerOffset: prepared.centerRayOffset(nodeCube(ROOT_CUBE, key).center),
         distance: distanceToBounds(position, nodeBounds(ROOT_CUBE, key)),
       }))
       .sort(

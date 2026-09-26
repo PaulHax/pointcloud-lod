@@ -100,23 +100,6 @@ type TilePlacement = {
   bounds: WorldBox;
 };
 
-/**
- * How far a point projects from the viewport centre, in half viewport
- * heights; a point at or behind the eye is infinitely far. Only an ordering
- * key, so the aspect-corrected distance is all it needs.
- */
-const centreOffset = (camera: CameraView, point: Vec3): number => {
-  const m = camera.viewProj;
-  const [x, y, z] = point;
-  const w = m[3]! * x + m[7]! * y + m[11]! * z + m[15]!;
-  if (!(w > 0)) return Number.POSITIVE_INFINITY;
-  const aspect = camera.viewportWidthCssPx / camera.viewportHeightCssPx;
-  return Math.hypot(
-    ((m[0]! * x + m[4]! * y + m[8]! * z + m[12]!) / w) * aspect,
-    (m[1]! * x + m[5]! * y + m[9]! * z + m[13]!) / w,
-  );
-};
-
 const worldBox = (box: TilesetBox, matrix: readonly number[]): WorldBox => {
   const h = box.halfAxes;
   return {
@@ -509,10 +492,7 @@ const traverseHierarchy = (
         drawn: [],
       };
     }
-    requestOrder.set(tile.id, [
-      depth,
-      centreOffset(options.camera, bounds.center),
-    ]);
+    requestOrder.set(tile.id, [depth, view.centerRayOffset(bounds.center)]);
 
     const unknownRequest = hierarchy.unknownRequestByTileId.get(tile.id);
     if (unknownRequest) {

@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 
 import type { PerspectiveCameraView } from "../camera";
-import { IDENTITY } from "../mat4";
+import { IDENTITY, multiply } from "../mat4";
+import { perspective } from "../../test/helpers";
 import { parseTileset, type TilesetTile } from "./tilesetSource";
 import { createVerticalExaggerationTransform } from "./rtc";
 import {
@@ -137,12 +138,13 @@ describe("traverseTileset", () => {
       makeTile("root/1", 0, [], matrix(0.6)),
       makeTile("root/2", 0, [], matrix(0.1)),
     ]);
-    expect(select(root).requestedTileIds).toEqual([
-      "root",
-      "root/2",
-      "root/0",
-      "root/1",
-    ]);
+    const lookingAtRoot = view(
+      [0, 0, 10],
+      multiply(perspective(Math.PI / 2, 1, 0.1, 100), matrix(0, 0, -10)),
+    );
+    expect(
+      select(root, {}, { camera: lookingAtRoot }).requestedTileIds,
+    ).toEqual(["root", "root/2", "root/0", "root/1"]);
   });
 
   it("reuses hierarchy across camera changes and invalidates replaced or evicted subtrees", () => {
