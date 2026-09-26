@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { CameraView } from "./camera";
+import { perspectiveView } from "../test/helpers";
 import { createMemoryPool } from "./memoryPool";
 import { ROOT_KEY } from "./octree";
 import {
@@ -19,14 +19,7 @@ const settle = async (): Promise<void> => {
   await new Promise((resolve) => setTimeout(resolve, 0));
 };
 
-const VIEW: CameraView = {
-  projection: "perspective",
-  viewProj: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
-  position: [0, 0, -1],
-  fovY: Math.PI / 2,
-  viewportWidthCssPx: 100,
-  viewportHeightCssPx: 100,
-};
+const VIEW = perspectiveView({ position: [0, 0, -1] });
 
 const source = (pointCount = 1_000_000): TileSource => ({
   metadata: () => ({ pointCount }),

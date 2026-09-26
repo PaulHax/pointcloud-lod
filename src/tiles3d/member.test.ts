@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 
-import type { CameraView } from "../camera";
+import { perspectiveView } from "../../test/helpers";
+import { IDENTITY } from "../camera";
 import { createMemoryPool } from "../memoryPool";
 import { createSubmissionScheduler } from "../submissionScheduler";
 import type { StreamedMemberContext } from "../streamedMember";
@@ -14,15 +15,7 @@ import { createTiles3dMember } from "./member";
 import type { Tiles3dMemberConfig, Tiles3dMemberStats } from "./memberTypes";
 import { actorInstances, resetStubs } from "../../test/stubs/vtkStub";
 
-const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
-const view: CameraView = {
-  projection: "perspective",
-  viewProj: identity,
-  position: [0, 0, -1],
-  fovY: Math.PI / 2,
-  viewportWidthCssPx: 100,
-  viewportHeightCssPx: 100,
-};
+const view = perspectiveView({ position: [0, 0, -1] });
 
 const tile = (
   uri: string,
@@ -116,7 +109,7 @@ const harness = (withChildren = false, schedulerBytes = 1024) => {
   const config: Tiles3dMemberConfig = {
     endpoint: "/tiles",
     revision: "r1",
-    tilesetToScene: identity,
+    tilesetToScene: IDENTITY,
     maximumScreenSpaceErrorPx: 4,
     concurrency: 3,
     fetchTileset: async () => ({
@@ -184,7 +177,7 @@ describe("createTiles3dMember", () => {
         regime: "stationary",
       });
       await drain();
-      const away = [...identity];
+      const away = [...IDENTITY];
       away[12] = 10;
       member.setCamera({ ...view, viewProj: away });
       await drain();
@@ -302,7 +295,7 @@ describe("createTiles3dMember", () => {
     );
     // The checked-in wire fixture's ECEF placement is independent of this
     // lifecycle test; keep its producer metadata boxes but render in identity.
-    manifest.root.transform = identity;
+    manifest.root.transform = IDENTITY;
     const subtreeBytes = readFileSync(
       new URL("subtrees/0/0/0.subtree", directory),
     );
@@ -975,7 +968,7 @@ describe("createTiles3dMember", () => {
       2,
     );
     // Pan until the second child leaves the view.
-    const panned = [...identity];
+    const panned = [...IDENTITY];
     panned[12] = 1.2;
     member.setCamera({ ...view, viewProj: panned });
     await drain();

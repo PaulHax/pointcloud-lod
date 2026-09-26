@@ -1,16 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { CameraView } from "./camera";
+import { perspectiveView } from "../test/helpers";
 import { createViewGovernor } from "./viewGovernor";
 
-const VIEW: CameraView = {
-  projection: "perspective",
-  viewProj: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
-  position: [0, 0, 0],
-  fovY: 1,
-  viewportWidthCssPx: 100,
-  viewportHeightCssPx: 100,
-};
+const VIEW = perspectiveView({ fovY: 1 });
 
 afterEach(() => vi.useRealTimers());
 

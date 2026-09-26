@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { cursorRay, type PerspectiveCameraView } from "./camera";
+import { perspectiveView } from "../test/helpers";
+import { IDENTITY, cursorRay, type PerspectiveCameraView } from "./camera";
 import type { Vec3 } from "./octree";
 import {
   DEFAULT_PICK_PIXEL_RADIUS,
@@ -13,22 +14,13 @@ import {
   type PointPickResult,
 } from "./picking";
 
-const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
-
 /**
  * Identity view-projection over a 200x100 viewport: world coordinates are NDC
  * directly, one NDC x unit is 100 css px, one NDC y unit is 50 css px, the
  * cursor ray under the center runs from (x, y, -1) along +z, and a point's
  * ray depth is `z + 1`.
  */
-const VIEW: PerspectiveCameraView = {
-  projection: "perspective",
-  viewProj: IDENTITY,
-  position: [0, 0, 0],
-  fovY: Math.PI / 2,
-  viewportWidthCssPx: 200,
-  viewportHeightCssPx: 100,
-};
+const VIEW = perspectiveView({ viewportWidthCssPx: 200 });
 const CENTER: [number, number] = [100, 50];
 
 /** Column-major perspective matrix (symmetric frustum, looking down -Z). */

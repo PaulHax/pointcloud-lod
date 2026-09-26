@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  IDENTITY,
   boundsIntersectsFrustum,
   boundsCenterRayOffset,
   cursorRay,
@@ -16,8 +17,6 @@ import {
   type PerspectiveCameraView,
 } from "./camera";
 import type { Bounds } from "./octree";
-
-const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 
 /** Column-major perspective matrix (symmetric frustum, looking down -Z). */
 const perspective = (
@@ -476,7 +475,6 @@ describe("viewInModelFrame", () => {
     0, 0, 2, 0,
     5, 6, 7, 1,
   ];
-  const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
   const frame = modelFrameOf(SIMILARITY)!;
 
   it("resolves a similarity's frame and refuses anything else", () => {
