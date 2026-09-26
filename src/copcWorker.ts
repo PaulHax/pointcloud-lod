@@ -1,13 +1,20 @@
 import { createLazPerf } from "laz-perf/lib/worker";
 
-import { createCopcTileSource } from "./copcTileSource";
-import type { RangeGetter } from "./copcTileSource";
+import {
+  createCopcTileDecoder,
+  createCopcTileSource,
+  type CopcNodeEntry,
+  type CopcTileDecoder,
+  type CopcTileSource,
+  type RangeGetter,
+} from "./copcTileSource";
 import type {
   CopcWorkerError,
   CopcWorkerRequest,
   CopcWorkerResponse,
 } from "./copcWorkerProtocol";
-import type { TileSource } from "./tileSource";
+import { keyToString } from "./octree";
+import type { LoadOptions, TileData } from "./tileSource";
 
 type WorkerScope = {
   addEventListener(
@@ -31,15 +38,36 @@ const blobGetter =
     return bytes;
   };
 
-/** Start the worker endpoint used by `createCopcWorkerTileSource`. */
+const rangeSource = (source: string | Blob): string | RangeGetter =>
+  typeof source === "string" ? source : blobGetter(source);
+
+/**
+ * Start the worker endpoint used by `createCopcWorkerTileSource`.
+ *
+ * One worker of a source opens the file and reads its hierarchy; the rest are
+ * decoders, opened from the state that one hands over, and read tiles from the
+ * entries sent with each request.
+ */
 export const serveCopcTileSourceWorker = (
   scope: WorkerScope = globalThis as unknown as WorkerScope,
 ): void => {
-  let source: TileSource | null = null;
+  let source: CopcTileSource | null = null;
+  let decoder: CopcTileDecoder | null = null;
   const operations = new Map<number, AbortController>();
 
   const respondError = (id: number, error: unknown): void =>
     scope.postMessage({ type: "error", id, error: serializedError(error) });
+
+  const loadTile = (
+    request: Extract<CopcWorkerRequest, { type: "load-tile" }>,
+    options: LoadOptions,
+  ): Promise<TileData> => {
+    if (source !== null) return source.loadTile(request.key, options);
+    if (decoder !== null && request.entry !== undefined) {
+      return decoder.loadTile(request.key, request.entry, options);
+    }
+    throw new Error("COPC worker is not open");
+  };
 
   const run = async (request: CopcWorkerRequest): Promise<void> => {
     if (request.type === "cancel") {
@@ -47,23 +75,30 @@ export const serveCopcTileSourceWorker = (
       return;
     }
 
-    if (request.type === "open") {
+    if (request.type === "open" || request.type === "open-decoder") {
       try {
         const lazPerf = await createLazPerf({
           locateFile: () => request.lazPerfWasmUrl,
         });
-        source = await createCopcTileSource({
-          source:
-            typeof request.source === "string"
-              ? request.source
-              : blobGetter(request.source),
-          lazPerf,
-        });
-        scope.postMessage({
-          type: "opened",
-          id: request.id,
-          metadata: source.metadata(),
-        });
+        if (request.type === "open") {
+          source = await createCopcTileSource({
+            source: rangeSource(request.source),
+            lazPerf,
+          });
+          scope.postMessage({
+            type: "opened",
+            id: request.id,
+            metadata: source.metadata(),
+            state: source.decodeState,
+          });
+        } else {
+          decoder = createCopcTileDecoder({
+            source: rangeSource(request.source),
+            lazPerf,
+            state: request.state,
+          });
+          scope.postMessage({ type: "decoder-opened", id: request.id });
+        }
       } catch (error) {
         respondError(request.id, error);
       }
@@ -73,17 +108,20 @@ export const serveCopcTileSourceWorker = (
     const operation = new AbortController();
     operations.set(request.id, operation);
     try {
-      if (source === null) throw new Error("COPC worker is not open");
       if (request.type === "nodes") {
+        if (source === null) throw new Error("COPC worker holds no hierarchy");
         const nodes = await source.nodes(request.key, {
           signal: operation.signal,
         });
         operation.signal.throwIfAborted();
-        scope.postMessage({ type: "nodes", id: request.id, nodes });
+        const entries: (readonly [string, CopcNodeEntry])[] = [];
+        for (const node of nodes) {
+          const entry = node.pageRef ? undefined : source.entry(node.key);
+          if (entry !== undefined) entries.push([keyToString(node.key), entry]);
+        }
+        scope.postMessage({ type: "nodes", id: request.id, nodes, entries });
       } else {
-        const tile = await source.loadTile(request.key, {
-          signal: operation.signal,
-        });
+        const tile = await loadTile(request, { signal: operation.signal });
         operation.signal.throwIfAborted();
         const transfer: Transferable[] = [tile.positions.buffer];
         if (tile.rgb !== undefined) transfer.push(tile.rgb.buffer);

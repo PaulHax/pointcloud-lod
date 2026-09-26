@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Copc, Getter, type Hierarchy } from "copc";
 
-import { createCopcTileSource } from "./copcTileSource";
+import { createCopcTileDecoder, createCopcTileSource } from "./copcTileSource";
 import { ROOT_KEY, keyFromString, keyToString } from "./octree";
 import type { TileSource } from "./tileSource";
 
@@ -373,6 +373,23 @@ describe("createCopcTileSource", () => {
       // Full-range 16-bit fixture colors arrive scaled to full-range 8-bit.
       expect(tile.rgb).toHaveLength(info.pointCount * 3);
       expect(Math.max(...tile.rgb!)).toBeGreaterThan(127);
+    }
+  });
+
+  it("lets a decoder given its state and entries read the same tiles", async () => {
+    const getter = Getter.file(FIXTURE);
+    const source = await createCopcTileSource({ source: getter });
+    // Cloned as a worker message would be, so the state must be plain data.
+    const decoder = createCopcTileDecoder({
+      source: getter,
+      state: structuredClone(source.decodeState),
+    });
+    const infos = await source.nodes(ROOT_KEY);
+    for (const info of infos.filter((n) => n.pointCount > 0)) {
+      const entry = structuredClone(source.entry(info.key)!);
+      expect(await decoder.loadTile(info.key, entry)).toEqual(
+        await source.loadTile(info.key),
+      );
     }
   });
 

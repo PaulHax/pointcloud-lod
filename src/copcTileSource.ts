@@ -261,18 +261,109 @@ const rgbShiftOf = (view: PointDataView): number => {
  */
 const clipToByte = (channel: number): number => (channel > 255 ? 255 : channel);
 
+/** Where one node's compressed points sit in the file. */
+export type CopcNodeEntry = Hierarchy.Node;
+
+/**
+ * What decoding a node takes besides its entry: the file's header and the
+ * asset-wide RGB shift. Both are fixed once a source has opened and both are
+ * plain data, so a source can hand them to decoders in other workers.
+ */
+export type CopcDecodeState = {
+  readonly copc: Copc;
+  readonly rgbShift: number;
+};
+
+/** A COPC TileSource that can equip decoders elsewhere to read its tiles. */
+export type CopcTileSource = TileSource & {
+  readonly decodeState: CopcDecodeState;
+  /** The entry of a node that a hierarchy read of this source described. */
+  entry(key: VoxelKey): CopcNodeEntry | undefined;
+};
+
+type LazPerf = CopcTileSourceOptions["lazPerf"];
+
+const rangeGetterOf = (source: string | RangeGetter): RangeGetter =>
+  typeof source === "string" ? httpRangeGetter(source) : source;
+
+/** The octree's enclosing cube, which node keys subdivide. */
+const rootCubeOf = (copc: Copc) => {
+  const [minX, minY, minZ, maxX] = copc.info.cube;
+  const halfSize = (maxX - minX) / 2;
+  return {
+    center: [minX + halfSize, minY + halfSize, minZ + halfSize] as const,
+    halfSize,
+  };
+};
+
+/**
+ * One node's points, tile-local against its cube centre and in progressive
+ * order. `decoded` is a view of the node already read, used in place of
+ * reading it again.
+ */
+const readTile = async (
+  getter: RangeGetter,
+  { copc, rgbShift }: CopcDecodeState,
+  lazPerf: LazPerf,
+  key: VoxelKey,
+  entry: CopcNodeEntry,
+  signal: AbortSignal | undefined,
+  decoded: PointDataView | null = null,
+): Promise<TileData> => {
+  signal?.throwIfAborted();
+  const view =
+    decoded ??
+    (await Copc.loadPointDataView(
+      abortableGetter(getter, signal),
+      copc,
+      entry,
+      { lazPerf },
+    ));
+  signal?.throwIfAborted();
+
+  const pointCount = view.pointCount;
+  const { center: origin } = nodeCube(rootCubeOf(copc), key);
+  const getX = view.getter("X");
+  const getY = view.getter("Y");
+  const getZ = view.getter("Z");
+
+  const hasRgb = RGB_POINT_FORMATS.has(copc.header.pointDataRecordFormat);
+  const positions = new Float32Array(pointCount * 3);
+  // The asset-wide shift is already known, so channels land in their final
+  // 8-bit form here — no intermediate 16-bit copy of the whole tile.
+  const rgb = hasRgb ? new Uint8Array(pointCount * 3) : undefined;
+  const getR = hasRgb ? view.getter("Red") : null;
+  const getG = hasRgb ? view.getter("Green") : null;
+  const getB = hasRgb ? view.getter("Blue") : null;
+
+  const [ox, oy, oz] = origin;
+  for (let i = 0, o = 0; i < pointCount; i += 1, o += 3) {
+    if (signal !== undefined && i % ABORT_CHECK_STRIDE === 0) {
+      signal.throwIfAborted();
+    }
+    positions[o] = getX(i) - ox;
+    positions[o + 1] = getY(i) - oy;
+    positions[o + 2] = getZ(i) - oz;
+    if (rgb !== undefined) {
+      rgb[o] = clipToByte(getR!(i) >> rgbShift);
+      rgb[o + 1] = clipToByte(getG!(i) >> rgbShift);
+      rgb[o + 2] = clipToByte(getB!(i) >> rgbShift);
+    }
+  }
+
+  return orderTileForProgressiveDrawing(
+    { origin, positions, rgb, pointCount },
+    keyToString(key),
+  );
+};
+
 /** COPC sources resolve their metadata asynchronously (header + info VLR). */
 export const createCopcTileSource = async (
   options: CopcTileSourceOptions,
-): Promise<TileSource> => {
-  const getter: RangeGetter =
-    typeof options.source === "string"
-      ? httpRangeGetter(options.source)
-      : options.source;
+): Promise<CopcTileSource> => {
+  const getter = rangeGetterOf(options.source);
 
   const copc = await Copc.create(getter);
-  const [minX, minY, minZ, maxX] = copc.info.cube;
-  const halfSize = (maxX - minX) / 2;
   const metadata: TileSourceMetadata = {
     pointCount: copc.header.pointCount,
     // The LAS header's own extent, which is the data's — unlike `info.cube`,
@@ -281,10 +372,7 @@ export const createCopcTileSource = async (
     // header does not carry a usable one.
     bounds: headerBounds(copc.header),
   };
-  const rootCube = {
-    center: [minX + halfSize, minY + halfSize, minZ + halfSize] as const,
-    halfSize,
-  };
+  const rootCube = rootCubeOf(copc);
 
   const nodeMap = new Map<string, Hierarchy.Node>();
   const pageMap = new Map<string, Hierarchy.Page>();
@@ -356,8 +444,12 @@ export const createCopcTileSource = async (
     }
   }
 
+  const decodeState: CopcDecodeState = { copc, rgbShift };
+
   return {
     metadata: () => metadata,
+    decodeState,
+    entry: (key) => nodeMap.get(keyToString(key)),
 
     async nodes(key: VoxelKey, opts?: LoadOptions): Promise<NodeInfo[]> {
       const keyString = keyToString(key);
@@ -388,57 +480,55 @@ export const createCopcTileSource = async (
       if (node === undefined) {
         throw new Error(`Hierarchy not loaded for node ${keyString}`);
       }
-      const signal = opts?.signal;
-      signal?.throwIfAborted();
-
-      let view: PointDataView;
-      if (keyString === rootKeyString && rootView !== null) {
-        view = rootView;
-        rootView = null;
-      } else {
-        view = await Copc.loadPointDataView(
-          abortableGetter(getter, signal),
-          copc,
-          node,
-          { lazPerf: options.lazPerf },
-        );
-      }
-      signal?.throwIfAborted();
-
-      const pointCount = view.pointCount;
-      const { center: origin } = nodeCube(rootCube, key);
-      const getX = view.getter("X");
-      const getY = view.getter("Y");
-      const getZ = view.getter("Z");
-
-      const positions = new Float32Array(pointCount * 3);
-      // The asset-wide shift is already known, so channels land in their final
-      // 8-bit form here — no intermediate 16-bit copy of the whole tile.
-      const rgb = hasRgb ? new Uint8Array(pointCount * 3) : undefined;
-      const getR = hasRgb ? view.getter("Red") : null;
-      const getG = hasRgb ? view.getter("Green") : null;
-      const getB = hasRgb ? view.getter("Blue") : null;
-
-      const [ox, oy, oz] = origin;
-      const shift = rgbShift;
-      for (let i = 0, o = 0; i < pointCount; i += 1, o += 3) {
-        if (signal !== undefined && i % ABORT_CHECK_STRIDE === 0) {
-          signal.throwIfAborted();
-        }
-        positions[o] = getX(i) - ox;
-        positions[o + 1] = getY(i) - oy;
-        positions[o + 2] = getZ(i) - oz;
-        if (rgb !== undefined) {
-          rgb[o] = clipToByte(getR!(i) >> shift);
-          rgb[o + 1] = clipToByte(getG!(i) >> shift);
-          rgb[o + 2] = clipToByte(getB!(i) >> shift);
-        }
-      }
-
-      return orderTileForProgressiveDrawing(
-        { origin, positions, rgb, pointCount },
-        keyString,
+      opts?.signal?.throwIfAborted();
+      const decoded = keyString === rootKeyString ? rootView : null;
+      if (decoded !== null) rootView = null;
+      return readTile(
+        getter,
+        decodeState,
+        options.lazPerf,
+        key,
+        node,
+        opts?.signal,
+        decoded,
       );
     },
+  };
+};
+
+export type CopcTileDecoderOptions = {
+  /** The file the source was opened on, as a URL or a byte-range getter. */
+  readonly source: string | RangeGetter;
+  readonly lazPerf?: LazPerf;
+  readonly state: CopcDecodeState;
+};
+
+export type CopcTileDecoder = {
+  loadTile(
+    key: VoxelKey,
+    entry: CopcNodeEntry,
+    opts?: LoadOptions,
+  ): Promise<TileData>;
+};
+
+/**
+ * Reads the tiles of a source opened elsewhere, from the entries its hierarchy
+ * reads produced. It reads no header or hierarchy of its own, so opening one
+ * costs no request.
+ */
+export const createCopcTileDecoder = (
+  options: CopcTileDecoderOptions,
+): CopcTileDecoder => {
+  const getter = rangeGetterOf(options.source);
+  return {
+    loadTile: (key, entry, opts) =>
+      readTile(
+        getter,
+        options.state,
+        options.lazPerf,
+        key,
+        entry,
+        opts?.signal,
+      ),
   };
 };

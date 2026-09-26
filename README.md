@@ -152,9 +152,13 @@ const source = await createCopcWorkerTileSource({
 });
 ```
 
-The source owns that worker; call `source.dispose()` after disposing its
-controller. Cancellation still settles only when the worker's physical read or
-decode ends, so controller concurrency remains bounded.
+The source calls `createWorker` once per worker and owns every worker it
+makes; call `source.dispose()` after disposing its controller. The first worker
+reads the hierarchy, and every worker decodes tiles, since decoding is what
+bounds how fast a COPC view fills in. `workers` sets how many there are; it
+defaults to one fewer than the logical cores, from one to three. Cancellation
+still settles only when a worker's physical read or decode ends, so controller
+concurrency remains bounded.
 
 ### Application flows and primary controls
 
@@ -750,9 +754,9 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
   - `createCopcTileSource` reads [COPC](https://copc.io/) files directly
     over HTTP Range requests (via the `copc` package), so any static file
     host works with no tile server at all;
-  - `createCopcWorkerTileSource` exposes the same contract while a dedicated
-    worker performs COPC I/O, LAZ decoding, and extraction; final typed arrays
-    transfer to the controller without a copy;
+  - `createCopcWorkerTileSource` exposes the same contract while a small
+    pool of workers performs COPC I/O, LAZ decoding, and extraction; final
+    typed arrays transfer to the controller without a copy;
   - `createHttpTileSource` speaks a small revision-scoped hierarchy/tile
     HTTP protocol with a compact binary tile format (`PCT1`: Float64 tile
     origin + tile-local Float32 positions + Uint8 RGB) for servers that
