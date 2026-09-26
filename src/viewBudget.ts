@@ -1,4 +1,4 @@
-import type { AllocationRegime, GovernorInputs } from "./streamedMember";
+import type { GovernorInputs } from "./streamedMember";
 
 /** The adaptive view governor never asks a member to render below this. */
 export const MIN_VIEW_QUALITY_FRACTION = 0.05;
@@ -74,10 +74,4 @@ export const allocateViewQuality = <Key>(
     open = open.filter((contender) => !capped.includes(contender));
   }
   return allocations;
-};
-
-export type ViewQualityAllocation<Key> = {
-  readonly viewFraction: number;
-  readonly regime: AllocationRegime;
-  readonly allocations: ReadonlyMap<Key, number>;
 };

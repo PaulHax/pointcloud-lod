@@ -3,12 +3,8 @@ export {
   keyToString,
   keyFromString,
   childKeys,
-  nodeBounds,
-  nodeCube,
-  pointSpacing,
   type VoxelKey,
   type Vec3,
-  type Cube,
   type Bounds,
 } from "./octree";
 
@@ -20,19 +16,14 @@ export type {
   LoadOptions,
 } from "./tileSource";
 
+export { orderTileForProgressiveDrawing } from "./progressiveOrder";
+
 export {
   cursorRay,
-  frustumPlanes,
-  boundsIntersectsFrustum,
-  distanceToBounds,
-  perspectiveScreenSpaceError,
-  orthographicScreenSpaceError,
-  nodeScreenSpaceError,
   type CameraView,
   type PerspectiveCameraView,
   type OrthographicCameraView,
   type Mat16,
-  type Plane,
   type CursorRay,
 } from "./camera";
 
@@ -71,24 +62,12 @@ export {
   type MemoryPoolOptions,
 } from "./memoryPool";
 
-export {
-  createSubmissionScheduler,
-  DEFAULT_SUBMISSION_BYTES_PER_FRAME,
-  DEFAULT_SUBMISSION_TIME_MS_PER_FRAME,
-  type Submission,
-  type SubmissionJob,
-  type SubmissionScheduler,
-  type SubmissionSchedulerOptions,
-  type SubmissionSchedulerStats,
+export type {
+  Submission,
+  SubmissionJob,
+  SubmissionScheduler,
+  SubmissionSchedulerStats,
 } from "./submissionScheduler";
-
-export {
-  MIN_VIEW_QUALITY_FRACTION,
-  MAX_VIEW_QUALITY_FRACTION,
-  allocateViewQuality,
-  type ViewQualityAllocation,
-  type ViewQualityContender,
-} from "./viewBudget";
 
 export {
   createStreamedMemberFactoryRegistry,
@@ -124,8 +103,10 @@ export {
   type StreamedSceneCoordinatorStats,
 } from "./streamedSceneCoordinator";
 
-// The adaptive quality loop is the view governor's internal. Only the types
-// that appear in the governor's own surface are re-exported.
+// The adaptive quality loop is the view governor's internal. Its defaults stay
+// public on this vtk-free entry so a host, and a node-side check of its
+// configuration, reads the budget floor (`minBudget`) instead of restating it.
+// Otherwise only the types in the governor's own surface are re-exported.
 export {
   ADAPTIVE_QUALITY_DEFAULTS,
   type AdaptiveQualityOptions,
@@ -150,9 +131,7 @@ export {
 
 export {
   createHttpTileSource,
-  parsePct1,
   RevisionGoneError,
-  PCT1_HEADER_BYTES,
   type HttpTileSourceOptions,
 } from "./httpTileSource";
 
@@ -168,28 +147,13 @@ export {
 } from "./copcWorkerTileSource";
 
 export {
-  loadTileset,
-  resolveTilesetContentUri,
-  multiplyTilesetMatrices,
   TilesetFetchError,
   TilesetProfileError,
   TilesetUnsupportedError,
   TilesetValidationError,
-  type LoadTilesetOptions,
-  type TilesetBox,
   type TilesetFetch,
   type TilesetFetchResponse,
-  type TilesetSource,
-  type TilesetTile,
 } from "./tiles3d/tilesetSource";
-
-export {
-  traverseTileset,
-  type SubtreeHierarchyState,
-  type TileReadiness,
-  type TilesetTraversalOptions,
-  type TilesetTraversalResult,
-} from "./tiles3d/traversal";
 
 export {
   DEFAULT_MAXIMUM_SCREEN_SPACE_ERROR_PX,
@@ -202,69 +166,30 @@ export {
   type Tiles3dMemberStats,
 } from "./tiles3d/memberTypes";
 
-export {
-  createContentQueue,
-  ContentQueueDecodeError,
-  ContentQueueError,
-  ContentQueueFetchError,
-  ContentQueueRetryError,
-  type ContentDecodeContext,
-  type ContentQueue,
-  type ContentQueueClock,
-  type ContentQueueConfiguration,
-  type ContentQueueEntrySnapshot,
-  type ContentQueueEntryStatus,
-  type ContentQueueFetch,
-  type ContentQueueFetchResponse,
-  type ContentQueueOptions,
-  type ContentQueueSnapshot,
-  type TileContentRequest,
+export type {
+  ContentQueueFetch,
+  ContentQueueFetchResponse,
 } from "./tiles3d/contentQueue";
 
 export {
-  buildDecodeCacheKey,
-  buildTransferList,
-  capabilityTarget,
   DecodeWorkerError,
   DecodeWorkerPool,
   DecodeWorkerPoolDisposedError,
   TileDecodeError,
   TileUnsupportedExtensionError,
-  type BasisTargetTimingStats,
-  type CompressedTextureLevel,
   type CompressedTextureFormat,
-  type DecodeCacheIdentity,
-  type DecodeJob,
-  type DecodeTextureTarget,
-  type DecodeTileRequest,
-  type DecodedCompressedTexture,
-  type DecodedMaterial,
-  type DecodedPrimitive,
-  type DecodedRgbaTexture,
-  type DecodedTexture,
-  type DecodedTileContent,
   type DecodeWasmUrls,
   type DecodeWorkerLike,
   type DecodeWorkerPoolHandle,
   type DecodeWorkerPoolOptions,
-  type SerializableMaterial,
-  type SerializableSampler,
   type TextureCapabilities,
   type TileDecodeStage,
 } from "./tiles3d/decode";
 
 export {
-  composeSceneTransform,
-  composeVerticalExaggeratedSceneTransform,
-  createVerticalExaggerationTransform,
   createEcefToEnuTransform,
-  flattenPrimitiveToRtc,
-  multiplyMat4,
-  transformPoint,
   wgs84ToEcef,
   type Mat4,
-  type RtcPrimitiveInput,
-  type RtcPrimitiveResult,
 } from "./tiles3d/rtc";
 
 // The vtk.js renderer adapter is deliberately NOT re-exported here. It imports

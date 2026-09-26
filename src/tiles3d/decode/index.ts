@@ -1,4 +1,3 @@
-export { buildDecodeCacheKey } from "./cacheKey";
 export { capabilityTarget } from "./capabilities";
 export { buildTransferList } from "./transfer";
 export { TileDecodeError, TileUnsupportedExtensionError } from "./types";
@@ -13,7 +12,6 @@ export type {
   BasisTargetTimingStats,
   CompressedTextureFormat,
   CompressedTextureLevel,
-  DecodeCacheIdentity,
   DecodeJob,
   DecodeTextureTarget,
   DecodeTileRequest,

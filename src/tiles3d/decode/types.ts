@@ -176,12 +176,6 @@ export type DecodeTileRequest = {
   wasm?: DecodeWasmUrls;
 };
 
-export type DecodeCacheIdentity = {
-  contentUrl: string;
-  revision: string;
-  capabilityKey: string;
-};
-
 export type DecodeJob = {
   promise: Promise<DecodedTileContent>;
   cancel(): void;
