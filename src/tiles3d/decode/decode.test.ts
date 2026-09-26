@@ -751,6 +751,103 @@ describe("decoded tile contract", () => {
     },
   );
 
+  it("keeps Draco-compressed integer colors and texture coordinates normalized", async () => {
+    const positions = new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]);
+    const colors = new Uint8Array([
+      255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 51,
+    ]);
+    const uvs = new Uint16Array([0, 0, 65535, 0, 0, 65535]);
+    const runtime = (await draco3d.createEncoderModule()) as any;
+    const mesh = new runtime.Mesh();
+    const builder = new runtime.MeshBuilder();
+    const encoder = new runtime.Encoder();
+    const output = new runtime.DracoInt8Array();
+    let bytes: Uint8Array;
+    let attributes: Record<string, number>;
+    try {
+      const position = builder.AddFloatAttributeToMesh(
+        mesh,
+        runtime.POSITION,
+        3,
+        3,
+        positions,
+      );
+      const color = builder.AddUInt8Attribute(
+        mesh,
+        runtime.COLOR,
+        3,
+        4,
+        colors,
+      );
+      builder.SetNormalizedFlagForAttribute(mesh, color, true);
+      const uv = builder.AddUInt16Attribute(mesh, runtime.TEX_COORD, 3, 2, uvs);
+      builder.SetNormalizedFlagForAttribute(mesh, uv, true);
+      builder.AddFacesToMesh(mesh, 1, new Uint16Array([0, 1, 2]));
+      encoder.SetEncodingMethod(runtime.MESH_SEQUENTIAL_ENCODING);
+      const length = encoder.EncodeMeshToDracoBuffer(mesh, output);
+      bytes = Uint8Array.from({ length }, (_, i) => output.GetValue(i));
+      attributes = { POSITION: position, COLOR_0: color, TEXCOORD_0: uv };
+    } finally {
+      for (const item of [output, encoder, builder, mesh])
+        runtime.destroy(item);
+    }
+    const json = {
+      asset: { version: "2.0" },
+      scene: 0,
+      scenes: [{ nodes: [0] }],
+      nodes: [{ mesh: 0 }],
+      extensionsUsed: ["KHR_draco_mesh_compression", "KHR_mesh_quantization"],
+      extensionsRequired: [
+        "KHR_draco_mesh_compression",
+        "KHR_mesh_quantization",
+      ],
+      buffers: [
+        {
+          uri: `data:application/octet-stream;base64,${Buffer.from(bytes).toString("base64")}`,
+          byteLength: bytes.length,
+        },
+      ],
+      bufferViews: [{ buffer: 0, byteLength: bytes.length }],
+      accessors: [
+        {
+          componentType: 5126,
+          type: "VEC3",
+          count: 3,
+          min: [0, 0, 0],
+          max: [1, 1, 0],
+        },
+        { componentType: 5121, normalized: true, type: "VEC4", count: 3 },
+        { componentType: 5123, normalized: true, type: "VEC2", count: 3 },
+        { componentType: 5123, type: "SCALAR", count: 3 },
+      ],
+      meshes: [
+        {
+          primitives: [
+            {
+              attributes: { POSITION: 0, COLOR_0: 1, TEXCOORD_0: 2 },
+              indices: 3,
+              extensions: {
+                KHR_draco_mesh_compression: { bufferView: 0, attributes },
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const decoded = await decodeTileContent(
+      {
+        ...(await request("level-0-root.glb")),
+        content: new TextEncoder().encode(JSON.stringify(json)).buffer,
+      },
+      { ...testOptions, modules: { draco3d } },
+    );
+    const primitive = decoded.primitives[0]!;
+    expect(Array.from(primitive.colors!)).toEqual(
+      Array.from(colors, (value) => Math.fround(value / 255)),
+    );
+    expect(Array.from(primitive.uvs!)).toEqual([0, 0, 1, 0, 0, 1]);
+  });
+
   it("fails closed instead of falling back to remote codec defaults", async () => {
     await expect(
       decodeTileContent(
