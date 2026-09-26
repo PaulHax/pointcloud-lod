@@ -22,17 +22,9 @@ class FakeWorker implements DecodeWorkerLike {
   }
 
   complete(index: number, result: unknown): void {
-    const request = this.messages[index] as {
-      jobId: number;
-      generation: number;
-    };
+    const request = this.messages[index] as { jobId: number };
     this.onmessage?.({
-      data: {
-        kind: "complete",
-        jobId: request.jobId,
-        generation: request.generation,
-        result,
-      },
+      data: { kind: "complete", jobId: request.jobId, result },
     } as MessageEvent);
   }
 
@@ -41,16 +33,8 @@ class FakeWorker implements DecodeWorkerLike {
   }
 
   fail(index: number, error: unknown): void {
-    const request = this.messages[index] as {
-      jobId: number;
-      generation: number;
-    };
-    this.respond({
-      kind: "error",
-      jobId: request.jobId,
-      generation: request.generation,
-      error,
-    });
+    const request = this.messages[index] as { jobId: number };
+    this.respond({ kind: "error", jobId: request.jobId, error });
   }
 }
 
@@ -131,7 +115,7 @@ describe("DecodeWorkerPool", () => {
     expect(pool.stats().cancelledJobs).toBe(1);
   });
 
-  it("invalidates an old generation and contains worker errors", async () => {
+  it("contains a worker error by replacing the worker", async () => {
     const firstWorker = new FakeWorker();
     const secondWorker = new FakeWorker();
     const factory = vi
@@ -139,19 +123,20 @@ describe("DecodeWorkerPool", () => {
       .mockReturnValueOnce(firstWorker)
       .mockReturnValueOnce(secondWorker);
     const pool = new DecodeWorkerPool({ size: 1, workerFactory: factory });
-    const stale = pool.decode(decodeRequest());
-    pool.invalidate();
-    await expect(stale.promise).rejects.toMatchObject({ name: "AbortError" });
-    const live = pool.decode(decodeRequest());
+    const failed = pool.decode(decodeRequest());
+    const queued = pool.decode(decodeRequest());
+    firstWorker.onerror?.({ message: "worker crashed" } as ErrorEvent);
+    await expect(failed.promise).rejects.toThrow("worker crashed");
+    expect(firstWorker.terminated).toBe(true);
     firstWorker.complete(0, { stale: true });
-    firstWorker.onerror?.({ message: "old failure" } as ErrorEvent);
     expect(secondWorker.messages).toHaveLength(1);
     secondWorker.complete(0, {
       primitives: [],
       origin: [0, 0, 0],
       byteEstimate: { geometry: 0, textures: 0 },
     });
-    await live.promise;
+    await expect(queued.promise).resolves.toMatchObject({ primitives: [] });
+    expect(pool.stats().failedJobs).toBe(1);
   });
 
   it("rejects all work and discards late completions after disposal", async () => {

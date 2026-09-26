@@ -83,7 +83,6 @@ describe("classic 3D Tiles decode worker", () => {
                   {
                     kind: "decode",
                     jobId: 7,
-                    generation: 3,
                     request: {
                       content,
                       contentUrl: `${origin}/fixture/content/${file}`,
@@ -114,7 +113,6 @@ describe("classic 3D Tiles decode worker", () => {
               const decoded = message as {
                 kind: string;
                 jobId: number;
-                generation: number;
                 error?: string;
                 result?: {
                   primitives: Array<{
@@ -145,7 +143,6 @@ describe("classic 3D Tiles decode worker", () => {
               return {
                 kind: decoded.kind,
                 jobId: decoded.jobId,
-                generation: decoded.generation,
                 primitiveCount: decoded.result.primitives.length,
                 positionsAreFloat32: decoded.result.primitives.every(
                   (primitive) => primitive.positions instanceof Float32Array,
@@ -178,7 +175,6 @@ describe("classic 3D Tiles decode worker", () => {
         expect(result).toMatchObject({
           kind: "complete",
           jobId: 7,
-          generation: 3,
           primitiveCount: 2,
           positionsAreFloat32: true,
           origin: [expect.any(Number), expect.any(Number), expect.any(Number)],
