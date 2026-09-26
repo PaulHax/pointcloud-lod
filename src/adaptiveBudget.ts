@@ -157,6 +157,7 @@ export type AdaptiveQuality = {
    * every frame in it presented within `limitMs`; otherwise null.
    */
   provenWithin(interacting: boolean, limitMs: number): number | null;
+  lastAdjustment(interacting: boolean): QualityAdjustment | null;
   stats(): AdaptiveQualityStats;
 };
 
@@ -564,6 +565,8 @@ export const createAdaptiveQuality = (
         ? track.fraction
         : null;
     },
+
+    lastAdjustment: (interacting) => trackFor(interacting).lastAdjustment,
 
     stats() {
       const stats = (track: Track): AdaptiveQualityTrackStats => ({
