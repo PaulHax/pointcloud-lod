@@ -10,8 +10,9 @@
  *
  * Invariant: every wanted key is queued, being read, or has a retry armed,
  * either soon or for the end of its rest. So `counts` tells whether wanted
- * work is outstanding without walking the wanted set; a resting key is
- * deliberately not outstanding, because nothing is going to fetch it now.
+ * work is outstanding from the reads and armed retries alone, without
+ * walking the wanted set; a resting key is deliberately not outstanding,
+ * because nothing is going to fetch it now.
  */
 
 import {
@@ -102,8 +103,6 @@ export const createLoader = <T>(options: {
   let wanted = new Set<string>();
   let queue: string[] = [];
   let physical = 0;
-  /** Wanted keys with a prompt retry armed, kept so `counts` never walks. */
-  const retryWaits = new Set<string>();
 
   const clearGrace = (read: Read): void => {
     if (read.graceTimer === null) return;
@@ -138,7 +137,6 @@ export const createLoader = <T>(options: {
     if (armed === undefined) return;
     clearTimeout(armed.timer);
     retries.delete(key);
-    retryWaits.delete(key);
   };
 
   /** At most one armed retry per key, always at the earliest legal moment. */
@@ -149,13 +147,11 @@ export const createLoader = <T>(options: {
     const timer = setTimeout(
       () => {
         retries.delete(key);
-        retryWaits.delete(key);
         retryDue(key);
       },
       retryDelayMs(record, retry, Date.now()),
     );
     retries.set(key, { timer, rest });
-    if (!rest && wanted.has(key)) retryWaits.add(key);
   };
 
   const retryDue = (key: string): void => {
@@ -193,7 +189,6 @@ export const createLoader = <T>(options: {
         reads.delete(key);
         failures.delete(key);
         wanted.delete(key);
-        retryWaits.delete(key);
         options.onLoaded(key, value);
         pump();
       },
@@ -238,16 +233,13 @@ export const createLoader = <T>(options: {
         if (wanted.has(key)) adopt(read);
         else cancel(read, false);
       }
-      retryWaits.clear();
       const next: string[] = [];
       for (const key of keys) {
-        const armed = retries.get(key);
-        if (armed !== undefined && !armed.rest) retryWaits.add(key);
         if (reads.has(key)) continue;
         if (resting(key)) {
           // Its rest ends on the clock, not on a want: a key that spent its
           // last attempt while unwanted may have no retry armed.
-          if (armed === undefined) armRetry(key);
+          if (!retries.has(key)) armRetry(key);
           continue;
         }
         next.push(key);
@@ -258,7 +250,6 @@ export const createLoader = <T>(options: {
 
     abandon() {
       wanted = new Set();
-      retryWaits.clear();
       queue = [];
       for (const read of reads.values()) cancel(read, true);
     },
@@ -268,7 +259,6 @@ export const createLoader = <T>(options: {
       reads.clear();
       for (const armed of retries.values()) clearTimeout(armed.timer);
       retries.clear();
-      retryWaits.clear();
       failures.clear();
       wanted = new Set();
       queue = [];
@@ -285,10 +275,14 @@ export const createLoader = <T>(options: {
     counts() {
       let wantedReading = 0;
       for (const read of reads.values()) if (read.wanted) wantedReading += 1;
+      let retrying = 0;
+      for (const [key, armed] of retries) {
+        if (!armed.rest && wanted.has(key)) retrying += 1;
+      }
       return {
         queued: queue.length,
         physical,
-        retrying: retryWaits.size,
+        retrying,
         reading: reads.size,
         wantedReading,
       };
