@@ -59,7 +59,7 @@ describe("createStreamedSceneCoordinator", () => {
       const coordinator = createStreamedSceneCoordinator({
         scheduleRender,
         memory: createMemoryPool({ totalBytes: 1000 }),
-        governor: { minSamples: 2, windowSize: 4, cooldownMs: 0 },
+        governor: { minSamples: 2, windowSize: 10, cooldownMs: 0 },
       });
       coordinator.register(makeMember(), { qualityManaged: true });
       const peer = coordinator.register(makeMember());
@@ -68,11 +68,9 @@ describe("createStreamedSceneCoordinator", () => {
         coordinator.recordHostFrame({ hostFrameMs, now: (now += 100) });
       frame(66);
       frame(66);
-      for (let index = 0; index < 4; index += 1) frame(33);
-      // The old workload cannot sustain the trial above half quality.
-      frame(66);
-      frame(66);
-      for (let index = 0; index < 4; index += 1) frame(33);
+      // The old workload settles at half quality, one late frame in ten.
+      for (let index = 0; index < 9; index += 1) frame(33);
+      frame(50);
       expect(coordinator.stats().viewQualityFraction).toBe(0.5);
       expect(coordinator.needsFrame()).toBe(false);
       scheduleRender.mockClear();
@@ -83,7 +81,7 @@ describe("createStreamedSceneCoordinator", () => {
       // The mutation presentation is not a clean capacity sample.
       frame(200);
       expect(coordinator.stats().governor.samples).toBe(0);
-      for (let index = 0; index < 12; index += 1) frame(16.7);
+      for (let index = 0; index < 30; index += 1) frame(16.7);
       expect(coordinator.stats().viewQualityFraction).toBe(1);
       coordinator.dispose();
     },
@@ -115,7 +113,10 @@ describe("createStreamedSceneCoordinator", () => {
       expect(coordinator.stats().governor.samples).toBe(0);
       frame(66);
       frame(66);
-      expect(coordinator.stats().viewQualityFraction).toBe(0.5);
+      // Two refreshes of budget against four presented.
+      expect(coordinator.stats().viewQualityFraction).toBeCloseTo(
+        2 / Math.sqrt(12),
+      );
       coordinator.dispose();
     },
   );
@@ -282,7 +283,7 @@ describe("createStreamedSceneCoordinator", () => {
     const coordinator = createStreamedSceneCoordinator({
       scheduleRender: vi.fn(),
       memory: createMemoryPool({ totalBytes: 300 }),
-      governor: { minSamples: 1, cooldownMs: 0, hysteresis: 0 },
+      governor: { minSamples: 1, cooldownMs: 0 },
     });
     let busy = true;
     const member = makeMember();
@@ -310,7 +311,7 @@ describe("createStreamedSceneCoordinator", () => {
     const coordinator = createStreamedSceneCoordinator({
       scheduleRender: vi.fn(),
       memory: createMemoryPool({ totalBytes: 300 }),
-      governor: { minSamples: 1, cooldownMs: 0, hysteresis: 0 },
+      governor: { minSamples: 1, cooldownMs: 0 },
     });
     coordinator.register(makeMember(), { qualityManaged: true });
     const run = vi.fn();
@@ -332,7 +333,7 @@ describe("createStreamedSceneCoordinator", () => {
     const coordinator = createStreamedSceneCoordinator({
       scheduleRender: vi.fn(),
       memory: createMemoryPool({ totalBytes: 300 }),
-      governor: { minSamples: 1, cooldownMs: 0, hysteresis: 0 },
+      governor: { minSamples: 1, cooldownMs: 0 },
     });
     coordinator.register(makeMember(), { qualityManaged: true });
     const fixed = makeMember();
@@ -360,7 +361,7 @@ describe("createStreamedSceneCoordinator", () => {
     const coordinator = createStreamedSceneCoordinator({
       scheduleRender: vi.fn(),
       memory: createMemoryPool({ totalBytes: 300 }),
-      governor: { minSamples: 1, cooldownMs: 0, hysteresis: 0 },
+      governor: { minSamples: 1, cooldownMs: 0 },
     });
     const adaptive = makeMember();
     const fixed = makeMember();

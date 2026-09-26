@@ -41,7 +41,7 @@ const withGesture = <T>(
 
 const runGesture = (options: ViewGovernorOptions, cost: Cost = {}) =>
   withGesture(options, (governor, step) =>
-    Array.from({ length: 240 }, () => ({
+    Array.from({ length: 1200 }, () => ({
       presentedMs: step(cost),
       fraction: governor.qualityFraction(),
       reason: governor.stats().lastAdjustment?.reason,
@@ -99,40 +99,52 @@ describe("interaction quality under a quantized display", () => {
         const start = Date.now();
         while (Date.now() - start < 10000) step();
         const changedAt = Date.now();
+        const fractions: number[] = [];
         while (
           governor.qualityFraction() < 1 &&
-          Date.now() - changedAt < 5000
+          Date.now() - changedAt < 30000
         ) {
           step({ spanMs: 5 });
+          fractions.push(governor.qualityFraction());
         }
         expect(governor.qualityFraction()).toBe(1);
-        expect(Date.now() - changedAt).toBeLessThanOrEqual(1600);
+        // A moving view at one refresh per frame cannot see its headroom, so
+        // it climbs by patient probes, and never back down while it does.
+        expect(Date.now() - changedAt).toBeLessThanOrEqual(15000);
+        expect(reversalsOf(fractions.map((fraction) => ({ fraction })))).toBe(
+          0,
+        );
       },
       true,
     );
   });
 
-  it("oscillates at the default target on a quantized display", () => {
+  it("settles a steady view at the default target on a quantized display", () => {
+    // Every interval is one or two refreshes. Probes narrow in on the most
+    // detail that makes its refresh, then stop: the last level found too
+    // expensive caps them, and a step too small to matter is not taken.
     const samples = runGesture({});
-    // The effective target is about 24 ms. Neither one nor two refreshes
-    // falls inside its hysteresis band.
-    const band = { low: 24 * 0.8, high: 24 * 1.2 };
-    for (const { presentedMs: interval } of samples) {
-      expect(interval > band.low && interval < band.high).toBe(false);
-    }
-    expect(samples.some(({ reason }) => reason === "within-hysteresis")).toBe(
-      false,
-    );
-    expect(reversalsOf(samples)).toBeGreaterThan(4);
-  });
-
-  it("converges once a reachable interval lands inside the band", () => {
-    // 33 ms admits the 33.3 ms two-refresh interval: band (26.4, 39.6).
-    const samples = runGesture({ interactionTargetMs: 33 });
-    expect(samples.some(({ reason }) => reason === "within-hysteresis")).toBe(
+    expect(reversalsOf(samples)).toBeLessThanOrEqual(4);
+    const settled = samples.slice(-300);
+    expect(new Set(settled.map(({ fraction }) => fraction)).size).toBe(1);
+    expect(settled.every(({ presentedMs }) => presentedMs <= VSYNC_MS)).toBe(
       true,
     );
-    expect(reversalsOf(samples)).toBeLessThan(reversalsOf(runGesture({})));
+    expect(settled.at(-1)?.reason).toBe("within-hysteresis");
+  });
+
+  it("grants a 33 ms interaction target two refreshes", () => {
+    const samples = runGesture({ interactionTargetMs: 33 });
+    const afterFirstCut = samples.slice(
+      samples.findIndex(({ fraction }) => fraction < 1),
+    );
+    // Only the rare probe of the level that failed pays a third refresh.
+    const late = afterFirstCut.filter(
+      ({ presentedMs }) => presentedMs > 2.5 * VSYNC_MS,
+    );
+    expect(late.length / afterFirstCut.length).toBeLessThan(0.03);
+    // One look above the ceiling each time the memory of it lapses.
+    expect(reversalsOf(samples)).toBeLessThanOrEqual(4);
   });
 
   it("holds full quality when even the full view fits in one refresh", () => {

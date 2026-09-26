@@ -2,16 +2,31 @@
  * Adaptive normalized view quality.
  *
  * Two independent tracks learn the quality fraction sustainable while the
- * view is moving and stationary. Fractions are format-neutral and always
- * remain in [0.05, 1]; members alone translate them into points, screen-space
- * error, concurrency, or another format-specific quality axis.
+ * view is moving and while it is stationary. Fractions are format-neutral and
+ * always remain in [0.05, 1]; members alone translate them into points,
+ * screen-space error, concurrency, or another format-specific quality axis.
+ *
+ * Samples are presentation intervals, and those arrive in whole display
+ * refreshes: a frame made its refresh or waited for a later one. A track
+ * therefore does not steer a statistic towards a continuous target. At
+ * 60 Hz a percentile reads 16.7 ms or 33.3 ms and nothing between, so a band
+ * around any target either falls between them and is never reached, or
+ * swallows both and never moves. Each track instead grants a budget of whole
+ * refreshes and counts the frames that missed it. Too many misses lowers
+ * quality. A full window with none says only that headroom may exist, so the
+ * track probes one bounded step up after holding its level for a while, and
+ * remembers a level that proved too expensive, closing half the distance to
+ * it rather than returning to it. The one headroom a quantized interval can
+ * show is a frame presenting in fewer refreshes than its budget allows: a
+ * still view drawn every refresh under a two-refresh budget costs at most half
+ * of it, and a probe spends most of that headroom in one step. Everything
+ * between holds, which is what keeps a steady view steady.
  */
 
 import {
   finiteAbove,
   finiteAtLeast,
   finiteWithin,
-  percentile,
   percentileOrNull,
   wholeAtLeast,
 } from "./numeric";
@@ -31,11 +46,6 @@ export type QualityAdjustmentReason =
   | "clamped"
   | "emergency-cut"
   | "emergency-restore"
-  | "trial-warming"
-  | "trial-started"
-  | "trial-sampling"
-  | "trial-accepted"
-  | "trial-rejected"
   | "seeded";
 
 export type QualityAdjustment = {
@@ -44,7 +54,10 @@ export type QualityAdjustment = {
   readonly reason: QualityAdjustmentReason;
   readonly fromFraction: number;
   readonly toFraction: number;
+  /** Median interval of the window judged, when a window was judged. */
   readonly estimateMs: number | null;
+  /** Share of that window that missed its refresh budget. */
+  readonly lateFraction: number | null;
 };
 
 export type AdaptiveQualityOptions = {
@@ -52,12 +65,22 @@ export type AdaptiveQualityOptions = {
   readonly initialFraction?: number;
   readonly stationaryTargetMs?: number;
   readonly interactionTargetMs?: number;
+  /** Presentation intervals judged together. */
   readonly windowSize?: number;
-  readonly percentile?: number;
-  readonly hysteresis?: number;
+  /** Share of a window that may miss its budget before quality falls. */
+  readonly lateFrameTolerance?: number;
   readonly maxIncreaseStep?: number;
   readonly maxDecreaseStep?: number;
+  /** Shortest time between two ordinary adjustments of one track. */
   readonly cooldownMs?: number;
+  /**
+   * How long the interaction track holds a level before probing above it.
+   * The stationary track probes after `cooldownMs`: refining a still view is
+   * wanted change, while every probe under a moving hand is a visible one.
+   */
+  readonly interactionProbeDwellMs?: number;
+  /** How long a level that proved too expensive caps later probes. */
+  readonly failedLevelMemoryMs?: number;
   readonly minSamples?: number;
 };
 
@@ -69,15 +92,22 @@ export type AdaptiveQualityTrackStats = {
    */
   readonly emergencyCeiling: number | null;
   readonly samples: number;
+  /** Median interval in the current window. */
   readonly estimateMs: number | null;
+  /** Share of the current window that missed the budget. */
+  readonly lateFraction: number | null;
   /** The configured target, as given. */
   readonly targetMs: number;
-  /** The target actually steered to, once the display quantum is known. */
+  /** The interval a frame may take and still be on time. */
   readonly effectiveTargetMs: number;
+  /** Refreshes a frame may take, once the display quantum is known. */
+  readonly budgetRefreshes: number | null;
+  /**
+   * The last fraction found too expensive. It caps probes for
+   * `failedLevelMemoryMs` after it was found.
+   */
+  readonly failedLevel: number | null;
   readonly lastAdjustment: QualityAdjustment | null;
-  readonly trial: QualityTrial | null;
-  readonly increaseCeiling: number;
-  readonly trialAttempts: number;
 };
 
 export type AdaptiveQualityStats = {
@@ -92,17 +122,9 @@ export type AdaptiveQualityStats = {
 
 /**
  * The shortest frame interval the display has been seen to present, or `null`
- * while that is not yet known.
- *
- * Frame samples are measured between presentations, so no sample can fall
- * below the display's refresh period however little was drawn. A target near
- * that period has an increase threshold — `target * (1 - hysteresis)` — that
- * no measurement can reach, so quality can only ever fall. The quantum raises
- * each track's effective target far enough that the threshold sits above it
- * and both directions are reachable again.
- *
- * Whoever measures the display owns this number; the tracks read it whenever
- * they need a target, so it is a cheap accessor, not a computation.
+ * while that is not yet known. Whoever measures the display owns this number;
+ * the tracks read it whenever they need a budget, so it is a cheap accessor,
+ * not a computation.
  */
 export type DisplayQuantumSupplier = () => number | null;
 
@@ -112,17 +134,29 @@ export type AdaptiveQuality = {
     options: { readonly interacting: boolean; readonly now: number },
   ): number;
   fraction(interacting: boolean): number;
-  target(interacting: boolean): number;
+  /** The interval a frame may take and still count as on time. */
+  onTimeMs(interacting: boolean): number;
+  /** The interval above which a frame counts as late. */
+  lateThresholdMs(interacting: boolean): number;
   restartAt(interacting: boolean, fraction: number, now: number): number;
-  /** Discard costs from an older frontier without changing quality or emergency debt. */
+  /** Discard costs from an older frontier without changing quality or memory. */
   clearSamples(interacting: boolean, now: number): void;
-  /** A new workload cancels comparison with the old one and permits new trials. */
+  /** A new workload forgets both the window and any too-expensive level. */
   invalidateCapacity(interacting: boolean, now: number): void;
-  reduceNow(interacting: boolean, now: number): number;
-  /** Gives back one emergency cut, never past what the cut took away. */
-  restoreNow(interacting: boolean, now: number): number;
-  /** The estimate below which `recordFrame` would argue for more quality. */
-  increaseThresholdMs(interacting: boolean): number;
+  /** Cut by `factor`, clamped to [0.5, 1], outside the sampling loop. */
+  reduceNow(interacting: boolean, now: number, factor?: number): number;
+  /**
+   * Give back emergency cuts: one halving, or with `all` everything back to
+   * where the first outstanding cut started. Never past that.
+   */
+  restoreNow(interacting: boolean, now: number, all?: boolean): number;
+  /** True while an emergency cut is owed back. */
+  owesRestore(interacting: boolean): boolean;
+  /**
+   * The track's fraction when enough of its current window was measured and
+   * every frame in it presented within `limitMs`; otherwise null.
+   */
+  provenWithin(interacting: boolean, limitMs: number): number | null;
   stats(): AdaptiveQualityStats;
 };
 
@@ -140,149 +174,188 @@ export const ADAPTIVE_QUALITY_DEFAULTS = {
   stationaryTargetMs: 33,
   interactionTargetMs: 16,
   windowSize: 30,
-  percentile: 0.9,
-  hysteresis: 0.2,
-  maxIncreaseStep: 0.25,
+  lateFrameTolerance: 0.2,
+  maxIncreaseStep: 0.15,
   maxDecreaseStep: 0.5,
   cooldownMs: 400,
-  // With fewer than ten samples, nearest-rank p90 is the maximum: one
-  // isolated presentation hitch would immediately reduce learned quality.
+  interactionProbeDwellMs: 1500,
+  failedLevelMemoryMs: 15_000,
+  // Fewer than ten samples would let two isolated hitches outvote a window.
   minSamples: 10,
 } as const;
 
+/** Largest single emergency cut. */
 const EMERGENCY_CUT = 0.5;
-const MAX_STATIONARY_TRIALS = 16;
-
-type QualityTrial = {
-  readonly fromFraction: number;
-  readonly toFraction: number;
-  readonly baselineEstimateMs: number;
-};
-
+/** An ordinary decrease when misses exceed tolerance without dominating. */
+const ORDINARY_DECREASE = 0.85;
+/** Above this share of late frames the median says how far over the view is. */
+const MOSTLY_LATE = 0.5;
 /**
- * How far the increase threshold must clear the display quantum.
- *
- * At exactly the quantum the branch is still unreachable — the estimate is a
- * p90 of intervals that jitter a little above the refresh period, never below
- * it. This is the margin that turns "the display kept up" into evidence of
- * headroom. On a 60 Hz display with the 0.2 default hysteresis it puts the
- * effective interaction target at 24 ms.
+ * Share of measured headroom one probe spends. Cost does not scale exactly
+ * with quality, and the slowest frame in a window is only a sample.
  */
-const INCREASE_HEADROOM = 1.15;
+const HEADROOM_SPENT = 0.85;
+/** A probe smaller than this is not worth the visible change it makes. */
+const MIN_PROBE_STEP = 0.03;
+/** How far over its target a frame may run and still fit the refresh count. */
+const TARGET_TOLERANCE = 1.2;
+/** The late threshold as a multiple of the target before the quantum is known. */
+const LATE_WITHOUT_QUANTUM = 1.5;
 
 type Track = {
   fraction: number;
   readonly samples: number[];
   readonly targetMs: number;
-  lastAdjust: number;
+  readonly probeDwellMs: number;
+  /** Last ordinary or emergency change; gates the next ordinary one. */
+  lastChangeAt: number;
+  /** Since when the current level has held; gates probes. */
+  heldSince: number;
   lastAdjustment: QualityAdjustment | null;
   /**
    * What an emergency cut took this track down from, until it is given back.
-   *
-   * A cut answers a frame the sampling loop is not allowed to answer: it needs
-   * no eligible capacity sample, so it fires while tiles stream. The restore
-   * has to be reachable under those same conditions or quality only ratchets
-   * down for as long as a gesture keeps work pending. This ceiling is what
-   * keeps the restore honest — it can undo a cut and no more, so it can never
-   * stand in for the eligible increase that actually measures capacity.
+   * The restore can undo a cut and no more, so it can never stand in for the
+   * probe that actually measures capacity.
    */
   emergencyCeiling: number | null;
-  trial: QualityTrial | null;
-  increaseCeiling: number;
-  trialAttempts: number;
+  failedLevel: { readonly fraction: number; readonly atMs: number } | null;
+  /** The level a probe left, until the probe's first window judges it. */
+  probedFrom: number | null;
 };
 
 export const createAdaptiveQuality = (
   options: AdaptiveQualityOptions = {},
   displayQuantum: DisplayQuantumSupplier = () => null,
 ): AdaptiveQuality => {
+  const defaults = ADAPTIVE_QUALITY_DEFAULTS;
   const initialFraction = finiteWithin(
     "initialFraction",
-    options.initialFraction ?? ADAPTIVE_QUALITY_DEFAULTS.initialFraction,
+    options.initialFraction ?? defaults.initialFraction,
     MIN_VIEW_QUALITY_FRACTION,
     MAX_VIEW_QUALITY_FRACTION,
   );
   const stationaryTargetMs = finiteAbove(
     "stationaryTargetMs",
-    options.stationaryTargetMs ?? ADAPTIVE_QUALITY_DEFAULTS.stationaryTargetMs,
+    options.stationaryTargetMs ?? defaults.stationaryTargetMs,
     0,
   );
   const interactionTargetMs = finiteAbove(
     "interactionTargetMs",
-    options.interactionTargetMs ??
-      ADAPTIVE_QUALITY_DEFAULTS.interactionTargetMs,
+    options.interactionTargetMs ?? defaults.interactionTargetMs,
     0,
   );
   const windowSize = wholeAtLeast(
     "windowSize",
-    options.windowSize ?? ADAPTIVE_QUALITY_DEFAULTS.windowSize,
+    options.windowSize ?? defaults.windowSize,
     1,
   );
-  const percentileP = finiteWithin(
-    "percentile",
-    options.percentile ?? ADAPTIVE_QUALITY_DEFAULTS.percentile,
-    0,
-    1,
-  );
-  const hysteresis = finiteWithin(
-    "hysteresis",
-    options.hysteresis ?? ADAPTIVE_QUALITY_DEFAULTS.hysteresis,
+  const lateFrameTolerance = finiteWithin(
+    "lateFrameTolerance",
+    options.lateFrameTolerance ?? defaults.lateFrameTolerance,
     0,
     1,
   );
   const maxIncreaseStep = finiteAtLeast(
     "maxIncreaseStep",
-    options.maxIncreaseStep ?? ADAPTIVE_QUALITY_DEFAULTS.maxIncreaseStep,
+    options.maxIncreaseStep ?? defaults.maxIncreaseStep,
     0,
   );
   const maxDecreaseStep = finiteWithin(
     "maxDecreaseStep",
-    options.maxDecreaseStep ?? ADAPTIVE_QUALITY_DEFAULTS.maxDecreaseStep,
+    options.maxDecreaseStep ?? defaults.maxDecreaseStep,
     0,
     1,
   );
   const cooldownMs = finiteAtLeast(
     "cooldownMs",
-    options.cooldownMs ?? ADAPTIVE_QUALITY_DEFAULTS.cooldownMs,
+    options.cooldownMs ?? defaults.cooldownMs,
     0,
   );
-  const minSamples = wholeAtLeast(
-    "minSamples",
-    options.minSamples ?? ADAPTIVE_QUALITY_DEFAULTS.minSamples,
-    1,
+  const interactionProbeDwellMs = finiteAtLeast(
+    "interactionProbeDwellMs",
+    options.interactionProbeDwellMs ?? defaults.interactionProbeDwellMs,
+    0,
   );
-  const effectiveMinSamples = Math.min(windowSize, minSamples);
+  const failedLevelMemoryMs = finiteAtLeast(
+    "failedLevelMemoryMs",
+    options.failedLevelMemoryMs ?? defaults.failedLevelMemoryMs,
+    0,
+  );
+  const minSamples = Math.min(
+    windowSize,
+    wholeAtLeast("minSamples", options.minSamples ?? defaults.minSamples, 1),
+  );
 
   const clamp = (fraction: number): number =>
     Math.min(
       MAX_VIEW_QUALITY_FRACTION,
       Math.max(MIN_VIEW_QUALITY_FRACTION, fraction),
     );
-  const makeTrack = (targetMs: number): Track => ({
+  const makeTrack = (targetMs: number, probeDwellMs: number): Track => ({
     fraction: initialFraction,
     samples: [],
     targetMs,
-    lastAdjust: Number.NEGATIVE_INFINITY,
+    probeDwellMs,
+    lastChangeAt: Number.NEGATIVE_INFINITY,
+    heldSince: Number.NEGATIVE_INFINITY,
     lastAdjustment: null,
     emergencyCeiling: null,
-    trial: null,
-    increaseCeiling: MAX_VIEW_QUALITY_FRACTION,
-    trialAttempts: 0,
+    failedLevel: null,
+    probedFrom: null,
   });
-  const stationary = makeTrack(stationaryTargetMs);
-  const interaction = makeTrack(interactionTargetMs);
+  const stationary = makeTrack(stationaryTargetMs, cooldownMs);
+  const interaction = makeTrack(interactionTargetMs, interactionProbeDwellMs);
   const trackFor = (interacting: boolean): Track =>
     interacting ? interaction : stationary;
 
-  /** The lowest target whose increase threshold a real sample can reach. */
-  const reachableTargetMs = (): number => {
+  const budgetRefreshes = (track: Track): number | null => {
     const quantumMs = displayQuantum();
     return quantumMs === null
-      ? 0
-      : (quantumMs * INCREASE_HEADROOM) / Math.max(0.05, 1 - hysteresis);
+      ? null
+      : Math.max(
+          1,
+          Math.floor((track.targetMs * TARGET_TOLERANCE) / quantumMs),
+        );
   };
-  const effectiveTargetMs = (track: Track): number =>
-    Math.max(track.targetMs, reachableTargetMs());
+  const onTimeMs = (track: Track): number => {
+    const refreshes = budgetRefreshes(track);
+    return refreshes === null ? track.targetMs : refreshes * displayQuantum()!;
+  };
+  // Halfway to the next refresh: presentation jitter moves an interval a
+  // little either side of its refresh multiple, never half a refresh.
+  const lateThresholdMs = (track: Track): number => {
+    const refreshes = budgetRefreshes(track);
+    return refreshes === null
+      ? track.targetMs * LATE_WITHOUT_QUANTUM
+      : (refreshes + 0.5) * displayQuantum()!;
+  };
+  const lateFractionOf = (track: Track): number | null => {
+    if (track.samples.length === 0) return null;
+    const threshold = lateThresholdMs(track);
+    let late = 0;
+    for (const sample of track.samples) if (sample > threshold) late += 1;
+    return late / track.samples.length;
+  };
+  /**
+   * The cut a mostly-late window argues for. A median of k refreshes against a
+   * budget of n says only that the cost lies between k - 1 and k refreshes, so
+   * the cut that restores the budget lies between n / k and n / (k - 1); this
+   * takes the geometric middle rather than assuming the worst end of it.
+   */
+  const overloadCut = (track: Track, medianMs: number): number => {
+    const refreshes = budgetRefreshes(track);
+    if (refreshes === null) return onTimeMs(track) / medianMs;
+    const presented = Math.max(
+      refreshes + 1,
+      Math.round(medianMs / displayQuantum()!),
+    );
+    return refreshes / Math.sqrt(presented * (presented - 1));
+  };
+  const failedLevelOf = (track: Track, now: number): number | null =>
+    track.failedLevel !== null &&
+    now - track.failedLevel.atMs < failedLevelMemoryMs
+      ? track.failedLevel.fraction
+      : null;
 
   const record = (
     track: Track,
@@ -290,7 +363,8 @@ export const createAdaptiveQuality = (
     direction: QualityAdjustmentDirection,
     reason: QualityAdjustmentReason,
     fromFraction: number,
-    estimateMs: number | null,
+    estimateMs: number | null = null,
+    lateFraction: number | null = null,
   ): void => {
     track.lastAdjustment = {
       atMs,
@@ -299,114 +373,82 @@ export const createAdaptiveQuality = (
       fromFraction,
       toFraction: track.fraction,
       estimateMs,
+      lateFraction,
     };
+  };
+
+  const change = (track: Track, next: number, now: number): void => {
+    track.fraction = next;
+    track.lastChangeAt = now;
+    track.heldSince = now;
+    track.samples.length = 0;
+    track.probedFrom = null;
   };
 
   const adjust = (track: Track, now: number): void => {
     const from = track.fraction;
-    if (track.samples.length < effectiveMinSamples) {
-      record(track, now, "none", "insufficient-samples", from, null);
+    if (track.samples.length < minSamples) {
+      record(track, now, "none", "insufficient-samples", from);
       return;
     }
-    const estimate = percentile(track.samples, percentileP);
-    const targetMs = effectiveTargetMs(track);
-    const slowLimit = targetMs * (1 + hysteresis);
-    const fastLimit = targetMs * (1 - hysteresis);
-    if (track.trial) {
-      if (estimate > slowLimit) {
-        track.fraction = track.trial.fromFraction;
-        track.increaseCeiling = track.fraction;
-        track.trial = null;
-        track.samples.length = 0;
-        track.lastAdjust = now;
-        record(track, now, "decrease", "trial-rejected", from, estimate);
-      } else if (track.samples.length < windowSize) {
-        record(track, now, "none", "trial-sampling", from, estimate);
-      } else {
-        track.trial = null;
-        track.lastAdjust = now;
-        record(track, now, "none", "trial-accepted", from, estimate);
-      }
+    const estimate = percentileOrNull(track.samples, 0.5);
+    const late = lateFractionOf(track)!;
+    const hold = (reason: QualityAdjustmentReason): void =>
+      record(track, now, "none", reason, from, estimate, late);
+
+    if (late > lateFrameTolerance) {
+      if (now - track.lastChangeAt < cooldownMs) return hold("cooldown");
+      // A probe that failed its first window goes back to the level a full
+      // clean window had just proved, not to wherever an overload cut lands.
+      const factor =
+        track.probedFrom !== null
+          ? track.probedFrom / from
+          : late > MOSTLY_LATE
+            ? Math.min(ORDINARY_DECREASE, overloadCut(track, estimate!))
+            : ORDINARY_DECREASE;
+      const next = clamp(from * Math.max(1 - maxDecreaseStep, factor));
+      if (next === from) return hold("clamped");
+      track.failedLevel = { fraction: from, atMs: now };
+      track.emergencyCeiling = null;
+      change(track, next, now);
+      record(track, now, "decrease", "above-target", from, estimate, late);
       return;
     }
-    if (now - track.lastAdjust < cooldownMs) {
-      record(track, now, "none", "cooldown", from, estimate);
-      return;
+    if (track.samples.length >= windowSize) track.probedFrom = null;
+    // A late frame inside tolerance is the equilibrium, not a reason to move.
+    if (late > 0) return hold("within-hysteresis");
+    if (from >= MAX_VIEW_QUALITY_FRACTION) return hold("clamped");
+    // Not converged: a still view renders only while this asks for frames,
+    // and a probe needs the whole window.
+    if (track.samples.length < windowSize) {
+      return hold("insufficient-samples");
     }
-    let factor: number;
-    let reason: QualityAdjustmentReason;
-    if (estimate > slowLimit) {
-      factor = Math.max(targetMs / estimate, 1 - maxDecreaseStep);
-      reason = "above-target";
-    } else if (estimate < fastLimit) {
-      factor = Math.min(targetMs / estimate, 1 + maxIncreaseStep);
-      reason = "below-target";
-    } else {
-      // Vsync and discrete frontiers can leave both a coarse and a finer
-      // scene inside the same timing band. Measure a bounded increase instead
-      // of assuming this band proves there is no room for more detail.
-      if (
-        track === stationary &&
-        from < track.increaseCeiling &&
-        maxIncreaseStep > 0 &&
-        maxDecreaseStep > 0 &&
-        track.trialAttempts < MAX_STATIONARY_TRIALS
-      ) {
-        if (track.samples.length < windowSize) {
-          record(track, now, "none", "trial-warming", from, estimate);
-          return;
-        }
-        const next = Math.min(
-          track.increaseCeiling,
-          // Reverting must also respect a caller's decrease-step bound.
-          clamp(
-            from *
-              (1 +
-                Math.min(
-                  maxIncreaseStep,
-                  maxDecreaseStep / (1 - maxDecreaseStep),
-                )),
-          ),
-        );
-        if (next === from) {
-          record(track, now, "none", "clamped", from, estimate);
-          return;
-        }
-        track.trial = {
-          fromFraction: from,
-          toFraction: next,
-          baselineEstimateMs: estimate,
-        };
-        track.trialAttempts += 1;
-        track.fraction = next;
-        track.samples.length = 0;
-        track.lastAdjust = now;
-        record(track, now, "increase", "trial-started", from, estimate);
-        return;
-      }
-      record(track, now, "none", "within-hysteresis", from, estimate);
-      return;
-    }
-    // A failed on-target probe must not cap ordinary recovery when measured
-    // frames are below the fast threshold. The ceiling only bounds probes.
-    const next = clamp(track.fraction * factor);
-    if (next === from) {
-      record(track, now, "none", "clamped", from, estimate);
-      return;
-    }
-    track.fraction = next;
-    track.lastAdjust = now;
-    track.emergencyCeiling = null;
-    record(
-      track,
-      now,
-      next > from ? "increase" : "decrease",
-      reason,
-      from,
-      estimate,
+    // A probe risks a visible step back only near a level known to fail. With
+    // none remembered it is most likely refinement, so it comes sooner and
+    // reaches further.
+    const failed = failedLevelOf(track, now);
+    const dwellMs =
+      failed === null ? track.probeDwellMs / 2 : track.probeDwellMs;
+    if (now - track.heldSince < dwellMs) return hold("cooldown");
+    const headroom = onTimeMs(track) / Math.max(...track.samples);
+    const step = Math.max(
+      failed === null ? 2 * maxIncreaseStep : maxIncreaseStep,
+      headroom * HEADROOM_SPENT - 1,
     );
-    track.samples.length = 0;
+    const next = clamp(
+      Math.min(
+        from * (1 + step),
+        failed === null ? MAX_VIEW_QUALITY_FRACTION : (from + failed) / 2,
+      ),
+    );
+    if (next <= from * (1 + MIN_PROBE_STEP)) return hold("within-hysteresis");
+    change(track, next, now);
+    track.probedFrom = from;
+    record(track, now, "increase", "below-target", from, estimate, late);
   };
+
+  const safeNow = (track: Track, now: number): number =>
+    Number.isFinite(now) ? now : (track.lastAdjustment?.atMs ?? 0);
 
   return {
     recordFrame(durationMs, { interacting, now }) {
@@ -424,7 +466,8 @@ export const createAdaptiveQuality = (
     },
 
     fraction: (interacting) => trackFor(interacting).fraction,
-    target: (interacting) => effectiveTargetMs(trackFor(interacting)),
+    onTimeMs: (interacting) => onTimeMs(trackFor(interacting)),
+    lateThresholdMs: (interacting) => lateThresholdMs(trackFor(interacting)),
 
     restartAt(interacting, fraction, now) {
       const track = trackFor(interacting);
@@ -432,97 +475,108 @@ export const createAdaptiveQuality = (
         return track.fraction;
       }
       const from = track.fraction;
-      track.fraction = clamp(fraction);
-      track.samples.length = 0;
-      track.lastAdjust = Number.NEGATIVE_INFINITY;
-      track.emergencyCeiling = null;
-      track.trial = null;
-      track.increaseCeiling = MAX_VIEW_QUALITY_FRACTION;
-      track.trialAttempts = 0;
-      record(track, now, "none", "seeded", from, null);
+      const next = clamp(fraction);
+      // Emergency debt outlives a reseed that does not already repay it, so a
+      // cut can still be given back once calm returns in a later gesture.
+      if (track.emergencyCeiling !== null && next >= track.emergencyCeiling) {
+        track.emergencyCeiling = null;
+      }
+      track.lastChangeAt = Number.NEGATIVE_INFINITY;
+      // Reseeding to the level already held keeps its evidence: gestures are
+      // often shorter than a window plus a dwell, and discarding both at every
+      // gesture would leave a track that can only ever fall.
+      if (next !== from) {
+        track.fraction = next;
+        track.samples.length = 0;
+        track.heldSince = now;
+      }
+      record(track, now, "none", "seeded", from);
       return track.fraction;
     },
 
     clearSamples(interacting, now) {
       const track = trackFor(interacting);
       track.samples.length = 0;
-      record(track, now, "none", "insufficient-samples", track.fraction, null);
+      record(track, now, "none", "insufficient-samples", track.fraction);
     },
 
     invalidateCapacity(interacting, now) {
       const track = trackFor(interacting);
-      if (track.trial) track.fraction = track.trial.fromFraction;
-      track.trial = null;
-      track.increaseCeiling = MAX_VIEW_QUALITY_FRACTION;
-      track.trialAttempts = 0;
       track.samples.length = 0;
-      record(track, now, "none", "insufficient-samples", track.fraction, null);
+      track.failedLevel = null;
+      record(track, now, "none", "insufficient-samples", track.fraction);
     },
 
-    reduceNow(interacting, now) {
+    reduceNow(interacting, now, factor = EMERGENCY_CUT) {
       const track = trackFor(interacting);
-      if (track.trial) track.fraction = track.trial.fromFraction;
-      track.trial = null;
+      const at = safeNow(track, now);
       const from = track.fraction;
-      const next = clamp(from * EMERGENCY_CUT);
+      const cut = Number.isFinite(factor)
+        ? Math.min(1, Math.max(EMERGENCY_CUT, factor))
+        : EMERGENCY_CUT;
+      const next = clamp(from * cut);
       if (next !== from) {
-        track.fraction = next;
-        track.samples.length = 0;
-        // Successive cuts owe back to the first one's starting point, not to
-        // the step before them.
+        // Successive cuts owe back to the first one's starting point.
         track.emergencyCeiling = Math.max(track.emergencyCeiling ?? 0, from);
+        change(track, next, at);
       }
       record(
         track,
-        Number.isFinite(now) ? now : (track.lastAdjustment?.atMs ?? 0),
+        at,
         next < from ? "decrease" : "none",
         next < from ? "emergency-cut" : "clamped",
         from,
-        null,
       );
       return track.fraction;
     },
 
-    restoreNow(interacting, now) {
+    restoreNow(interacting, now, all = false) {
       const track = trackFor(interacting);
       const ceiling = track.emergencyCeiling;
       const from = track.fraction;
       if (ceiling === null) return from;
-      const next = Math.min(ceiling, clamp(from / EMERGENCY_CUT));
-      if (next > from) {
-        track.fraction = next;
-        // The samples behind the cut described a slower machine than the one
-        // measuring now; keeping them would argue the fraction straight back
-        // down on the next eligible adjustment.
-        track.samples.length = 0;
-      }
+      const at = safeNow(track, now);
+      const next = all
+        ? ceiling
+        : Math.min(ceiling, clamp(from / EMERGENCY_CUT));
+      // The samples behind the cut described a slower view than the one
+      // measuring now; keeping them would argue the fraction straight back
+      // down on the next adjustment.
+      if (next > from) change(track, next, at);
       if (next >= ceiling) track.emergencyCeiling = null;
       record(
         track,
-        Number.isFinite(now) ? now : (track.lastAdjustment?.atMs ?? 0),
+        at,
         next > from ? "increase" : "none",
         next > from ? "emergency-restore" : "clamped",
         from,
-        null,
       );
       return track.fraction;
     },
 
-    increaseThresholdMs: (interacting) =>
-      effectiveTargetMs(trackFor(interacting)) * (1 - hysteresis),
+    owesRestore: (interacting) =>
+      trackFor(interacting).emergencyCeiling !== null,
+
+    provenWithin(interacting, limitMs) {
+      const track = trackFor(interacting);
+      return track.samples.length >= minSamples &&
+        track.samples.every((sample) => sample <= limitMs)
+        ? track.fraction
+        : null;
+    },
 
     stats() {
       const stats = (track: Track): AdaptiveQualityTrackStats => ({
         fraction: track.fraction,
         emergencyCeiling: track.emergencyCeiling,
         samples: track.samples.length,
-        estimateMs: percentileOrNull(track.samples, percentileP),
+        estimateMs: percentileOrNull(track.samples, 0.5),
+        lateFraction: lateFractionOf(track),
         targetMs: track.targetMs,
-        effectiveTargetMs: effectiveTargetMs(track),
+        effectiveTargetMs: onTimeMs(track),
+        budgetRefreshes: budgetRefreshes(track),
+        failedLevel: track.failedLevel?.fraction ?? null,
         lastAdjustment: track.lastAdjustment,
-        trial: track.trial && { ...track.trial },
-        increaseCeiling: track.increaseCeiling,
-        trialAttempts: track.trialAttempts,
       });
       return {
         minimumFraction: MIN_VIEW_QUALITY_FRACTION,

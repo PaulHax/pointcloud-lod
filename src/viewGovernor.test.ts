@@ -33,7 +33,6 @@ describe("createViewGovernor", () => {
       initialFraction: 0.8,
       minSamples: 2,
       cooldownMs: 0,
-      hysteresis: 0,
     });
     governor.recordHostFrame({ hostFrameMs: 66, now: 0 });
     governor.recordHostFrame({ hostFrameMs: 66, now: 1 });
@@ -50,7 +49,6 @@ describe("createViewGovernor", () => {
       initialFraction: 0.8,
       minSamples: 1,
       cooldownMs: 0,
-      hysteresis: 0,
       vtkFrameFraction: 0.5,
     });
     governor.recordHostFrame({ hostFrameMs: 5, vtkFrameMs: 33, now: 0 });
@@ -81,7 +79,8 @@ describe("createViewGovernor", () => {
     for (let index = 0; index < 10; index += 1) {
       governor.recordHostFrame({ ...metrics, now: index * 50 });
     }
-    expect(governor.qualityFraction()).toBeCloseTo(0.66);
+    // Two refreshes are on time for the stationary target; 50 ms is three.
+    expect(governor.qualityFraction()).toBeCloseTo(2 / Math.sqrt(6), 1);
     expect(governor.stats().lastAdjustment).toMatchObject({
       reason: "above-target",
       estimateMs: 50,
@@ -110,7 +109,7 @@ describe("createViewGovernor", () => {
     });
     governor.recordHostFrame({ hostFrameMs: 66, now: 2 });
     governor.recordHostFrame({ hostFrameMs: 66, now: 3 });
-    expect(governor.qualityFraction()).toBeCloseTo(0.5);
+    expect(governor.qualityFraction()).toBeCloseTo(2 / Math.sqrt(12), 1);
     governor.dispose();
   });
 
@@ -165,47 +164,89 @@ describe("createViewGovernor", () => {
     expect(governor.stats().regime).toBe("stationary");
   });
 
-  it("requires two consecutive severe interaction frames for an emergency cut", () => {
+  /** Frames one interval apart, all of that interval, from `start`. */
+  const present = (
+    governor: ReturnType<typeof createViewGovernor>,
+    hostFrameMs: number,
+    count: number,
+    start: number,
+  ): number => {
+    let now = start;
+    for (let index = 0; index < count; index += 1) {
+      now += hostFrameMs;
+      governor.recordHostFrame({ hostFrameMs, now });
+    }
+    return now;
+  };
+
+  it("cuts only when most of a short window has collapsed", () => {
     const governor = createViewGovernor({ minSamples: 30, cooldownMs: 0 });
     const motion = governor.beginMotion("explicit");
-    governor.recordTransientFrame({ hostFrameMs: 40, now: 0 });
+    // Two refreshes per frame is slow, but it is not a collapse.
+    let now = present(governor, 33.3, 20, 0);
     expect(governor.qualityFraction()).toBe(1);
-    governor.recordTransientFrame({ hostFrameMs: 40, now: 1 });
+    // Two collapsed frames of the last five are still a minority.
+    now = present(governor, 100, 2, now);
+    expect(governor.qualityFraction()).toBe(1);
+    present(governor, 100, 1, now);
     expect(governor.qualityFraction()).toBe(0.5);
     expect(governor.stats().lastAdjustment?.reason).toBe("emergency-cut");
     motion.release();
   });
 
-  it("gives an emergency cut back inside the gesture that caused it", () => {
+  it("ignores frames drawn while a GPU wakes from idle", () => {
     const governor = createViewGovernor({ minSamples: 30, cooldownMs: 0 });
-    // Tiles are streaming, which is what withholds eligibility: the sampling
-    // loop that would otherwise raise quality back is shut off for as long as
-    // this holds, while the emergency cut below is not.
+    let now = present(governor, 16.7, 10, 0);
+    const motion = governor.beginMotion("explicit");
+    now = present(governor, 100, 4, now + 2000);
+    expect(governor.stats().activity.warmingUp).toBe(true);
+    now = present(governor, 16.7, 30, now);
+    expect(governor.stats().activity.warmingUp).toBe(false);
+    expect(governor.qualityFraction()).toBe(1);
+    expect(governor.stats().capacitySamples.rejected).toBeGreaterThan(0);
+    motion.release();
+  });
+
+  it("takes back a cut that did not make frames faster", () => {
+    const governor = createViewGovernor({ minSamples: 30, cooldownMs: 0 });
     governor.setWorkState({
       workPending: true,
       physicalTileOperations: 4,
       physicalHierarchyOperations: 0,
     });
     const motion = governor.beginMotion("explicit");
-    expect(governor.stats().activity).toMatchObject({
+    let now = present(governor, 100, 5, 0);
+    expect(governor.qualityFraction()).toBe(0.5);
+    // The time goes somewhere quality does not reach.
+    now = present(governor, 100, 7, now);
+    expect(governor.qualityFraction()).toBe(1);
+    expect(governor.stats().lastAdjustment?.reason).toBe("emergency-restore");
+    expect(governor.stats().emergency.suspended).toBe(true);
+    present(governor, 100, 20, now);
+    expect(governor.qualityFraction()).toBe(1);
+    motion.release();
+  });
+
+  it("gives a cut back after sustained calm while tiles stream", () => {
+    const governor = createViewGovernor({ minSamples: 30, cooldownMs: 0 });
+    // Tiles are streaming, which is what withholds eligibility: the sampling
+    // loop that would otherwise raise quality back is shut off for as long as
+    // this holds, while the emergency path is not.
+    governor.setWorkState({
       workPending: true,
-      measurementEligible: false,
+      physicalTileOperations: 4,
+      physicalHierarchyOperations: 0,
     });
-
-    governor.recordHostFrame({ hostFrameMs: 40, now: 0 });
-    governor.recordHostFrame({ hostFrameMs: 40, now: 1 });
+    const motion = governor.beginMotion("explicit");
+    let now = present(governor, 100, 5, 0);
     expect(governor.qualityFraction()).toBe(0.5);
-    expect(governor.stats().lastAdjustment?.reason).toBe("emergency-cut");
-    expect(governor.stats().capacitySamples).toMatchObject({ eligible: 0 });
-
-    // The same frames the cut reads, now comfortably inside the target.
-    governor.recordHostFrame({ hostFrameMs: 10, now: 2 });
+    // The cut worked; a calm second later it is handed back.
+    now = present(governor, 16.7, 30, now);
     expect(governor.qualityFraction()).toBe(0.5);
-    governor.recordHostFrame({ hostFrameMs: 10, now: 3 });
+    present(governor, 16.7, 60, now);
     expect(governor.qualityFraction()).toBe(1);
     expect(governor.stats().lastAdjustment).toMatchObject({
       reason: "emergency-restore",
-      direction: "increase",
       fromFraction: 0.5,
       toFraction: 1,
     });
@@ -223,16 +264,13 @@ describe("createViewGovernor", () => {
       physicalHierarchyOperations: 0,
     });
     const motion = governor.beginMotion("explicit");
-    governor.recordHostFrame({ hostFrameMs: 40, now: 0 });
-    governor.recordHostFrame({ hostFrameMs: 40, now: 1 });
+    const now = present(governor, 100, 5, 0);
     expect(governor.qualityFraction()).toBe(0.5);
     governor.invalidateCapacity();
     expect(governor.qualityFraction()).toBe(0.5);
     expect(governor.stats().samples).toBe(0);
-    governor.recordHostFrame({ hostFrameMs: 10, now: 2 });
-    governor.recordHostFrame({ hostFrameMs: 10, now: 3 });
+    present(governor, 16.7, 90, now);
     expect(governor.qualityFraction()).toBe(1);
-    expect(governor.stats().lastAdjustment?.reason).toBe("emergency-restore");
     motion.release();
     governor.dispose();
   });
@@ -249,12 +287,10 @@ describe("createViewGovernor", () => {
       physicalHierarchyOperations: 0,
     });
     const motion = governor.beginMotion("explicit");
-    governor.recordHostFrame({ hostFrameMs: 40, now: 0 });
-    governor.recordHostFrame({ hostFrameMs: 40, now: 1 });
+    let now = present(governor, 100, 5, 0);
     expect(governor.qualityFraction()).toBeCloseTo(0.2);
-
-    for (let at = 2; at < 40; at += 1) {
-      governor.recordHostFrame({ hostFrameMs: 10, now: at });
+    for (let frame = 0; frame < 300; frame += 1) {
+      now = present(governor, 10, 1, now);
       // Back to where the cut started and never past it: quality above that
       // has to be earned by an eligible capacity sample.
       expect(governor.qualityFraction()).toBeLessThanOrEqual(0.4);
@@ -263,7 +299,7 @@ describe("createViewGovernor", () => {
     motion.release();
   });
 
-  it("reseeds a gesture that begins inside the previous settle window", () => {
+  it("continues a gesture begun inside the previous settle window", () => {
     vi.useFakeTimers();
     const governor = createViewGovernor({
       minSamples: 30,
@@ -272,21 +308,17 @@ describe("createViewGovernor", () => {
     });
     const first = governor.beginMotion("explicit");
     governor.recordCameraChange();
-    // Two consecutive severe frames per cut, spaced past the emergency
-    // cooldown so all three land.
-    for (const at of [0, 1, 500, 501, 1000, 1001]) {
-      governor.recordTransientFrame({ hostFrameMs: 200, now: at });
-    }
-    expect(governor.qualityFraction()).toBeCloseTo(0.125);
+    present(governor, 200, 5, 0);
+    expect(governor.qualityFraction()).toBe(0.5);
 
     first.release();
     // The settle timer is still pending, so the governor never left the
-    // interaction regime and the cut floor is still in force.
+    // interaction regime, and the next drag carries on at the cut level
+    // rather than reseeding into the collapse that caused it.
     expect(governor.stats().regime).toBe("interaction");
-
     const second = governor.beginMotion("explicit");
-    expect(governor.qualityFraction()).toBeCloseTo(0.25);
-    expect(governor.stats().lastAdjustment?.reason).toBe("seeded");
+    expect(governor.qualityFraction()).toBe(0.5);
+    expect(governor.stats().lastAdjustment?.reason).toBe("emergency-cut");
     second.release();
   });
 
@@ -295,7 +327,6 @@ describe("createViewGovernor", () => {
     const governor = createViewGovernor({
       minSamples: 2,
       cooldownMs: 0,
-      hysteresis: 0,
       interactionSettleMs: 1000,
     });
     const sample = (now: number) =>
@@ -314,7 +345,7 @@ describe("createViewGovernor", () => {
     // Nothing cut the track, so a repeated nudge must not clear the window it
     // is still filling. Otherwise a user making many gestures each shorter than
     // `minSamples` could never accumulate the samples that argue for less
-    // quality, and the emergency streak could never reach two frames either.
+    // quality.
     const second = governor.beginMotion("explicit");
     sample(11);
     expect(governor.stats().lastAdjustment?.reason).toBe("above-target");
@@ -372,36 +403,31 @@ describe("createViewGovernor", () => {
     expect(governor.needsFrame()).toBe(false);
   });
 
-  it("learns the display quantum and stops asking for what it cannot show", () => {
+  it("learns the display quantum and grants the target whole refreshes", () => {
     const governor = createViewGovernor({
       initialFraction: 0.5,
       interactionTargetMs: 16,
       minSamples: 2,
       cooldownMs: 0,
-      hysteresis: 0.2,
     });
     const motion = governor.beginMotion("explicit");
-    // A 60 Hz display presents no faster than this however cheap the frame,
-    // so at a 16 ms target every one of these lands inside the hysteresis
-    // band and the interaction track can only ever be cut.
     for (let frame = 0; frame < 2; frame += 1) {
       governor.recordHostFrame({ hostFrameMs: 16.7, now: frame });
     }
     expect(governor.stats().displayQuantumMs).toBeNull();
-    expect(governor.stats().lastAdjustment?.direction).toBe("none");
 
-    // The third short interval settles what the display is: the target moves
-    // to one the same measurement can fall below, and the very frame that
-    // taught it that is evidence of headroom.
+    // The third short interval settles what the display is. A 16 ms target
+    // then means one refresh, and a frame that made its refresh is on time
+    // rather than a miss the track would cut for.
     governor.recordHostFrame({ hostFrameMs: 16.7, now: 2 });
     expect(governor.stats().displayQuantumMs).toBeCloseTo(16.7, 5);
     expect(governor.stats().configuredFrameTimeMs).toBe(16);
-    expect(governor.stats().targetFrameTimeMs).toBeCloseTo(24, 1);
+    expect(governor.stats().targetFrameTimeMs).toBeCloseTo(16.7, 5);
     expect(governor.stats().lastAdjustment).toMatchObject({
-      direction: "increase",
-      reason: "below-target",
+      direction: "none",
+      lateFraction: 0,
     });
-    expect(governor.qualityFraction()).toBeGreaterThan(0.5);
+    expect(governor.qualityFraction()).toBe(0.5);
     motion.release();
     governor.dispose();
   });
@@ -413,17 +439,16 @@ describe("createViewGovernor", () => {
       stationaryTargetMs: 33,
       minSamples: 2,
       cooldownMs: 0,
-      hysteresis: 0.2,
     });
     // A software rasteriser never reaches a refresh boundary, so its shortest
     // interval says what it managed, not what the display can show. Believing
-    // it would raise the settled target past 100 ms and read these frames as
-    // headroom.
+    // it would grant the settled target a 100 ms refresh and read these frames
+    // as on time.
     for (let frame = 0; frame < 4; frame += 1) {
       governor.recordHostFrame({ hostFrameMs: 100, now: frame });
     }
     expect(governor.stats().displayQuantumMs).toBeLessThanOrEqual(17);
-    expect(governor.stats().targetFrameTimeMs).toBe(33);
+    expect(governor.stats().targetFrameTimeMs).toBeLessThanOrEqual(34);
     expect(governor.stats().lastAdjustment?.reason).toBe("above-target");
     governor.dispose();
   });
@@ -434,13 +459,12 @@ describe("createViewGovernor", () => {
       interactionTargetMs: 16,
       minSamples: 2,
       cooldownMs: 0,
-      hysteresis: 0.2,
     });
     const motion = governor.beginMotion("explicit");
     for (let frame = 0; frame < 3; frame += 1) {
       governor.recordHostFrame({ hostFrameMs: 16.7, now: frame });
     }
-    expect(governor.stats().targetFrameTimeMs).toBeCloseTo(24, 1);
+    expect(governor.stats().targetFrameTimeMs).toBeCloseTo(16.7, 1);
 
     // New targets build new tracks. The display did not change with them.
     governor.setOptions({
@@ -448,11 +472,10 @@ describe("createViewGovernor", () => {
       interactionTargetMs: 16,
       minSamples: 2,
       cooldownMs: 0,
-      hysteresis: 0.2,
       stationaryTargetMs: 40,
     });
     expect(governor.stats().displayQuantumMs).toBeCloseTo(16.7, 5);
-    expect(governor.stats().targetFrameTimeMs).toBeCloseTo(24, 1);
+    expect(governor.stats().targetFrameTimeMs).toBeCloseTo(16.7, 1);
     motion.release();
     governor.dispose();
   });
@@ -463,12 +486,11 @@ describe("createViewGovernor", () => {
       interactionTargetMs: 16,
       minSamples: 2,
       cooldownMs: 0,
-      hysteresis: 0.2,
     });
     // A 60 Hz session with three compositor hiccups spread across it. A
     // session-lifetime minimum would take those three as the display and
-    // settle at a 4 ms quantum, whose reachable target is 5.75 ms — under the
-    // 16 ms interaction target, so the correction silently disappears.
+    // settle at a 4 ms quantum and grant the 16 ms target four refreshes the
+    // display never shows.
     const motion = governor.beginMotion("explicit");
     const hiccups = new Set([5, 900, 2500]);
     for (let frame = 0; frame < 3000; frame += 1) {
@@ -479,7 +501,7 @@ describe("createViewGovernor", () => {
     }
 
     expect(governor.stats().displayQuantumMs).toBeCloseTo(16.7, 5);
-    expect(governor.stats().targetFrameTimeMs).toBeCloseTo(24, 1);
+    expect(governor.stats().targetFrameTimeMs).toBeCloseTo(16.7, 1);
     motion.release();
     governor.dispose();
   });
@@ -490,7 +512,6 @@ describe("createViewGovernor", () => {
       interactionTargetMs: 16,
       minSamples: 2,
       cooldownMs: 0,
-      hysteresis: 0.2,
     });
     // A window dragged from a 120 Hz panel to a 60 Hz one. The 8.3 ms
     // intervals were true when measured and are simply no longer reachable.
