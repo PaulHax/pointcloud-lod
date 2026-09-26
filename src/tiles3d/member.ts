@@ -1031,11 +1031,7 @@ export const createTiles3dMember = (
     applyAllocation(next) {
       if (disposed) return;
       const previousMemoryBudgetBytes = allocation.memoryBudgetBytes;
-      allocation = {
-        qualityFraction: Math.min(1, Math.max(0, next.qualityFraction)),
-        memoryBudgetBytes: Math.max(0, Math.floor(next.memoryBudgetBytes)),
-        regime: next.regime,
-      };
+      allocation = next;
       // Trim the reuse pool before judging the new share: pooled tiles are
       // held on speculation, and counting them would call a share that still
       // fits everything drawn a memory constraint.

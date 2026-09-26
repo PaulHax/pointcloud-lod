@@ -82,7 +82,7 @@ export type TilesetTraversalResult = {
    *
    * This is the member's demand in the one unit that is comparable across
    * formats: how wrong the coarsest thing it can draw currently looks. Zero
-   * when the root is culled or carries no content.
+   * when the root is culled.
    */
   readonly rootScreenSpaceErrorPx: number;
   /** Visible unknown boundaries. The member owns fetching and retry policy. */
@@ -625,8 +625,7 @@ const traverseHierarchy = (
     requestedTileIds: Object.freeze(result.requested),
     drawnTileIds: Object.freeze(result.drawn),
     effectiveScreenSpaceErrorPx: effective,
-    rootScreenSpaceErrorPx:
-      Number.isFinite(rootSse) && rootSse > 0 ? rootSse : 0,
+    rootScreenSpaceErrorPx: rootSse,
     neededSubtreeRequests: Object.freeze([...neededSubtrees.values()]),
     tileById: hierarchy.tileById,
   });

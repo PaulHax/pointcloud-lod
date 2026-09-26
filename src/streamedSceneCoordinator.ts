@@ -160,9 +160,12 @@ const usableNonNegative = (value: number): number =>
 const usableFraction = (value: number): number =>
   Math.min(1, usableNonNegative(value));
 
+/**
+ * The one boundary for member inputs. Custom members are an extension point,
+ * so a member reporting on the wrong scale takes at most a full share here,
+ * and nothing non-finite reaches the allocator or the governor.
+ */
 const normalizeInputs = (inputs: GovernorInputs): GovernorInputs => ({
-  // Importance is already a branded [0, 1] weight; this only defends against a
-  // non-finite value reaching the allocator.
   projectedImportance: usableFraction(inputs.projectedImportance) as Importance,
   qualityDemand: usableFraction(inputs.qualityDemand),
   work: {

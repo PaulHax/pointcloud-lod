@@ -14,6 +14,9 @@ export type ViewQualityContender<Key> = {
  * fraction. The view owns `viewFraction * activeMemberCount` units of quality.
  * Equal-importance members therefore receive the view fraction; a member that
  * cannot spend its share returns it to the remaining contenders.
+ *
+ * Importance and demand must already be normalized to [0, 1]: the
+ * coordinator does that once, where it reads each member's inputs.
  */
 export const allocateViewQuality = <Key>(
   contenders: readonly ViewQualityContender<Key>[],
@@ -24,18 +27,8 @@ export const allocateViewQuality = <Key>(
     ? Math.min(MAX_VIEW_QUALITY_FRACTION, Math.max(0, viewFraction))
     : 0;
   let remaining = usableFraction * contenders.length;
-  // Importance is contractually [0, 1]. Clamping here rather than trusting the
-  // producers means one member reporting on the wrong scale can at worst take
-  // a full share, never crowd every other member down to the quality floor.
-  const importanceOf = ({ inputs }: ViewQualityContender<Key>): number =>
-    Number.isFinite(inputs.projectedImportance)
-      ? Math.min(1, Math.max(0, inputs.projectedImportance))
-      : 0;
   let open = contenders.filter(
-    (contender) =>
-      importanceOf(contender) > 0 &&
-      Number.isFinite(contender.inputs.qualityDemand) &&
-      contender.inputs.qualityDemand > 0,
+    ({ inputs }) => inputs.projectedImportance > 0 && inputs.qualityDemand > 0,
   );
   for (const contender of contenders) allocations.set(contender.key, 0);
 
@@ -43,33 +36,30 @@ export const allocateViewQuality = <Key>(
   // remainder, so the loop is bounded by the contender count.
   while (open.length > 0 && remaining > 0) {
     const importance = open.reduce(
-      (sum, contender) => sum + importanceOf(contender),
+      (sum, { inputs }) => sum + inputs.projectedImportance,
       0,
     );
-    if (!(importance > 0)) break;
     const proposed = new Map(
       open.map((contender) => [
         contender,
-        (remaining * importanceOf(contender)) / importance,
+        (remaining * contender.inputs.projectedImportance) / importance,
       ]),
     );
-    const capped = open.filter((contender) => {
-      const cap = Math.min(1, contender.inputs.qualityDemand);
-      return cap <= proposed.get(contender)!;
-    });
+    const capped = open.filter(
+      (contender) => contender.inputs.qualityDemand <= proposed.get(contender)!,
+    );
     if (capped.length === 0) {
       for (const contender of open) {
         allocations.set(
           contender.key,
-          Math.min(1, contender.inputs.qualityDemand, proposed.get(contender)!),
+          Math.min(contender.inputs.qualityDemand, proposed.get(contender)!),
         );
       }
       break;
     }
-    for (const contender of capped) {
-      const allocation = Math.min(1, contender.inputs.qualityDemand);
-      allocations.set(contender.key, allocation);
-      remaining = Math.max(0, remaining - allocation);
+    for (const { key, inputs } of capped) {
+      allocations.set(key, inputs.qualityDemand);
+      remaining = Math.max(0, remaining - inputs.qualityDemand);
     }
     open = open.filter((contender) => !capped.includes(contender));
   }
