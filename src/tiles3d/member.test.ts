@@ -843,6 +843,40 @@ describe("createTiles3dMember", () => {
     member.dispose();
   });
 
+  it("keeps its drawn detail when a smaller byte share still fits it", async () => {
+    const h = harness(true, 1024);
+    const member = createTiles3dMember(h.context, h.config);
+    const drain = async () => {
+      for (let round = 0; round < 15; round += 1) {
+        await settle();
+        while (h.submissions.hasPending()) h.submissions.prepareFrame();
+        if (member.governorInputs().work.operations === 0) break;
+      }
+    };
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    member.setCamera(view);
+    await drain();
+    const drawn = (member.stats() as Tiles3dMemberStats).renderer.drawnTileIds;
+    expect(drawn).toEqual(["root/0", "root/1"]);
+
+    // Both children, 52 bytes each, still fit; only the pooled root does not.
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 120,
+      regime: "stationary",
+    });
+    await drain();
+    expect(member.stats()).toMatchObject({
+      memoryConstrained: false,
+      renderer: { drawnTileIds: drawn },
+    });
+    member.dispose();
+  });
+
   it("credits a submitted parent when the complete child frontier fits without the transient peak", async () => {
     const h = harness(true, 88);
     (h.context.workers as any).decode = (request: DecodeTileRequest) => {

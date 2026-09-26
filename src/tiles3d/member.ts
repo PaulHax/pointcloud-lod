@@ -1053,6 +1053,12 @@ export const createTiles3dMember = (
         memoryBudgetBytes: Math.max(0, Math.floor(next.memoryBudgetBytes)),
         regime: next.regime,
       };
+      // Trim the reuse pool before judging the new share: pooled tiles are
+      // held on speculation, and counting them would call a share that still
+      // fits everything drawn a memory constraint.
+      const cancelled = adapter.setResourceCeilingBytes(
+        allocation.memoryBudgetBytes,
+      );
       if (allocation.memoryBudgetBytes > previousMemoryBudgetBytes) {
         clearBudgetConstraint();
       } else if (
@@ -1064,9 +1070,7 @@ export const createTiles3dMember = (
       } else {
         retryIfDesiredSelectionChanged();
       }
-      for (const id of adapter.setResourceCeilingBytes(
-        allocation.memoryBudgetBytes,
-      )) {
+      for (const id of cancelled) {
         if (requested.has(id)) admissionBlocked.add(id);
       }
       refreshSelection();
