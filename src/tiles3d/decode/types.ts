@@ -192,8 +192,6 @@ export type DecodeWorkerPoolHandle = {
     readonly failedJobs: number;
     readonly cancelledJobs: number;
     readonly workerElapsedMs: number;
-    readonly decodedGeometryBytes: number;
-    readonly decodedTextureBytes: number;
     readonly basisRuntimeInitializationMs: number;
     readonly basisTranscodeMs: number;
     readonly basisTextures: number;

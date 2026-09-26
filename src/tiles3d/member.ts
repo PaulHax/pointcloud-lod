@@ -1130,13 +1130,8 @@ export const createTiles3dMember = (
           queuedBytes: submissions.queuedBytes,
           lastFrameAdmittedJobs: submissions.lastFrameAdmittedJobs,
           lastFrameAdmittedBytes: submissions.lastFrameAdmittedBytes,
-          admittedJobs: submissions.admittedJobs,
-          admittedBytes: submissions.admittedBytes,
           peakQueuedJobs: submissions.peakQueuedJobs,
-          peakQueuedBytes: submissions.peakQueuedBytes,
           peakFrameAdmittedBytes: submissions.peakFrameAdmittedBytes,
-          peakFrameElapsedMs: submissions.peakFrameElapsedMs,
-          admissionFrames: submissions.admissionFrames,
         },
       };
     },

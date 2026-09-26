@@ -29,7 +29,6 @@ describe("binary subtree reader", () => {
       source.root.implicitTiling!.metadataSchema,
     );
 
-    expect(parsed.subtreeLevels).toBe(4);
     expect(parsed.tileAvailability.availableCount).toBeGreaterThan(4);
     expect(parsed.tileBoundingBoxes[0]?.center.every(Number.isFinite)).toBe(
       true,

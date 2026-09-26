@@ -310,8 +310,6 @@ export type LodSelectionStats = {
   readonly targetUndecodedTiles: number;
   readonly consideredNodes: number;
   readonly availableNodes: number;
-  readonly selectedNodes: number;
-  readonly leafNodes: number;
   readonly sseStoppedNodes: number;
   readonly budgetSkippedNodes: number;
   readonly budgetSkippedPoints: number;
@@ -591,8 +589,6 @@ const emptySelectionStats = (
   targetPoints: 0,
   consideredNodes: 0,
   availableNodes: 0,
-  selectedNodes: 0,
-  leafNodes: 0,
   sseStoppedNodes: 0,
   budgetSkippedNodes: 0,
   budgetSkippedPoints: 0,
@@ -1462,7 +1458,6 @@ export const createLodController = (
     };
 
     const neededPages: VoxelKey[] = [];
-    let leafNodes = 0;
     let sseStoppedNodes = 0;
     const selection = selectNodes({
       root: ROOT_KEY,
@@ -1484,13 +1479,10 @@ export const createLodController = (
           neededPages.push(key);
           return undefined;
         }
-        const availableChildren = childrenOf(key, entry);
-        let children = availableChildren;
-        if (availableChildren.length === 0) {
-          leafNodes += 1;
-        } else if (sse(key) < refinementCutoffPx) {
+        const children = childrenOf(key, entry);
+        if (children.length > 0 && sse(key) < refinementCutoffPx) {
           sseStoppedNodes += 1;
-          children = [];
+          return { pointCount: entry.pointCount, children: [] };
         }
         return { pointCount: entry.pointCount, children };
       },
@@ -1511,10 +1503,8 @@ export const createLodController = (
       targetPoints: selection.totalPoints,
       consideredNodes: selection.consideredNodes,
       availableNodes: selection.availableNodes,
-      selectedNodes: selection.selectedNodes,
-      leafNodes,
       sseStoppedNodes,
-      budgetSkippedNodes: selection.budgetSkippedNodes,
+      budgetSkippedNodes: selection.budgetSkipped.size,
       budgetSkippedPoints: selection.budgetSkippedPoints,
       // Importance says whether the cloud is in view, not whether the budget
       // admitted anything. A root larger than the budget selects nothing, and

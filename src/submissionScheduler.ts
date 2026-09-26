@@ -36,17 +36,11 @@ export type SubmissionSchedulerStats = {
   readonly maxTimeMsPerFrame: number;
   readonly queuedJobs: number;
   readonly queuedBytes: number;
-  readonly admittedJobs: number;
-  readonly admittedBytes: number;
   readonly lastFrameAdmittedJobs: number;
   readonly lastFrameAdmittedBytes: number;
   readonly lastFrameElapsedMs: number;
   readonly peakQueuedJobs: number;
-  readonly peakQueuedBytes: number;
   readonly peakFrameAdmittedBytes: number;
-  readonly peakFrameElapsedMs: number;
-  readonly admissionFrames: number;
-  readonly disposed: boolean;
 };
 
 export type SubmissionScheduler = {
@@ -77,16 +71,11 @@ export const createSubmissionScheduler = (
   const now = options.now ?? (() => performance.now());
   const queue: QueuedJob[] = [];
   let queuedBytes = 0;
-  let admittedJobs = 0;
-  let admittedBytes = 0;
   let lastFrameAdmittedJobs = 0;
   let lastFrameAdmittedBytes = 0;
   let lastFrameElapsedMs = 0;
   let peakQueuedJobs = 0;
-  let peakQueuedBytes = 0;
   let peakFrameAdmittedBytes = 0;
-  let peakFrameElapsedMs = 0;
-  let admissionFrames = 0;
   let disposed = false;
 
   const discardCancelledHead = (): void => {
@@ -112,7 +101,6 @@ export const createSubmissionScheduler = (
         queue.push(queued);
         queuedBytes += bytes;
         peakQueuedJobs = Math.max(peakQueuedJobs, queue.length);
-        peakQueuedBytes = Math.max(peakQueuedBytes, queuedBytes);
         if (wasEmpty) options.scheduleRender();
       } else {
         queued.cancelled = true;
@@ -161,16 +149,12 @@ export const createSubmissionScheduler = (
         }
         frameJobs += 1;
         frameBytes += next.bytes;
-        admittedJobs += 1;
-        admittedBytes += next.bytes;
         discardCancelledHead();
       }
       lastFrameAdmittedJobs = frameJobs;
       lastFrameAdmittedBytes = frameBytes;
       lastFrameElapsedMs = Math.max(0, now() - started);
-      if (frameJobs > 0) admissionFrames += 1;
       peakFrameAdmittedBytes = Math.max(peakFrameAdmittedBytes, frameBytes);
-      peakFrameElapsedMs = Math.max(peakFrameElapsedMs, lastFrameElapsedMs);
       if (queue.length > 0) options.scheduleRender();
     },
 
@@ -184,17 +168,11 @@ export const createSubmissionScheduler = (
         0,
       ),
       queuedBytes,
-      admittedJobs,
-      admittedBytes,
       lastFrameAdmittedJobs,
       lastFrameAdmittedBytes,
       lastFrameElapsedMs,
       peakQueuedJobs,
-      peakQueuedBytes,
       peakFrameAdmittedBytes,
-      peakFrameElapsedMs,
-      admissionFrames,
-      disposed,
     }),
 
     dispose() {

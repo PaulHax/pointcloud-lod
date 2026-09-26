@@ -76,7 +76,6 @@ export type TilesetTraversalResult = {
   readonly requestedTileIds: readonly string[];
   /** Submitted draw set with REPLACE fallback applied. */
   readonly drawnTileIds: readonly string[];
-  readonly culledTileIds: readonly string[];
   readonly effectiveScreenSpaceErrorPx: number;
   /**
    * Screen-space error of the root's own content, before refinement.
@@ -483,7 +482,6 @@ const traverseHierarchy = (
   }
   const effective = options.maximumScreenSpaceErrorPx / Math.max(quality, 0.05);
   const planes = frustumPlanes(options.camera.viewProj);
-  const culled: string[] = [];
   const hierarchy =
     materialized ??
     (options.root.implicitTiling
@@ -516,7 +514,6 @@ const traverseHierarchy = (
     }
     const { transform: accumulated, bounds } = placement;
     if (!boxIntersectsFrustum(bounds, planes)) {
-      culled.push(tile.id);
       return {
         visible: false,
         coverageSubmitted: true,
@@ -642,7 +639,6 @@ const traverseHierarchy = (
     desiredTileIds: Object.freeze(result.desired),
     requestedTileIds: Object.freeze(result.requested),
     drawnTileIds: Object.freeze(result.drawn),
-    culledTileIds: Object.freeze(culled),
     effectiveScreenSpaceErrorPx: effective,
     rootScreenSpaceErrorPx:
       Number.isFinite(rootSse) && rootSse > 0 ? rootSse : 0,

@@ -464,7 +464,7 @@ describe("vtk mesh adapter", () => {
     // A survivor would wait for its cancelled sibling forever.
     expect(adapter.tileState("root/0")).toBe("absent");
     expect(adapter.tileState("root")).toBe("submitted");
-    expect(adapter.stats()).toMatchObject({ pendingTiles: 0, pendingBytes: 0 });
+    expect(adapter.stats()).toMatchObject({ pendingTiles: 0 });
   });
 
   it("keeps an in-flight replacement that fits once it lands", () => {

@@ -54,7 +54,7 @@ it("expands external roots without losing placement and fetches their original c
   const response = await source.fetchTileset("unused", {});
   const document = await response.json();
   const parsed = parseTileset(document, source.endpoint);
-  expect(parsed.tiles.length).toBe(2);
+  expect(parsed.tileById.size).toBe(2);
   expect(document).toMatchObject({ root: { transform } });
   const signal = new AbortController().signal;
   const content = await source.fetchContent(

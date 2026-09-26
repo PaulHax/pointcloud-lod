@@ -56,10 +56,6 @@ export type NodeSelection = {
   readonly consideredNodes: number;
   /** Candidates for which `getNode` returned hierarchy data. */
   readonly availableNodes: number;
-  /** Available nodes admitted to the parent-closed selection. */
-  readonly selectedNodes: number;
-  /** Available nodes rejected only because their points did not fit. */
-  readonly budgetSkippedNodes: number;
   /** Points stored in the nodes rejected only by the point budget. */
   readonly budgetSkippedPoints: number;
   /** Keys rejected only because their points did not fit. */
@@ -192,8 +188,6 @@ export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
     totalPoints,
     consideredNodes,
     availableNodes,
-    selectedNodes: selected.size,
-    budgetSkippedNodes: budgetSkipped.size,
     budgetSkippedPoints,
     budgetSkipped,
   };

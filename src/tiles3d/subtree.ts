@@ -15,7 +15,6 @@ export type SubtreeAvailability = {
 
 export type ParsedSubtree = {
   readonly byteLength: number;
-  readonly subtreeLevels: number;
   readonly tileAvailability: SubtreeAvailability;
   readonly contentAvailability: SubtreeAvailability;
   readonly childSubtreeAvailability: SubtreeAvailability;
@@ -510,7 +509,6 @@ export const parseSubtree = (
   );
   return Object.freeze({
     byteLength: content.byteLength,
-    subtreeLevels,
     tileAvailability,
     contentAvailability,
     childSubtreeAvailability,

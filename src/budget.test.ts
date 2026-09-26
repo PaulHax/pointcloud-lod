@@ -50,10 +50,9 @@ describe("selectNodes", () => {
     expect(result).toMatchObject({
       consideredNodes: 1,
       availableNodes: 1,
-      selectedNodes: 1,
-      budgetSkippedNodes: 0,
       budgetSkippedPoints: 0,
     });
+    expect(result.budgetSkipped.size).toBe(0);
   });
 
   it("selects nothing when the root alone exceeds the budget", () => {
@@ -61,7 +60,7 @@ describe("selectNodes", () => {
 
     expect(result.selected.size).toBe(0);
     expect(result.totalPoints).toBe(0);
-    expect(result.budgetSkippedNodes).toBe(1);
+    expect(result.budgetSkipped.size).toBe(1);
     expect(result.budgetSkippedPoints).toBe(100);
   });
 
@@ -94,7 +93,7 @@ describe("selectNodes", () => {
     // Ranked children: '1-1-0-0' (2), '1-0-1-0' (1), '1-0-0-0' (0).
     expect(result.selected).toEqual(new Set(["0-0-0-0", "1-1-0-0", "1-0-1-0"]));
     expect(result.totalPoints).toBe(220);
-    expect(result.budgetSkippedNodes).toBe(1);
+    expect(result.budgetSkipped.size).toBe(1);
     expect(result.budgetSkippedPoints).toBe(60);
   });
 
