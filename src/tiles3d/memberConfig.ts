@@ -43,9 +43,23 @@ export const finiteAffineMatrix = (
   return [...matrix];
 };
 
+/** A validated config with every defaulted option resolved. */
+export type ResolvedTiles3dConfig = Tiles3dMemberConfig &
+  Required<
+    Pick<
+      Tiles3dMemberConfig,
+      | "maximumScreenSpaceErrorPx"
+      | "cacheBytes"
+      | "concurrency"
+      | "verticalExaggeration"
+      | "verticalPivotZ"
+      | "geometricErrorScale"
+    >
+  >;
+
 export const validateTiles3dMemberConfig = (
   config: Tiles3dMemberConfig,
-): Tiles3dMemberConfig => {
+): ResolvedTiles3dConfig => {
   if (
     typeof config.endpoint !== "string" ||
     config.endpoint.length === 0 ||
@@ -59,9 +73,12 @@ export const validateTiles3dMemberConfig = (
     throw new TypeError("tiles revision must be non-empty");
   }
   finiteAffineMatrix(config.tilesetToScene, "tilesetToScene");
-  const maximum =
+  const maximumScreenSpaceErrorPx =
     config.maximumScreenSpaceErrorPx ?? DEFAULT_MAXIMUM_SCREEN_SPACE_ERROR_PX;
-  if (!Number.isFinite(maximum) || maximum <= 0) {
+  if (
+    !Number.isFinite(maximumScreenSpaceErrorPx) ||
+    maximumScreenSpaceErrorPx <= 0
+  ) {
     throw new RangeError("maximumScreenSpaceErrorPx must be finite and > 0");
   }
   const concurrency = integerAtLeast(
@@ -98,6 +115,7 @@ export const validateTiles3dMemberConfig = (
   }
   return {
     ...config,
+    maximumScreenSpaceErrorPx,
     concurrency,
     cacheBytes,
     verticalExaggeration,

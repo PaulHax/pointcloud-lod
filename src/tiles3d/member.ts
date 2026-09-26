@@ -25,18 +25,14 @@ import type { DecodedTileContent, DecodeWasmUrls } from "./decode";
 import { createMeshAdapter, type MeshAdapter } from "./meshAdapter";
 import { createMeshPickSet } from "./meshPicking";
 import {
-  DEFAULT_MAXIMUM_SCREEN_SPACE_ERROR_PX,
-  DEFAULT_TILES3D_CACHE_BYTES,
-  DEFAULT_TILES3D_CONCURRENCY,
   DEFAULT_TILES3D_SUBTREE_CACHE_BYTES,
-  DEFAULT_VERTICAL_EXAGGERATION,
-  DEFAULT_VERTICAL_PIVOT_Z,
   type Tiles3dMemberConfig,
   type Tiles3dMemberStats,
 } from "./memberTypes";
 import {
   finiteAffineMatrix,
   validateTiles3dMemberConfig,
+  type ResolvedTiles3dConfig,
 } from "./memberConfig";
 import { createVerticalExaggerationTransform } from "./rtc";
 import {
@@ -185,13 +181,10 @@ export const createTiles3dMember = (
   });
   const pickSet = createMeshPickSet();
 
-  const maximumSse = (): number =>
-    config.maximumScreenSpaceErrorPx ?? DEFAULT_MAXIMUM_SCREEN_SPACE_ERROR_PX;
-
   const verticalExaggeration = (): readonly number[] =>
     createVerticalExaggerationTransform(
-      config.verticalExaggeration ?? DEFAULT_VERTICAL_EXAGGERATION,
-      config.verticalPivotZ ?? DEFAULT_VERTICAL_PIVOT_Z,
+      config.verticalExaggeration,
+      config.verticalPivotZ,
     );
 
   const exaggeratedEcefToScene = (): readonly number[] =>
@@ -212,32 +205,20 @@ export const createTiles3dMember = (
       ? multiplyTilesetMatrices(modelMatrix, verticalExaggeration())
       : verticalExaggeration();
 
-  /**
-   * The same placement without exaggeration — the frame a picked point must be
-   * reported in, since anything the app stores (control points, registration
-   * pairs) is canonical scene coordinates and must not move when the user changes a
-   * display-only vertical scale.
-   */
-  const scenePlacementMatrix = (): readonly number[] | null => modelMatrix;
-
   const applyPlacement = (): void => {
     const placement = Array.from(placementMatrix()) as Mat16;
     adapter.setBaseMatrix(placement);
-    const scene = scenePlacementMatrix();
     pickSet.setPlacement({
       drawn: placement,
-      scene: scene === null ? null : (Array.from(scene) as Mat16),
+      scene: modelMatrix === null ? null : (Array.from(modelMatrix) as Mat16),
     });
   };
 
   const traversalMaximumSse = (): number =>
-    memoryConstrained ? Number.MAX_VALUE : maximumSse();
+    memoryConstrained ? Number.MAX_VALUE : config.maximumScreenSpaceErrorPx;
 
   const traversalQualityFraction = (): number =>
     memoryConstrained ? 1 : allocation.qualityFraction;
-
-  const concurrency = (): number =>
-    config.concurrency ?? DEFAULT_TILES3D_CONCURRENCY;
 
   const setQueueSnapshot = (snapshot: ContentQueueSnapshot | null): void => {
     queueSnapshot = snapshot;
@@ -460,7 +441,7 @@ export const createTiles3dMember = (
     // would ask for if nothing were blocked, and it is the only thing that can
     // tell a genuinely new view from the one that was already refused.
     return select(
-      maximumSse(),
+      config.maximumScreenSpaceErrorPx,
       allocation.qualityFraction,
       false,
     ).desiredTileIds.join("\n");
@@ -705,12 +686,10 @@ export const createTiles3dMember = (
     queue = createContentQueue({
       revision: config.revision,
       configGeneration,
-      maxConcurrency: concurrency(),
-      maxDecodedBytes: config.cacheBytes ?? DEFAULT_TILES3D_CACHE_BYTES,
-      ...(config.fetchContent ? { fetch: config.fetchContent } : {}),
-      ...(config.maxAttempts === undefined
-        ? {}
-        : { maxAttempts: config.maxAttempts }),
+      maxConcurrency: config.concurrency,
+      maxDecodedBytes: config.cacheBytes,
+      fetch: config.fetchContent,
+      maxAttempts: config.maxAttempts,
       decode: async (bytes, request, decodeContext) => {
         const tile = materializedTileById.get(request.id);
         if (!tile) throw new Error(`unknown 3D tile ${request.id}`);
@@ -722,7 +701,7 @@ export const createTiles3dMember = (
           accumulatedTransform: [...tile.worldTransform] as any,
           tilesetToScene: [...config.tilesetToScene] as any,
           textureCapabilities: context.textureCapabilities,
-          ...(config.wasm ? { wasm: config.wasm } : {}),
+          wasm: config.wasm,
         });
         const abort = () => job.cancel();
         decodeContext.signal.addEventListener("abort", abort, { once: true });
@@ -805,12 +784,10 @@ export const createTiles3dMember = (
     subtreeQueue = createContentQueue<ParsedSubtree>({
       revision: config.revision,
       configGeneration,
-      maxConcurrency: concurrency(),
+      maxConcurrency: config.concurrency,
       maxDecodedBytes: DEFAULT_TILES3D_SUBTREE_CACHE_BYTES,
-      ...(config.fetchSubtree ? { fetch: config.fetchSubtree } : {}),
-      ...(config.maxAttempts === undefined
-        ? {}
-        : { maxAttempts: config.maxAttempts }),
+      fetch: config.fetchSubtree,
+      maxAttempts: config.maxAttempts,
       decode: (bytes) =>
         parseSubtree(bytes, implicit.subtreeLevels, implicit.metadataSchema),
       decodedByteLength: (subtree) => subtree.byteLength,
@@ -849,7 +826,7 @@ export const createTiles3dMember = (
     context.onWorkChange?.();
     void loadTileset({
       endpoint: config.endpoint,
-      ...(config.fetchTileset ? { fetch: config.fetchTileset } : {}),
+      fetch: config.fetchTileset,
       signal: controller.signal,
     }).then(
       (loaded) => {
@@ -946,7 +923,7 @@ export const createTiles3dMember = (
 
     setConfig(kindConfig) {
       if (disposed) return;
-      let next: Tiles3dMemberConfig;
+      let next: ResolvedTiles3dConfig;
       try {
         next = validateTiles3dMemberConfig(kindConfig as Tiles3dMemberConfig);
       } catch (error) {
@@ -963,9 +940,7 @@ export const createTiles3dMember = (
         next.verticalExaggeration !== config.verticalExaggeration ||
         next.verticalPivotZ !== config.verticalPivotZ ||
         next.geometricErrorScale !== config.geometricErrorScale;
-      const cacheIncreased =
-        (next.cacheBytes ?? DEFAULT_TILES3D_CACHE_BYTES) >
-        (config.cacheBytes ?? DEFAULT_TILES3D_CACHE_BYTES);
+      const cacheIncreased = next.cacheBytes > config.cacheBytes;
       config = next;
       if (placementChanged) applyPlacement();
       if (sourceChanged || decodeChanged) {
@@ -989,10 +964,10 @@ export const createTiles3dMember = (
       } else {
         if (cacheIncreased) clearBudgetConstraint();
         queue?.configure({
-          maxConcurrency: concurrency(),
-          maxDecodedBytes: config.cacheBytes ?? DEFAULT_TILES3D_CACHE_BYTES,
+          maxConcurrency: config.concurrency,
+          maxDecodedBytes: config.cacheBytes,
         });
-        subtreeQueue?.configure({ maxConcurrency: concurrency() });
+        subtreeQueue?.configure({ maxConcurrency: config.concurrency });
         retryIfDesiredSelectionChanged();
         refreshSelection();
       }
@@ -1016,7 +991,7 @@ export const createTiles3dMember = (
           active && hasContent
             ? importanceFromRootSseCssPx(
                 traversal!.rootScreenSpaceErrorPx,
-                maximumSse(),
+                config.maximumScreenSpaceErrorPx,
               )
             : CULLED,
         qualityDemand: active && hasContent ? 1 : 0,
@@ -1119,7 +1094,8 @@ export const createTiles3dMember = (
       const submissions = context.submissions.stats();
       const effectiveSse =
         traversal?.effectiveScreenSpaceErrorPx ??
-        maximumSse() / Math.max(allocation.qualityFraction, 0.05);
+        config.maximumScreenSpaceErrorPx /
+          Math.max(allocation.qualityFraction, 0.05);
       return {
         kind: "tiles3d",
         active,
@@ -1131,14 +1107,13 @@ export const createTiles3dMember = (
         devicePixelRatio,
         interactionDepth,
         configGeneration,
-        verticalExaggeration:
-          config.verticalExaggeration ?? DEFAULT_VERTICAL_EXAGGERATION,
-        verticalPivotZ: config.verticalPivotZ ?? DEFAULT_VERTICAL_PIVOT_Z,
-        geometricErrorScale: config.geometricErrorScale ?? "maximum",
+        verticalExaggeration: config.verticalExaggeration,
+        verticalPivotZ: config.verticalPivotZ,
+        geometricErrorScale: config.geometricErrorScale,
         allocation,
-        maximumScreenSpaceErrorPx: maximumSse(),
+        maximumScreenSpaceErrorPx: config.maximumScreenSpaceErrorPx,
         effectiveScreenSpaceErrorPx: effectiveSse,
-        sseMultiplier: effectiveSse / maximumSse(),
+        sseMultiplier: effectiveSse / config.maximumScreenSpaceErrorPx,
         memoryConstrained,
         blockedGroups: blockedGroupAncestors.size,
         selectedTiles: traversal?.desiredTileIds.length ?? 0,
