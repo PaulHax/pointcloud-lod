@@ -23,6 +23,7 @@ import {
 } from "./streamedMember";
 import {
   createViewGovernor,
+  type FrameVerdict,
   type HostFrameMetrics,
   type MotionReference,
   type ViewGovernorOptions,
@@ -124,8 +125,14 @@ export type StreamedSceneCoordinator = {
   endInteraction(): void;
   /** Member preparation followed by the shared admission drain. */
   prepareFrame(frameSerial: number): void;
-  recordHostFrame(metrics: HostFrameMetrics): void;
+  /**
+   * Report one presented frame. The verdict says whether the governor took it
+   * as a capacity sample, whether that sample may train quality, and the
+   * regime it counted toward, so a host never has to read `stats()` per frame.
+   */
+  recordHostFrame(metrics: HostFrameMetrics): FrameVerdict;
   needsFrame(): boolean;
+  /** Diagnostics as last observed. Reading them calls no member. */
   stats(): StreamedSceneCoordinatorStats;
   dispose(): void;
 };
@@ -603,22 +610,31 @@ export const createStreamedSceneCoordinator = (
     },
 
     recordHostFrame(metrics) {
-      if (disposed || !finiteNonNegative(metrics?.hostFrameMs)) return;
+      const unsampled = (): FrameVerdict => ({
+        sampled: false,
+        eligible: false,
+        regime: governor.regime(),
+      });
+      if (disposed || !finiteNonNegative(metrics?.hostFrameMs)) {
+        return unsampled();
+      }
       refresh();
       // Fixed-only views have no adaptive fraction to train. Fixed members do
       // still contaminate samples whenever at least one adaptive member is
       // present, because their frame cost belongs to that same host frame.
-      if (hasAdaptiveMember())
-        governor.recordHostFrame({
-          ...metrics,
-          capacitySampleEligible:
-            (metrics.capacitySampleEligible ?? true) &&
-            !capacityWorkSinceLastReport,
-        });
+      const verdict = hasAdaptiveMember()
+        ? governor.recordHostFrame({
+            ...metrics,
+            capacitySampleEligible:
+              (metrics.capacitySampleEligible ?? true) &&
+              !capacityWorkSinceLastReport,
+          })
+        : unsampled();
       // Work that finished during this presentation still contaminated its
       // cost. Start the next interval clean before allocation can request work.
       capacityWorkSinceLastReport = false;
       applyAllocations();
+      return verdict;
     },
 
     needsFrame: () =>
@@ -627,7 +643,6 @@ export const createStreamedSceneCoordinator = (
         (hasAdaptiveMember() && governor.needsFrame())),
 
     stats() {
-      refresh();
       return {
         viewQualityFraction,
         targetOverrideMemberId: appliedTargetState?.id ?? null,
