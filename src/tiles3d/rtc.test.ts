@@ -166,22 +166,6 @@ describe("3D Tiles RTC conversion", () => {
     expect(result.normals?.[2]).toBeCloseTo(1 / Math.sqrt(10), 6);
   });
 
-  it.each([
-    [0, 0, /verticalExaggeration/],
-    [-1, 0, /verticalExaggeration/],
-    [Number.NaN, 0, /verticalExaggeration/],
-    [Number.POSITIVE_INFINITY, 0, /verticalExaggeration/],
-    [1, Number.NaN, /verticalPivotZ/],
-    [1, Number.NEGATIVE_INFINITY, /verticalPivotZ/],
-  ])(
-    "rejects invalid vertical transform values %s, %s",
-    (scale, pivot, match) => {
-      expect(() =>
-        createVerticalExaggerationTransform(scale as number, pivot as number),
-      ).toThrow(match as RegExp);
-    },
-  );
-
   it("rejects non-finite and degenerate transforms and malformed attributes", () => {
     const positions = new Float32Array([0, 0, 0]);
     expect(() =>

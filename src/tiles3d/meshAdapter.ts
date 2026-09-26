@@ -1172,14 +1172,6 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
     setBaseMatrix(matrix) {
       if (disposed) return;
       const next = matrix === null ? IDENTITY : Array.from(matrix);
-      if (next.length !== 16 || next.some((value) => !Number.isFinite(value))) {
-        safeCall(() =>
-          options.onError?.(
-            new TypeError("mesh base matrix must contain 16 finite numbers"),
-          ),
-        );
-        return;
-      }
       if (next.every((value, index) => value === baseMatrix[index])) return;
       baseMatrix = next;
       for (const tile of submitted.values()) {

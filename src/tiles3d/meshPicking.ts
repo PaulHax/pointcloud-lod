@@ -76,17 +76,6 @@ const TRIANGLE_EPSILON = 1e-10;
 
 type Vec3 = readonly [number, number, number];
 
-const finiteMatrix = (matrix: Mat16 | null): readonly number[] => {
-  if (matrix === null) return IDENTITY;
-  if (
-    matrix.length !== 16 ||
-    Array.from(matrix).some((value) => !Number.isFinite(value))
-  ) {
-    throw new TypeError("mesh model matrix must contain 16 finite numbers");
-  }
-  return Array.from(matrix);
-};
-
 /** Tile-local vertex lifted into the member's unplaced coordinate frame. */
 const localPoint = (
   origin: readonly [number, number, number],
@@ -227,7 +216,7 @@ const projectedBoundsContain = (
   cssX: number,
   cssY: number,
   bounds: Bounds | undefined,
-  matrix: readonly number[],
+  matrix: Mat16,
 ): boolean => {
   if (!bounds) return true;
   const aabb = projectedBoundsAabbCssPx(
@@ -261,16 +250,10 @@ export const pickSubmittedTriangles = (
     view.viewportHeightCssPx,
   );
   if (ray === null) return null;
-  let drawnMatrix: readonly number[];
-  let sceneMatrix: readonly number[];
-  try {
-    drawnMatrix = finiteMatrix(placement === null ? null : placement.drawn);
-    // A null `scene` means an identity scene placement, NOT "same as drawn" —
-    // coalescing the two would silently restore the exaggerated point.
-    sceneMatrix = finiteMatrix(placement === null ? null : placement.scene);
-  } catch {
-    return null;
-  }
+  const drawnMatrix = placement?.drawn ?? IDENTITY;
+  // A null `scene` means an identity scene placement, NOT "same as drawn":
+  // coalescing the two would silently restore the exaggerated point.
+  const sceneMatrix = placement?.scene ?? IDENTITY;
   let bestDepth = Number.POSITIVE_INFINITY;
   let nearestUnknownDepth = Number.POSITIVE_INFINITY;
   // The winning triangle in the member's unplaced frame, plus where on it the

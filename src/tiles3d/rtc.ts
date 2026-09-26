@@ -76,36 +76,29 @@ export const Y_UP_TO_Z_UP: Mat4 = [
 /**
  * Scene-Z vertical exaggeration, in column-major convention.
  * The pivot is invariant: `z' = pivotZ + exaggeration * (z - pivotZ)`.
+ * The member config validates both values.
  */
 export const createVerticalExaggerationTransform = (
   exaggeration = 1,
   pivotZ = 0,
-): Mat4 => {
-  if (!Number.isFinite(exaggeration) || exaggeration <= 0) {
-    throw new RangeError("verticalExaggeration must be finite and > 0");
-  }
-  if (!Number.isFinite(pivotZ)) {
-    throw new RangeError("verticalPivotZ must be finite");
-  }
-  return [
-    1,
-    0,
-    0,
-    0,
-    0,
-    1,
-    0,
-    0,
-    0,
-    0,
-    exaggeration,
-    0,
-    0,
-    0,
-    pivotZ * (1 - exaggeration),
-    1,
-  ];
-};
+): Mat4 => [
+  1,
+  0,
+  0,
+  0,
+  0,
+  1,
+  0,
+  0,
+  0,
+  0,
+  exaggeration,
+  0,
+  0,
+  0,
+  pivotZ * (1 - exaggeration),
+  1,
+];
 
 export const transformPoint = (
   matrixInput: readonly number[],
@@ -261,7 +254,10 @@ export const flattenPrimitiveToRtc = (
 ): RtcPrimitiveResult => {
   const sceneTransform = finiteMatrix(sceneTransformInput, "scene transform");
   const nodeTransform = finiteMatrix(nodeTransformInput, "node transform");
-  const combined = multiplyMat4(sceneTransform, nodeTransform);
+  const combined = finiteMatrix(
+    multiply4(sceneTransform, nodeTransform),
+    "composed matrix",
+  );
   const normalTransform = inverseTransposeLinear(combined);
   const { positions, normals } = primitive;
   if (positions.length === 0 || positions.length % 3 !== 0) {
