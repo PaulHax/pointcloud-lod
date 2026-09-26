@@ -823,6 +823,11 @@ Tile mappers explicitly select `vtkPointGaussianMapper` simple-point mode with
 extension. Adaptive density uses `maximumPointCount` to submit a prefix without
 reuploading resident buffers. Gaussian rendering is not required or enabled.
 
+The adapter writes point size and `maximumPointCount` with vtk.js's
+`set(values, true, true)`, which skips `modified()`. vtk.js reads both at draw
+time, and a modified property or mapper makes it rebuild and rehash that tile's
+shader source, about 0.1 ms a tile, on every point-size or density change.
+
 Custom host integrations must keep `scaleFactor` at zero when applying device
 pixel ratio. Use `pointSizeScale` for that conversion; a nonzero `scaleFactor`
 requests Gaussian rendering and is rejected by the pinned vtk.js mapper.

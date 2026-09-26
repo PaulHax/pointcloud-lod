@@ -107,6 +107,7 @@ export type StubMapper = {
   setStatic: (value: boolean) => void;
   setPointSizeScale: (scale: number) => void;
   setMaximumPointCount: (count: number) => void;
+  set: (values: { readonly maximumPointCount: number }) => boolean;
   setViewSpecificProperties: (properties: StubViewSpecificProperties) => void;
   delete: () => void;
   inputData: unknown;
@@ -158,6 +159,10 @@ export const makeMapper = (): StubMapper => {
     },
     setMaximumPointCount(count) {
       mapper.maximumPointCount = count;
+    },
+    set(values) {
+      mapper.maximumPointCount = values.maximumPointCount;
+      return true;
     },
     setViewSpecificProperties(properties) {
       mapper.viewSpecificProperties = properties;
