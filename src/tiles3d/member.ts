@@ -364,6 +364,9 @@ export const createTiles3dMember = (
         // A submitted sibling cannot free any more space by arriving later.
         // Counting it as outstanding strands the last unaffordable child.
         if (state === "submitted") return false;
+        // Nor is a sibling that was itself refused still coming: two refused
+        // siblings counting each other would wait for each other forever.
+        if (admissionBlocked.has(candidate)) return false;
         return (
           state === "queued" ||
           decoded.has(candidate) ||
