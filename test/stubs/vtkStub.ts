@@ -71,6 +71,10 @@ export const makeActor = (): StubActor => {
         setPointSize(size: number) {
           actor.pointSize = size;
         },
+        set(values: { readonly pointSize: number }) {
+          actor.pointSize = values.pointSize;
+          return true;
+        },
         setColor(...color: number[]) {
           actor.color = color;
         },
