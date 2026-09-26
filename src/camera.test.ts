@@ -1,21 +1,19 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  IDENTITY,
   boundsIntersectsFrustum,
-  boundsCenterRayOffset,
   cursorRay,
   distanceToBounds,
   frustumPlanes,
   modelFrameOf,
-  nodeScreenSpaceError,
-  orthographicScreenSpaceError,
-  perspectiveScreenSpaceError,
+  prepareView,
   projectPointToCssPx,
+  usableView,
   viewInModelFrame,
   type OrthographicCameraView,
   type PerspectiveCameraView,
 } from "./camera";
+import { IDENTITY } from "./mat4";
 import type { Bounds } from "./octree";
 
 /** Column-major perspective matrix (symmetric frustum, looking down -Z). */
@@ -212,44 +210,6 @@ describe("boundsIntersectsFrustum with an orthographic matrix", () => {
   });
 });
 
-describe("perspectiveScreenSpaceError", () => {
-  it("projects spacing to pixels", () => {
-    // fov 90° → tan(fov/2) = 1: 1 m spacing at 10 m over 1000 px = 50 px.
-    expect(perspectiveScreenSpaceError(1, 10, 1000, Math.PI / 2)).toBeCloseTo(
-      50,
-    );
-  });
-
-  it("halves with double distance", () => {
-    const near = perspectiveScreenSpaceError(1, 10, 1000, Math.PI / 2);
-    const far = perspectiveScreenSpaceError(1, 20, 1000, Math.PI / 2);
-    expect(far).toBeCloseTo(near / 2);
-  });
-
-  it("stays finite when the camera touches the node", () => {
-    const touching = perspectiveScreenSpaceError(1, 0, 1000, Math.PI / 2);
-    expect(touching).toBeGreaterThan(1e9);
-    expect(Number.isFinite(touching)).toBe(true);
-  });
-});
-
-describe("orthographicScreenSpaceError", () => {
-  it("projects spacing to pixels from the parallel scale alone", () => {
-    // Half-height 10 m over 1000 px = 50 px/m: a 0.5 m spacing is 25 px.
-    expect(orthographicScreenSpaceError(0.5, 1000, 10)).toBeCloseTo(25);
-  });
-
-  it("halves when the camera zooms out by two", () => {
-    expect(orthographicScreenSpaceError(0.5, 1000, 20)).toBeCloseTo(12.5);
-  });
-
-  it("stays finite at a degenerate parallel scale", () => {
-    const collapsed = orthographicScreenSpaceError(1, 1000, 0);
-    expect(collapsed).toBeGreaterThan(1e9);
-    expect(Number.isFinite(collapsed)).toBe(true);
-  });
-});
-
 const perspectiveView: PerspectiveCameraView = {
   projection: "perspective",
   viewProj: IDENTITY,
@@ -268,40 +228,82 @@ const orthographicView: OrthographicCameraView = {
   viewportHeightCssPx: 1000,
 };
 
+describe("the screen-space error law", () => {
+  it("projects a perspective length to pixels", () => {
+    // fov 90° → tan(fov/2) = 1: 1 m spacing at 10 m over 1000 px = 50 px.
+    const law = prepareView(perspectiveView).screenSpaceError;
+    expect(law(1, 10)).toBeCloseTo(50);
+    expect(law(1, 20)).toBeCloseTo(law(1, 10) / 2);
+  });
+
+  it("stays finite when the camera touches the node", () => {
+    const touching = prepareView(perspectiveView).screenSpaceError(1, 0);
+    expect(touching).toBeGreaterThan(1e9);
+    expect(Number.isFinite(touching)).toBe(true);
+  });
+
+  it("projects a parallel length from the parallel scale alone", () => {
+    // Half-height 10 m over 1000 px = 50 px/m: a 0.5 m spacing is 25 px.
+    const law = prepareView(orthographicView).screenSpaceError;
+    expect(law(0.5, 10)).toBeCloseTo(25);
+    expect(law(0.5, 10_000)).toBeCloseTo(25);
+    const zoomedOut = prepareView({ ...orthographicView, parallelScale: 20 });
+    expect(zoomedOut.screenSpaceError(0.5, 10)).toBeCloseTo(12.5);
+  });
+
+  it("stays finite at a degenerate parallel scale", () => {
+    const collapsed = prepareView({
+      ...orthographicView,
+      parallelScale: 0,
+    }).screenSpaceError(1, 10);
+    expect(collapsed).toBeGreaterThan(1e9);
+    expect(Number.isFinite(collapsed)).toBe(true);
+  });
+});
+
 describe("nodeScreenSpaceError", () => {
   const cube = bounds([0, 0, 0], [0.5, 0.25, 0.5]);
+  const node = (spacing: number) => ({ bounds: cube, spacing });
 
   it("combines cube distance with a perspective view", () => {
     // Cube surface is 10 m from the camera.
-    expect(nodeScreenSpaceError(cube, 1, perspectiveView)).toBeCloseTo(50);
+    expect(
+      prepareView(perspectiveView).nodeScreenSpaceError(node(1)),
+    ).toBeCloseTo(50);
   });
 
   it("is distance-invariant under parallel projection", () => {
-    const near = nodeScreenSpaceError(cube, 0.5, orthographicView);
-    const far = nodeScreenSpaceError(cube, 0.5, {
+    const near = prepareView(orthographicView).nodeScreenSpaceError(node(0.5));
+    const far = prepareView({
       ...orthographicView,
       position: [0, 0, 5000],
-    });
+    }).nodeScreenSpaceError(node(0.5));
     expect(near).toBeCloseTo(25);
     expect(far).toBeCloseTo(near);
   });
 
   it("is distance-dependent under perspective projection", () => {
-    const near = nodeScreenSpaceError(cube, 1, perspectiveView);
-    const far = nodeScreenSpaceError(cube, 1, {
+    const near = prepareView(perspectiveView).nodeScreenSpaceError(node(1));
+    const far = prepareView({
       ...perspectiveView,
       position: [0, 0, 20.5],
-    });
+    }).nodeScreenSpaceError(node(1));
     expect(far).toBeCloseTo(near / 2);
   });
 
   it("refines an orthographic view only when the camera zooms in", () => {
-    const wide = nodeScreenSpaceError(cube, 0.5, orthographicView);
-    const zoomed = nodeScreenSpaceError(cube, 0.5, {
+    const wide = prepareView(orthographicView).nodeScreenSpaceError(node(0.5));
+    const zoomed = prepareView({
       ...orthographicView,
       parallelScale: 2.5,
-    });
+    }).nodeScreenSpaceError(node(0.5));
     expect(zoomed).toBeCloseTo(wide * 4);
+  });
+
+  it("measures a replacement node afresh under the same view", () => {
+    const view = prepareView(perspectiveView);
+    expect(view.nodeScreenSpaceError(node(1))).toBeCloseTo(50);
+    expect(view.nodeScreenSpaceError(node(2))).toBeCloseTo(100);
   });
 });
 
@@ -349,7 +351,7 @@ describe("projectPointToCssPx", () => {
   });
 });
 
-describe("boundsCenterRayOffset", () => {
+describe("centerRayOffset", () => {
   const perspectiveView: PerspectiveCameraView = {
     projection: "perspective",
     viewProj: perspective(Math.PI / 2, 1, 0.1, 100),
@@ -360,20 +362,20 @@ describe("boundsCenterRayOffset", () => {
   };
 
   it("prefers a distant volume on the 3D centre ray over a nearby side volume", () => {
-    const distantCenter = bounds([0, 0, -20], [0.1, 0.1, 0.1]);
-    const nearbyBottom = bounds([0, -2, -5], [0.1, 0.1, 0.1]);
+    const view = prepareView(perspectiveView);
+    const distantCenter = { bounds: bounds([0, 0, -20], [0.1, 0.1, 0.1]) };
+    const nearbyBottom = { bounds: bounds([0, -2, -5], [0.1, 0.1, 0.1]) };
 
-    expect(boundsCenterRayOffset(distantCenter, perspectiveView)).toBe(0);
-    expect(
-      boundsCenterRayOffset(nearbyBottom, perspectiveView),
-    ).toBeGreaterThan(0);
+    expect(view.centerRayOffset(distantCenter)).toBe(0);
+    expect(view.centerRayOffset(nearbyBottom)).toBeGreaterThan(0);
   });
 
   it("orders same-sized 3D volumes by their centre-ray angle", () => {
-    const inner = bounds([0.5, 0, -5], [0.1, 0.1, 0.1]);
-    const outer = bounds([2, 0, -5], [0.1, 0.1, 0.1]);
-    expect(boundsCenterRayOffset(inner, perspectiveView)).toBeLessThan(
-      boundsCenterRayOffset(outer, perspectiveView),
+    const view = prepareView(perspectiveView);
+    const inner = { bounds: bounds([0.5, 0, -5], [0.1, 0.1, 0.1]) };
+    const outer = { bounds: bounds([2, 0, -5], [0.1, 0.1, 0.1]) };
+    expect(view.centerRayOffset(inner)).toBeLessThan(
+      view.centerRayOffset(outer),
     );
   });
 
@@ -386,11 +388,42 @@ describe("boundsCenterRayOffset", () => {
       viewportWidthCssPx: 400,
       viewportHeightCssPx: 400,
     };
-    const center = bounds([0, 0, -20], [0.1, 0.1, 0.1]);
-    const side = bounds([2, 0, -5], [0.1, 0.1, 0.1]);
+    const prepared = prepareView(view);
+    const center = { bounds: bounds([0, 0, -20], [0.1, 0.1, 0.1]) };
+    const side = { bounds: bounds([2, 0, -5], [0.1, 0.1, 0.1]) };
 
-    expect(boundsCenterRayOffset(center, view)).toBe(0);
-    expect(boundsCenterRayOffset(side, view)).toBeGreaterThan(0);
+    expect(prepared.centerRayOffset(center)).toBe(0);
+    expect(prepared.centerRayOffset(side)).toBeGreaterThan(0);
+  });
+
+  it("puts every node infinitely far off when the matrix has no centre ray", () => {
+    const view = prepareView({
+      ...perspectiveView,
+      viewProj: IDENTITY.map(() => 0),
+    });
+    expect(
+      view.centerRayOffset({ bounds: bounds([0, 0, -5], [1, 1, 1]) }),
+    ).toBe(Number.POSITIVE_INFINITY);
+  });
+});
+
+describe("usableView", () => {
+  it("accepts finite views of either projection", () => {
+    expect(usableView(perspectiveView)).toBe(true);
+    expect(usableView(orthographicView)).toBe(true);
+  });
+
+  it("refuses non-finite numbers, empty viewports and unusable projections", () => {
+    for (const view of [
+      { ...perspectiveView, position: [Number.NaN, 0, 0] as const },
+      { ...perspectiveView, fovY: Math.PI },
+      { ...perspectiveView, fovY: 0 },
+      { ...perspectiveView, viewportWidthCssPx: 0 },
+      { ...perspectiveView, viewProj: [...IDENTITY.slice(0, 15), Infinity] },
+      { ...orthographicView, parallelScale: -1 },
+    ]) {
+      expect(usableView(view)).toBe(false);
+    }
   });
 });
 

@@ -8,7 +8,8 @@
  * only way two members can share a camera.
  */
 
-import { createEcefToEnuTransform, type Mat4 } from "../../../src/tiles3d/rtc";
+import type { Mat4 } from "../../../src/mat4";
+import { createEcefToEnuTransform } from "../../../src/tiles3d/rtc";
 import { PLACE_LABELS } from "./sceneCatalog";
 
 /** 3DBAG LoD2.2, CC BY 4.0, no key, CORS-enabled. */

@@ -1,3 +1,4 @@
+import { validateAffineMatrix } from "../mat4";
 import { integerAtLeast } from "../numeric";
 import {
   DEFAULT_MAXIMUM_SCREEN_SPACE_ERROR_PX,
@@ -7,41 +8,6 @@ import {
   DEFAULT_VERTICAL_PIVOT_Z,
   type Tiles3dMemberConfig,
 } from "./memberTypes";
-
-const AFFINE_ENTRY_ABS_TOL = 1e-12;
-const AFFINE_DETERMINANT_FLOOR = 1e-15;
-
-export const finiteAffineMatrix = (
-  matrix: readonly number[],
-  label: string,
-): readonly number[] => {
-  if (
-    !matrix ||
-    matrix.length !== 16 ||
-    Array.from(matrix).some((value) => !Number.isFinite(value))
-  ) {
-    throw new TypeError(`${label} must contain 16 finite numbers`);
-  }
-  if (
-    Math.abs(matrix[3]!) > AFFINE_ENTRY_ABS_TOL ||
-    Math.abs(matrix[7]!) > AFFINE_ENTRY_ABS_TOL ||
-    Math.abs(matrix[11]!) > AFFINE_ENTRY_ABS_TOL ||
-    Math.abs(matrix[15]! - 1) > AFFINE_ENTRY_ABS_TOL
-  ) {
-    throw new TypeError(`${label} must be an affine column-major matrix`);
-  }
-  const determinant =
-    matrix[0]! * (matrix[5]! * matrix[10]! - matrix[9]! * matrix[6]!) -
-    matrix[4]! * (matrix[1]! * matrix[10]! - matrix[9]! * matrix[2]!) +
-    matrix[8]! * (matrix[1]! * matrix[6]! - matrix[5]! * matrix[2]!);
-  if (
-    !Number.isFinite(determinant) ||
-    Math.abs(determinant) <= AFFINE_DETERMINANT_FLOOR
-  ) {
-    throw new TypeError(`${label} must be invertible`);
-  }
-  return [...matrix];
-};
 
 /** A validated config with every defaulted option resolved. */
 export type ResolvedTiles3dConfig = Tiles3dMemberConfig &
@@ -72,7 +38,7 @@ export const validateTiles3dMemberConfig = (
   if (typeof config.revision !== "string" || config.revision.length === 0) {
     throw new TypeError("tiles revision must be non-empty");
   }
-  finiteAffineMatrix(config.tilesetToScene, "tilesetToScene");
+  validateAffineMatrix(config.tilesetToScene, "tilesetToScene");
   const maximumScreenSpaceErrorPx =
     config.maximumScreenSpaceErrorPx ?? DEFAULT_MAXIMUM_SCREEN_SPACE_ERROR_PX;
   if (

@@ -29,7 +29,7 @@ import vtkActor from "@kitware/vtk.js/Rendering/Core/Actor";
 import vtkPointGaussianMapper from "@kitware/vtk.js/Rendering/Core/PointGaussianMapper";
 
 import type { TileBatch, TileDrawPlan } from "./controller";
-import { IDENTITY, sameMatrix, translatedMatrix } from "./camera";
+import { IDENTITY, sameMatrix, translatedMatrix } from "./mat4";
 import { finiteAbove, finiteNonNegative } from "./numeric";
 import { keyToString } from "./octree";
 import { tileBytes, type TileData } from "./tileSource";

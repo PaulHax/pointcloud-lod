@@ -8,9 +8,8 @@ import {
 } from "../test/fixtures/pageGraph";
 import { perspectiveView } from "../test/helpers";
 import {
-  IDENTITY,
-  boundsCenterRayOffset,
   distanceToBounds,
+  prepareView,
   type CameraView,
   type OrthographicCameraView,
   type PerspectiveCameraView,
@@ -21,6 +20,7 @@ import {
   type LodControllerOptions,
   type TileBatch,
 } from "./controller";
+import { IDENTITY } from "./mat4";
 import {
   ROOT_KEY,
   childKeys,
@@ -2663,10 +2663,13 @@ describe("createLodController — bounded physical work", () => {
 
     // The cone offset is primary. Same-cone nodes have the same spacing, so
     // descending projected error then reduces to ascending camera distance.
+    const prepared = prepareView(view);
     const expected = childKeys(ROOT_KEY)
       .map((key) => ({
         keyString: keyToString(key),
-        centerOffset: boundsCenterRayOffset(nodeBounds(ROOT_CUBE, key), view),
+        centerOffset: prepared.centerRayOffset({
+          bounds: nodeBounds(ROOT_CUBE, key),
+        }),
         distance: distanceToBounds(position, nodeBounds(ROOT_CUBE, key)),
       }))
       .sort(

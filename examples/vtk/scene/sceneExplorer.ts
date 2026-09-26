@@ -15,7 +15,7 @@ import type {
   Tiles3dMemberConfig,
   Tiles3dMemberStats,
 } from "../../../src/tiles3d/memberTypes";
-import { IDENTITY } from "../../../src/camera";
+import { IDENTITY } from "../../../src/mat4";
 import { createBag3dTilesetFetch } from "./bag3d";
 import { decodeWasmUrls } from "./decodeAssets";
 import { renderDiagnostics, type MemberRow } from "./diagnostics";

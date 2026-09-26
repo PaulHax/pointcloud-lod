@@ -1,26 +1,6 @@
-import { multiply4 } from "../camera";
+import { affineProblem, multiply, type Mat4 } from "../mat4";
 
 export type Vec3 = [number, number, number];
-
-/** Column-major affine matrix, matching 3D Tiles and glTF conventions. */
-export type Mat4 = [
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-  number,
-];
 
 export type RtcPrimitiveInput = {
   positions: Float32Array | Float64Array;
@@ -41,16 +21,16 @@ const AFFINE_EPSILON = 1e-12;
 const WGS84_SEMIMAJOR_METERS = 6_378_137;
 const WGS84_ECCENTRICITY_SQUARED = 6.69437999014e-3;
 
+/**
+ * No determinant check: a glTF node may scale to zero, and every primitive's
+ * combined transform meets one when its normal transform is built.
+ */
 const finiteMatrix = (matrix: readonly number[], label: string): Mat4 => {
-  if (matrix.length !== 16 || matrix.some((value) => !Number.isFinite(value))) {
+  const problem = affineProblem(matrix);
+  if (problem === "finite") {
     throw new Error(`${label} must contain 16 finite numbers`);
   }
-  if (
-    Math.abs(matrix[3]!) > AFFINE_EPSILON ||
-    Math.abs(matrix[7]!) > AFFINE_EPSILON ||
-    Math.abs(matrix[11]!) > AFFINE_EPSILON ||
-    Math.abs(matrix[15]! - 1) > AFFINE_EPSILON
-  ) {
+  if (problem === "affine") {
     throw new Error(`${label} must be an affine column-major matrix`);
   }
   return [...matrix] as Mat4;
@@ -61,7 +41,7 @@ export const multiplyMat4 = (
   rightInput: readonly number[],
 ): Mat4 =>
   finiteMatrix(
-    multiply4(
+    multiply(
       finiteMatrix(leftInput, "left matrix"),
       finiteMatrix(rightInput, "right matrix"),
     ),
@@ -99,26 +79,6 @@ export const createVerticalExaggerationTransform = (
   pivotZ * (1 - exaggeration),
   1,
 ];
-
-export const transformPoint = (
-  matrixInput: readonly number[],
-  point: readonly [number, number, number],
-): Vec3 => {
-  const matrix = finiteMatrix(matrixInput, "transform");
-  if (point.some((value) => !Number.isFinite(value))) {
-    throw new Error("point must contain three finite numbers");
-  }
-  const [x, y, z] = point;
-  const transformed: Vec3 = [
-    matrix[0] * x + matrix[4] * y + matrix[8] * z + matrix[12],
-    matrix[1] * x + matrix[5] * y + matrix[9] * z + matrix[13],
-    matrix[2] * x + matrix[6] * y + matrix[10] * z + matrix[14],
-  ];
-  if (transformed.some((value) => !Number.isFinite(value))) {
-    throw new Error("point transform produced a non-finite coordinate");
-  }
-  return transformed;
-};
 
 export const wgs84ToEcef = (
   longitudeDegrees: number,
@@ -255,7 +215,7 @@ export const flattenPrimitiveToRtc = (
   const sceneTransform = finiteMatrix(sceneTransformInput, "scene transform");
   const nodeTransform = finiteMatrix(nodeTransformInput, "node transform");
   const combined = finiteMatrix(
-    multiply4(sceneTransform, nodeTransform),
+    multiply(sceneTransform, nodeTransform),
     "composed matrix",
   );
   const normalTransform = inverseTransposeLinear(combined);

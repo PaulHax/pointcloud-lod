@@ -4,12 +4,11 @@ import { BasisLoader } from "@loaders.gl/textures";
 import { loadLibrary } from "@loaders.gl/worker-utils";
 import { read as readKtx2 } from "ktx-parse";
 
-import { IDENTITY } from "../../camera";
+import { IDENTITY, type Mat4 } from "../../mat4";
 import {
   flattenPrimitiveToRtc,
   multiplyMat4,
   Y_UP_TO_Z_UP,
-  type Mat4,
   type RtcPrimitiveResult,
 } from "../rtc";
 import { capabilityTarget, loadersBasisFormat } from "./capabilities";

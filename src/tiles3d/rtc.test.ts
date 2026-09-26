@@ -1,14 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { IDENTITY } from "../camera";
+import { IDENTITY, transformPoint, type Mat4 } from "../mat4";
 import {
   createEcefToEnuTransform,
   createVerticalExaggerationTransform,
   flattenPrimitiveToRtc,
   multiplyMat4,
-  transformPoint,
   wgs84ToEcef,
-  type Mat4,
 } from "./rtc";
 
 const translation = (x: number, y: number, z: number): Mat4 => [

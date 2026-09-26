@@ -1,14 +1,12 @@
 /** Renderer-neutral ray/triangle picking over the exact submitted draw set. */
 
 import {
-  IDENTITY,
   cursorRay,
   projectedBoundsAabbCssPx,
   projectPointToCssPx,
-  transformPointBy,
   type CameraView,
-  type Mat16,
 } from "../camera";
+import { IDENTITY, transformPoint, type Mat16 } from "../mat4";
 import {
   occlusionFromPick,
   type MemberPickResult,
@@ -294,9 +292,9 @@ export const pickSubmittedTriangles = (
         const hit = triangleHit(
           ray.origin,
           ray.direction,
-          transformPointBy(drawnMatrix, a),
-          transformPointBy(drawnMatrix, b),
-          transformPointBy(drawnMatrix, c),
+          transformPoint(drawnMatrix, a),
+          transformPoint(drawnMatrix, b),
+          transformPoint(drawnMatrix, c),
         );
         if (hit === null) continue;
         const alpha = alphaAtHit(primitive, triangle, hit.u, hit.v);
@@ -342,7 +340,7 @@ export const pickSubmittedTriangles = (
     return { status: "miss" };
   }
   const { a, b, c, u, v } = bestLocal;
-  const scenePoint = transformPointBy(sceneMatrix, [
+  const scenePoint = transformPoint(sceneMatrix, [
     a[0] + u * (b[0] - a[0]) + v * (c[0] - a[0]),
     a[1] + u * (b[1] - a[1]) + v * (c[1] - a[1]),
     a[2] + u * (b[2] - a[2]) + v * (c[2] - a[2]),

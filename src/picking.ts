@@ -17,8 +17,8 @@ import {
   projectedBoundsAabbCssPx,
   type CameraView,
   type CursorRay,
-  type Mat16,
 } from "./camera";
+import type { Mat16 } from "./mat4";
 import { finitePositive } from "./numeric";
 import { scenePoint, type ScenePoint } from "./frames";
 import type { Bounds, Vec3 } from "./octree";

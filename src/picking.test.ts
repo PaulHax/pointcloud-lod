@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import { perspectiveView } from "../test/helpers";
-import { IDENTITY, cursorRay, type PerspectiveCameraView } from "./camera";
+import { cursorRay, type PerspectiveCameraView } from "./camera";
+import { IDENTITY } from "./mat4";
 import type { Vec3 } from "./octree";
 import {
   DEFAULT_PICK_PIXEL_RADIUS,

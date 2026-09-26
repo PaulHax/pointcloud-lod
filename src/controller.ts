@@ -12,21 +12,18 @@
  */
 
 import {
-  frustumPlanes,
-  boundsCenterRayOffset,
-  modelFrameOf,
-  nodeScreenSpaceError,
   boundsIntersectsFrustum,
-  projectionScalar,
+  modelFrameOf,
+  prepareView,
   sameCameraView,
-  sameMatrix,
-  transformPointBy,
+  usableView,
   viewInModelFrame,
   type CameraView,
-  type Mat16,
   type ModelFrame,
   type Plane,
+  type PreparedView,
 } from "./camera";
+import { sameMatrix, transformPoint, type Mat16 } from "./mat4";
 import { selectNodes } from "./budget";
 import { scenePoint } from "./frames";
 import { createLruCache } from "./lru";
@@ -530,32 +527,6 @@ const normalizePresentation = (
   return checked.presentation;
 };
 
-/**
- * A camera whose numbers are not all finite would poison the frustum planes,
- * every screen-space error, and the selection comparisons that read them.
- */
-const isFiniteView = (view: CameraView): boolean => {
-  const scalar = projectionScalar(view);
-  // A field of view at or past a half-turn has no usable tangent, and a
-  // non-positive parallel scale inverts the projected spacing.
-  if (
-    scalar === undefined ||
-    !finitePositive(scalar) ||
-    (view.projection === "perspective" && view.fovY >= Math.PI) ||
-    !finitePositive(view.viewportWidthCssPx) ||
-    !finitePositive(view.viewportHeightCssPx)
-  ) {
-    return false;
-  }
-  for (const coordinate of view.position) {
-    if (!Number.isFinite(coordinate)) return false;
-  }
-  for (let index = 0; index < view.viewProj.length; index += 1) {
-    if (!Number.isFinite(view.viewProj[index])) return false;
-  }
-  return true;
-};
-
 const samePresentation = (
   left: NormalizedPresentation,
   right: NormalizedPresentation,
@@ -641,8 +612,8 @@ export const createLodController = (
       ? presentation.diameterCssPx
       : INITIAL_AUTO_DIAMETER_CSS_PX;
   let active = options.active ?? true;
-  /** The camera in the tiles' local frame — what all selection math reads. */
-  let view: CameraView | null = null;
+  /** The camera in the tiles' local frame: what all selection math reads. */
+  let view: PreparedView | null = null;
   /** The camera as the host supplied it, kept to re-derive `view` when the
    * model matrix changes. */
   let worldView: CameraView | null = null;
@@ -685,30 +656,17 @@ export const createLodController = (
 
   const hierarchy = new Map<string, HierarchyEntry>();
 
-  // Both priority metrics depend only on a node and the current view, so their
-  // values stay valid until the view moves. Selection, request ordering and
-  // the terminal walk all read them, repeatedly within one pass. A node whose
-  // hierarchy entry has not landed yet is deliberately NOT cached: its page
-  // may arrive before the view moves.
-  const sseByKey = new Map<string, number>();
-  const centerOffsetByKey = new Map<string, number>();
   const sseFor = (keyString: string): number => {
-    const cached = sseByKey.get(keyString);
-    if (cached !== undefined) return cached;
     const entry = hierarchy.get(keyString);
-    if (entry === undefined || view === null) return 0;
-    const value = nodeScreenSpaceError(entry.bounds, entry.spacing, view);
-    sseByKey.set(keyString, value);
-    return value;
+    return entry === undefined || view === null
+      ? 0
+      : view.nodeScreenSpaceError(entry);
   };
   const centerOffsetFor = (keyString: string): number => {
-    const cached = centerOffsetByKey.get(keyString);
-    if (cached !== undefined) return cached;
     const entry = hierarchy.get(keyString);
-    if (entry === undefined || view === null) return Number.POSITIVE_INFINITY;
-    const value = boundsCenterRayOffset(entry.bounds, view);
-    centerOffsetByKey.set(keyString, value);
-    return value;
+    return entry === undefined || view === null
+      ? Number.POSITIVE_INFINITY
+      : view.centerRayOffset(entry);
   };
   /**
    * Request order for both queues: coarse levels first, then the smallest
@@ -1174,15 +1132,9 @@ export const createLodController = (
           pagesLoaded.add(keyString);
           pageFailures.delete(keyString);
           for (const info of infos) {
-            const infoString = keyToString(info.key);
-            // The cached error was computed from the entry being replaced. A
-            // page reference and the node that supersedes it happen to carry
-            // the same bounds and spacing in both shipped sources, but that is
-            // the source's convention, not this cache's contract — dropping
-            // the value costs one recomputation and removes the requirement.
-            sseByKey.delete(infoString);
-            centerOffsetByKey.delete(infoString);
-            hierarchy.set(infoString, {
+            // A fresh entry object, so the prepared view measures it afresh
+            // rather than reusing the page reference's values.
+            hierarchy.set(keyToString(info.key), {
               pointCount: info.pointCount,
               bounds: info.bounds,
               spacing: info.spacing,
@@ -1370,7 +1322,7 @@ export const createLodController = (
     }
 
     let largestSpacing: number | null = null;
-    walkTerminals(frustumPlanes(view.viewProj), (keyString, entry) => {
+    walkTerminals(view.planes, (keyString, entry) => {
       const spacing = terminalSpacing(keyString, entry);
       if (spacing !== null)
         largestSpacing = Math.max(largestSpacing ?? 0, spacing);
@@ -1468,7 +1420,7 @@ export const createLodController = (
     }
   };
 
-  const rootVisible = (planes: ReturnType<typeof frustumPlanes>): boolean => {
+  const rootVisible = (planes: readonly Plane[]): boolean => {
     const root = hierarchy.get(ROOT_KEY_STRING);
     return root !== undefined && boundsIntersectsFrustum(planes, root.bounds);
   };
@@ -1476,11 +1428,10 @@ export const createLodController = (
   const runSelection = (seed?: ReadonlySet<string>): void => {
     if (disposed || !active || view === null) return;
     const budget = currentBudget();
-    const currentView = view;
-    const planes = frustumPlanes(currentView.viewProj);
+    const planes = view.planes;
     const sse = (key: VoxelKey): number => sseFor(keyToString(key));
     const previousTarget = target;
-    const centerHysteresis = centerOffsetHysteresis(currentView);
+    const centerHysteresis = centerOffsetHysteresis(view.view);
     const centerPriority = (key: VoxelKey): number => {
       const keyString = keyToString(key);
       return (
@@ -1654,8 +1605,6 @@ export const createLodController = (
     queue = [];
     pageQueue = [];
     hierarchy.clear();
-    sseByKey.clear();
-    centerOffsetByKey.clear();
     pagesLoaded.clear();
     pageFailures.clear();
     tileFailures.clear();
@@ -1682,15 +1631,15 @@ export const createLodController = (
   /** Adopt the local restatement of the stored world camera, if usable. */
   const applyWorldView = (): void => {
     if (worldView === null || !modelMatrixUsable) return;
-    view = modelFrame ? viewInModelFrame(worldView, modelFrame) : worldView;
-    sseByKey.clear();
-    centerOffsetByKey.clear();
+    view = prepareView(
+      modelFrame ? viewInModelFrame(worldView, modelFrame) : worldView,
+    );
     if (active) requestSelection();
   };
 
   return {
     setCamera(nextView) {
-      if (disposed || !isFiniteView(nextView)) return;
+      if (disposed || !usableView(nextView)) return;
       // Hosts feed the camera on every render, so an unchanged view is a
       // no-op rather than a reason to rerun selection.
       if (worldView !== null && sameCameraView(worldView, nextView)) return;
@@ -1923,7 +1872,7 @@ export const createLodController = (
     },
 
     pickPoint(pickView, cursorXCssPx, cursorYCssPx) {
-      if (disposed || !active || !isFiniteView(pickView)) return null;
+      if (disposed || !active || !usableView(pickView)) return null;
       if (!modelMatrixUsable) return null;
       const localView = modelFrame
         ? viewInModelFrame(pickView, modelFrame)
@@ -1952,7 +1901,7 @@ export const createLodController = (
             ...result,
             rayDepth: result.rayDepth * modelFrame.scale,
             scenePoint: scenePoint(
-              ...transformPointBy(modelFrame.matrix, result.scenePoint),
+              ...transformPoint(modelFrame.matrix, result.scenePoint),
             ),
           }
         : result;
