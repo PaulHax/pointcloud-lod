@@ -44,6 +44,7 @@ export type FrameReport = {
   readonly hostFrameMs: number | null;
   readonly vtkFrameMs: number;
   readonly paints: number;
+  /** The governor took this frame as a sample it may train quality on. */
   readonly capacitySampleEligible: boolean;
   readonly reportedToGovernor: boolean;
   /** A GPU timer query is outstanding; its duration arrives on resolution. */
@@ -368,16 +369,13 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
       const contiguous = Math.max(80, vtkFrameMs * 4);
       const usable =
         interval !== null && interval > 0 && interval <= contiguous;
-      const eligible =
-        coordinator.stats().governor.activity.measurementEligible;
-      if (usable) {
-        coordinator.recordHostFrame({
-          hostFrameMs: interval,
-          vtkFrameMs,
-          capacitySampleEligible: eligible,
-          now: presentedAt,
-        });
-      }
+      const verdict = usable
+        ? coordinator.recordHostFrame({
+            hostFrameMs: interval,
+            vtkFrameMs,
+            now: presentedAt,
+          })
+        : null;
       // Reported after the governor has been told, so an observer sees the
       // same ordering the adaptive loop ran in, and reported for rejected
       // intervals too: a benchmark counts every frame the display showed.
@@ -399,7 +397,7 @@ export const createSceneHost = (container: HTMLElement): SceneHost => {
           hostFrameMs: usable ? interval : null,
           vtkFrameMs,
           paints: Math.max(1, paintsSincePresentation),
-          capacitySampleEligible: eligible,
+          capacitySampleEligible: verdict?.eligible ?? false,
           reportedToGovernor: usable,
           gpuPending: queryIds.length > 0,
         });

@@ -43,6 +43,16 @@ export type HostFrameMetrics = TransientFrameMetrics & {
   readonly capacitySampleEligible?: boolean;
 };
 
+/** How the governor used one reported presentation. */
+export type FrameVerdict = {
+  /** The frame reached the governor as a capacity sample. */
+  readonly sampled: boolean;
+  /** The sample passed every eligibility gate and may train quality. */
+  readonly eligible: boolean;
+  /** The regime the frame was attributed to. */
+  readonly regime: QualityRegime;
+};
+
 export type CapacitySampleMetrics = {
   readonly frameMs: number;
   readonly regime: QualityRegime;
@@ -147,7 +157,7 @@ export type ViewGovernor = {
   resetMotionBaselines(): void;
   recordTransientFrame(metrics: TransientFrameMetrics): void;
   recordCapacitySample(metrics: CapacitySampleMetrics): void;
-  recordHostFrame(metrics: HostFrameMetrics): void;
+  recordHostFrame(metrics: HostFrameMetrics): FrameVerdict;
   invalidateCapacity(): void;
   needsFrame(): boolean;
   stats(): ViewGovernorStats;
@@ -716,17 +726,25 @@ export const createViewGovernor = (
     recordCapacitySample,
 
     recordHostFrame(metrics) {
-      if (disposed || !finiteNonNegative(metrics?.hostFrameMs)) return;
+      if (disposed || !finiteNonNegative(metrics?.hostFrameMs)) {
+        return { sampled: false, eligible: false, regime: regime() };
+      }
       const observedMs = recordTransientFrame(metrics);
-      recordCapacitySample({
-        frameMs: observedMs,
-        regime: regime(),
+      const verdict: FrameVerdict = {
+        sampled: true,
         eligible:
           (metrics.capacitySampleEligible ?? true) &&
           coreEligible() &&
           !lastFrameWarming,
+        regime: regime(),
+      };
+      recordCapacitySample({
+        frameMs: observedMs,
+        regime: verdict.regime,
+        eligible: verdict.eligible,
         now: metrics.now,
       });
+      return verdict;
     },
 
     needsFrame: shouldRender,

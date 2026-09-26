@@ -349,6 +349,74 @@ describe("createStreamedSceneCoordinator", () => {
     coordinator.dispose();
   });
 
+  it("says how each presented frame was used", () => {
+    const coordinator = makeCoordinator();
+    const unsampled = { sampled: false, eligible: false, regime: "stationary" };
+    coordinator.register(makeMember());
+    coordinator.prepareFrame(1);
+    // A view with nothing adaptive has no quality to train.
+    expect(coordinator.recordHostFrame({ hostFrameMs: 16.7, now: 0 })).toEqual(
+      unsampled,
+    );
+
+    let busy = true;
+    const adaptive = makeMember();
+    const idle = adaptive.governorInputs();
+    adaptive.governorInputs = () => ({
+      ...idle,
+      work: { operations: busy ? 1 : 0, progressSerial: busy ? 0 : 1 },
+    });
+    coordinator.register(adaptive, { qualityManaged: true });
+    coordinator.prepareFrame(2);
+    expect(coordinator.recordHostFrame({ hostFrameMs: 16.7, now: 1 })).toEqual({
+      sampled: true,
+      eligible: false,
+      regime: "stationary",
+    });
+    expect(coordinator.recordHostFrame({ hostFrameMs: Number.NaN })).toEqual(
+      unsampled,
+    );
+
+    busy = false;
+    coordinator.prepareFrame(3);
+    expect(coordinator.recordHostFrame({ hostFrameMs: 16.7, now: 2 })).toEqual({
+      sampled: true,
+      eligible: true,
+      regime: "stationary",
+    });
+    coordinator.beginInteraction();
+    coordinator.prepareFrame(4);
+    expect(coordinator.recordHostFrame({ hostFrameMs: 16.7, now: 3 })).toEqual({
+      sampled: true,
+      eligible: true,
+      regime: "interaction",
+    });
+    coordinator.dispose();
+  });
+
+  it("reads no member and applies nothing when asked for stats", () => {
+    const coordinator = makeCoordinator();
+    const member = makeMember();
+    const inputs = member.governorInputs();
+    let demand = 1;
+    let reads = 0;
+    member.governorInputs = () => {
+      reads += 1;
+      return { ...inputs, qualityDemand: demand };
+    };
+    coordinator.register(member, { qualityManaged: true });
+    coordinator.prepareFrame(1);
+    const readsBefore = reads;
+    const applied = member.allocations.length;
+    demand = 0.25;
+    const stats = coordinator.stats();
+    coordinator.stats();
+    expect(reads).toBe(readsBefore);
+    expect(member.allocations).toHaveLength(applied);
+    expect(stats.members[0]?.governorInputs.qualityDemand).toBe(1);
+    coordinator.dispose();
+  });
+
   it("keeps a member reporting importance on the wrong scale to its share", () => {
     const coordinator = makeCoordinator({
       governor: { minSamples: 1, cooldownMs: 0 },

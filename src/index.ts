@@ -119,6 +119,7 @@ export {
 export {
   createViewGovernor,
   type CapacitySampleMetrics,
+  type FrameVerdict,
   type GovernorWorkState,
   type HostFrameMetrics,
   type MotionReference,
