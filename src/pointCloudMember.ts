@@ -110,16 +110,15 @@ export const createPointCloudMember = (
     selectionDelayMs: config.selectionDelayMs,
   });
 
-  let cachedWorkRevision = -1;
-  let cachedWorkPending = false;
-
-  const fullCeiling = (): number => {
-    const memoryCeiling = controller.governorInputs().memoryCeilingPoints;
-    return Math.max(
+  const fullCeiling = (memoryCeilingPoints: number): number =>
+    Math.max(
       0,
-      Math.min(pointCountOf(config), configuredCeiling(config), memoryCeiling),
+      Math.min(
+        pointCountOf(config),
+        configuredCeiling(config),
+        memoryCeilingPoints,
+      ),
     );
-  };
 
   const applyPointAllocation = (next: Allocation): void => {
     allocation = next;
@@ -134,7 +133,7 @@ export const createPointCloudMember = (
     }
 
     const controllerInputs = controller.governorInputs();
-    const full = fullCeiling();
+    const full = fullCeiling(controllerInputs.memoryCeilingPoints);
     const cameraDemand = controllerInputs.demandPoints;
     const budgetAt = (qualityFraction: number): number => {
       const requested = Math.floor(full * qualityFraction);
@@ -195,11 +194,7 @@ export const createPointCloudMember = (
 
     governorInputs(): GovernorInputs {
       const narrow = controller.governorInputs();
-      if (narrow.workRevision !== cachedWorkRevision) {
-        cachedWorkPending = controller.stats().workPending;
-        cachedWorkRevision = narrow.workRevision;
-      }
-      const full = fullCeiling();
+      const full = fullCeiling(narrow.memoryCeilingPoints);
       return {
         // The controller reports root SSE in CSS pixels; the governor compares
         // members, so it is normalized against this cloud's own cutoff here.
@@ -214,7 +209,7 @@ export const createPointCloudMember = (
         work: {
           // Backoff remains one logical obligation even when physical counts
           // are temporarily zero.
-          operations: cachedWorkPending
+          operations: narrow.workPending
             ? Math.max(
                 1,
                 narrow.physicalTileOperations +
@@ -249,7 +244,9 @@ export const createPointCloudMember = (
         configuredPointCeiling: Number.isFinite(configuredCeiling(config))
           ? configuredCeiling(config)
           : null,
-        fullPointCeiling: fullCeiling(),
+        fullPointCeiling: fullCeiling(
+          controller.governorInputs().memoryCeilingPoints,
+        ),
         allocation,
         controller: controller.stats(),
         renderer: adapter.stats(),

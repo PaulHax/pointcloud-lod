@@ -167,6 +167,49 @@ describe("createPointCloudMember", () => {
     member.dispose();
   });
 
+  it("reports a tile waiting out a retry as outstanding work", async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { context } = makeContext();
+      const flaky = source(100);
+      let failing = true;
+      const member = createPointCloudMember(
+        context,
+        config({
+          source: {
+            ...flaky,
+            loadTile: (key, options) =>
+              failing
+                ? Promise.reject(new Error("500"))
+                : flaky.loadTile(key, options),
+          },
+          pointCount: 100,
+        }),
+      );
+      member.applyAllocation({
+        qualityFraction: 1,
+        memoryBudgetBytes: 32_000_000,
+        regime: "stationary",
+      });
+      member.setCamera(VIEW);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(member.governorInputs()).toMatchObject({
+        physicalTileOperations: 0,
+        physicalHierarchyOperations: 0,
+        work: { operations: 1 },
+      });
+
+      failing = false;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(member.governorInputs().work.operations).toBe(0);
+      member.dispose();
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("draws a visible cloud whose root alone exceeds the minimum budget", async () => {
     const rootPoints = 250_000;
     const coordinator = createStreamedSceneCoordinator({

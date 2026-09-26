@@ -263,20 +263,16 @@ export type LodControllerStats = {
  *
  * A view governor needs the memory ceiling to bound the aggregate budget
  * before splitting it, the projected importance to weight this cloud's share,
- * and the physical operation counts to know whether work is still landing; a
- * renderer needs the byte share to size its reuse pool. All of it is already
- * held, so this costs nothing to read — unlike {@link LodControllerStats},
- * which walks the selected set and the submitted set to answer questions no
- * frame asks. Every field here is the same number under the same name there.
- *
- * A governor member also takes `workPending`, which is deliberately not here:
- * answering it needs the walk of the selected set. It is also the one input
- * that cannot change without the controller reporting a work change, so it
- * should be recomputed only when `workRevision` changes, not on every frame.
+ * and the physical operation counts and pending work to know whether work is
+ * still landing; a renderer needs the byte share to size its reuse pool. None
+ * of it walks the selected or submitted set, as {@link LodControllerStats}
+ * does to answer questions no frame asks, so it is cheap to read on every
+ * frame. Every field here is the same value under the same name there.
  */
 export type LodGovernorInputs = {
-  /** Invalidates cached logical work state without constructing diagnostics. */
   readonly workRevision: number;
+  /** Costs at most one look per tile waiting on a retry. */
+  readonly workPending: boolean;
   readonly memoryBudgetBytes: number;
   readonly memoryCeilingPoints: number;
   /** The selection's root screen-space error; `selection.projectedImportance`. */
@@ -1053,6 +1049,36 @@ export const createLodController = (
     cache.set(keyString, tile, tileBytes(tile));
   };
 
+  /**
+   * Required current-view work has not drained: I/O running or queued, or a
+   * selected tile without a payload waiting out a retry delay. A tile inside
+   * its rest does not count (see `restingTiles`). Selection queues every other
+   * such tile, a read holds it, or a failure arms its retry, so only armed
+   * retries need checking, never the selection.
+   */
+  const workPending = (): boolean => {
+    if (
+      physicalTileOperations > 0 ||
+      physicalHierarchyOperations > 0 ||
+      queue.length > 0 ||
+      pageQueue.length > 0
+    ) {
+      return true;
+    }
+    for (const keyString of tileRetryTimers.keys()) {
+      if (
+        target.has(keyString) &&
+        hierarchy.get(keyString)?.pointCount !== 0 &&
+        !resident.has(keyString) &&
+        !cache.has(keyString) &&
+        !resting(tileFailures, keyString)
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
+
   /** Reads whose result the controller still wants. */
   const wantedTileReads = (): number => {
     let count = 0;
@@ -1813,6 +1839,7 @@ export const createLodController = (
     governorInputs() {
       return {
         workRevision,
+        workPending: workPending(),
         memoryBudgetBytes: memoryBudgetBytes(),
         memoryCeilingPoints: memoryCeilingPoints(),
         projectedImportance: selectionStats.projectedImportance,
@@ -1845,12 +1872,6 @@ export const createLodController = (
       for (const [keyString, tile] of submitted) {
         drawnPoints += drawnPointsOf(keyString, tile);
       }
-      const workPending =
-        physicalTileOperations > 0 ||
-        physicalHierarchyOperations > 0 ||
-        queue.length > 0 ||
-        pageQueue.length > 0 ||
-        targetUndecodedTiles > restingTiles;
       return {
         active,
         residentTiles: resident.size,
@@ -1866,7 +1887,7 @@ export const createLodController = (
         queuedPages: pageQueue.length,
         physicalHierarchyOperations,
         workRevision,
-        workPending,
+        workPending: workPending(),
         restingTiles,
         restingPages,
         selectionPending: selectionTimer !== null,
