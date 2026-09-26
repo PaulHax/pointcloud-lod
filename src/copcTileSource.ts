@@ -126,7 +126,7 @@ const httpRangeGetter =
       try {
         const response = await fetch(url, {
           headers: { Range: `bytes=${begin}-${end - 1}` },
-          ...(signal === undefined ? {} : { signal }),
+          signal,
         });
         if (response.status !== 206) {
           retryable =

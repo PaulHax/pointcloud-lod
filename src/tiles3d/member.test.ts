@@ -105,7 +105,6 @@ const harness = (withChildren = false, schedulerBytes = 1024) => {
       compressedFormats: ["astc-4x4"],
     },
     workers: {
-      size: 3,
       decode: (request) => {
         decodedRequests.push(request);
         return { promise: Promise.resolve(decoded()), cancel: vi.fn() };
@@ -923,7 +922,6 @@ describe("createTiles3dMember", () => {
       {
         ...h.context,
         workers: {
-          size: 3,
           decode: (request) => ({
             promise: Promise.resolve(
               request.contentUrl.endsWith("root.glb")

@@ -34,7 +34,6 @@ import {
   finiteAtLeast,
   finiteNonNegative,
   finitePositive,
-  finiteWithin,
   wholeAtLeast,
 } from "./numeric";
 import { defaultMemoryBudgetBytes } from "./memoryPool";
@@ -117,8 +116,6 @@ export type LodControllerOptions = {
    * memory-derived point cap applies on top.
    */
   pointBudget?: number;
-  /** Initial fraction of selected points to distribute across tile prefixes. */
-  densityFraction?: number;
   /**
    * GPU-memory budget for resident tile bytes, updated through
    * `setMemoryBudgetBytes`. Defaults to `defaultMemoryBudgetBytes()`. The
@@ -640,12 +637,7 @@ export const createLodController = (
     options.pointBudget ?? 2_000_000,
     1,
   );
-  let densityFraction = finiteWithin(
-    "densityFraction",
-    options.densityFraction ?? 1,
-    0,
-    1,
-  );
+  let densityFraction = 1;
   let refinementCutoffPx = finiteAtLeast(
     "refinementCutoffPx",
     options.refinementCutoffPx ?? 1,

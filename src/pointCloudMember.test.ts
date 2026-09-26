@@ -57,7 +57,6 @@ const makeContext = (memory = createMemoryPool({ totalBytes: 64_000_000 })) => {
     scheduleRender,
     memory,
     workers: {
-      size: 0,
       decode: () => {
         throw new Error("unused");
       },
