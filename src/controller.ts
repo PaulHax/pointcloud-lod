@@ -1583,9 +1583,15 @@ export const createLodController = (
       const entry = hierarchy.get(keyString);
       // Structural hierarchy nodes participate in selection but carry no tile.
       if (entry?.pointCount === 0) continue;
-      if (!promoteCached(keyString) && !resting(tileFailures, keyString)) {
-        toFetch.push(keyString);
+      if (promoteCached(keyString)) continue;
+      if (resting(tileFailures, keyString)) {
+        // Its rest ends on the clock, not on a selection pass: a key that
+        // spent its last attempt while deselected has no retry armed, and a
+        // still camera would never ask for it again.
+        if (!tileRetryTimers.has(keyString)) scheduleTileRetry(keyString);
+        continue;
       }
+      toFetch.push(keyString);
     }
     queue = byFrontierPriority(toFetch);
 
