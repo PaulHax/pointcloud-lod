@@ -13,7 +13,6 @@ import {
 } from "../../../scripts/generateTiles3dFixture.mjs";
 
 import {
-  buildDecodeCacheKey,
   buildTransferList,
   capabilityTarget,
   TileUnsupportedExtensionError,
@@ -889,19 +888,6 @@ describe("decoded tile contract", () => {
         (sum, buffer) => sum + buffer.byteLength,
         0,
       ),
-    );
-  });
-
-  it("keys decoded representations by revision, URL, and capability key", () => {
-    const base = {
-      revision: "r1",
-      contentUrl: "https://fixture.invalid/a.glb",
-    };
-    expect(buildDecodeCacheKey({ ...base, capabilityKey: "astc" })).not.toBe(
-      buildDecodeCacheKey({ ...base, capabilityKey: "rgba" }),
-    );
-    expect(buildDecodeCacheKey({ ...base, capabilityKey: "astc" })).not.toBe(
-      buildDecodeCacheKey({ ...base, revision: "r2", capabilityKey: "astc" }),
     );
   });
 

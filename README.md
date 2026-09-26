@@ -792,13 +792,13 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
   coordinator demand-caps and water-fills that fraction across members while
   the page memory pool allocates bytes separately.
 
-Camera math (`frustumPlanes`, `nodeScreenSpaceError`) is pure and
-renderer-agnostic: the controller takes a view-projection matrix and camera
-parameters as plain arrays, and requests renders only through an injected
-coalescing `scheduleRender` callback — the host owns render pacing. Both
-projections are first class: a perspective view shrinks a node's projected
-spacing with distance, a parallel one is set purely by `parallelScale`, so an
-orthographic camera refines on zoom rather than on approach.
+Camera math is pure and renderer-agnostic: the controller takes a
+view-projection matrix and camera parameters as plain arrays, and requests
+renders only through an injected coalescing `scheduleRender` callback, so the
+host owns render pacing. Both projections are first class: a perspective view
+shrinks a node's projected spacing with distance, a parallel one is set purely
+by `parallelScale`, so an orthographic camera refines on zoom rather than on
+approach.
 
 ### Point rendering contract
 
