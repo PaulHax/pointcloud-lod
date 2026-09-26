@@ -92,6 +92,12 @@ const usingRealGpu = (process.env.POINTCLOUD_LOD_BROWSER_GPU ?? "") !== "";
  */
 const allowSoftware =
   (process.env.POINTCLOUD_LOD_REPLAY_ALLOW_SOFTWARE ?? "") !== "";
+/**
+ * Writes a V8 CPU profile of the replayed gesture beside each artifact, for
+ * `scripts/summarizeProfile.mjs`. The sampler costs frame time, so a profiled
+ * run is for finding where time goes, never for its headline numbers.
+ */
+const profiling = (process.env.POINTCLOUD_LOD_REPLAY_PROFILE ?? "") !== "";
 
 /**
  * Origins whose traffic the cache owns. Anything else — the local server
@@ -466,12 +472,27 @@ describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
               await session.startInputRecorder();
               await session.markTelemetry("replay-start");
 
+              const profiler = profiling
+                ? await session.page.context().newCDPSession(session.page)
+                : null;
+              if (profiler) {
+                await profiler.send("Profiler.enable");
+                await profiler.send("Profiler.start");
+              }
               const replay = await replayInput({
                 page: session.page,
                 recording,
                 viewer: await session.viewerBox(),
                 onMarker: (label) => session.markTelemetry(label),
               });
+              if (profiler) {
+                const { profile } = await profiler.send("Profiler.stop");
+                await writeFile(
+                  path.replace(/\.json$/, ".cpuprofile"),
+                  JSON.stringify(profile),
+                );
+                await profiler.detach();
+              }
 
               await session.markTelemetry("replay-ended");
               await session.frame();
