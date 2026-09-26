@@ -68,11 +68,6 @@ export const multiplyMat4 = (
     "composed matrix",
   );
 
-export const composeSceneTransform = (
-  tilesetToScene: readonly number[],
-  accumulatedTilesTransform: readonly number[],
-): Mat4 => multiplyMat4(tilesetToScene, accumulatedTilesTransform);
-
 /** Standard 3D Tiles glTF Y-up content into the tile's Z-up coordinate system. */
 export const Y_UP_TO_Z_UP: Mat4 = [
   1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1,
@@ -111,18 +106,6 @@ export const createVerticalExaggerationTransform = (
     1,
   ];
 };
-
-/** `T(p) * S(1,1,e) * T(-p) * tilesetToScene * accumulatedTile/local`. */
-export const composeVerticalExaggeratedSceneTransform = (
-  exaggeration: number,
-  pivotZ: number,
-  tilesetToScene: readonly number[],
-  accumulatedTilesTransform: readonly number[],
-): Mat4 =>
-  multiplyMat4(
-    createVerticalExaggerationTransform(exaggeration, pivotZ),
-    composeSceneTransform(tilesetToScene, accumulatedTilesTransform),
-  );
 
 export const transformPoint = (
   matrixInput: readonly number[],

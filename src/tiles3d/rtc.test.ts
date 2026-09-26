@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  composeSceneTransform,
-  composeVerticalExaggeratedSceneTransform,
   createEcefToEnuTransform,
   createVerticalExaggerationTransform,
   flattenPrimitiveToRtc,
@@ -69,23 +67,21 @@ describe("3D Tiles RTC conversion", () => {
     const accumulated = translation(2, 3, 5);
     const composed = multiplyMat4(
       anchor,
-      composeSceneTransform(tilesetToScene, accumulated),
+      multiplyMat4(tilesetToScene, accumulated),
     );
 
     expect(transformPoint(composed, [1, 0, 0])).toEqual([104, 214, 318]);
   });
 
-  it("composes anchor, pivoted ENU exaggeration, ECEF placement, and tile-local transforms in that order", () => {
+  it("exaggerates scene z about its pivot between ECEF placement and the anchor", () => {
     const anchor: Mat4 = [0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 7, 11, 13, 1];
     const tilesetToScene: Mat4 = [
       0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 100, 200, 10, 1,
     ];
     const accumulated = translation(2, 3, 4);
-    const scene = composeVerticalExaggeratedSceneTransform(
-      3,
-      5,
-      tilesetToScene,
-      accumulated,
+    const scene = multiplyMat4(
+      createVerticalExaggerationTransform(3, 5),
+      multiplyMat4(tilesetToScene, accumulated),
     );
     const composed = multiplyMat4(anchor, scene);
 
@@ -149,11 +145,9 @@ describe("3D Tiles RTC conversion", () => {
     const tilesetToScene: Mat4 = [
       0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 100, 200, 10, 1,
     ];
-    const scene = composeVerticalExaggeratedSceneTransform(
-      3,
-      5,
-      tilesetToScene,
-      translation(2, 3, 4),
+    const scene = multiplyMat4(
+      createVerticalExaggerationTransform(3, 5),
+      multiplyMat4(tilesetToScene, translation(2, 3, 4)),
     );
     const invSqrt2 = Math.SQRT1_2;
     const result = flattenPrimitiveToRtc(

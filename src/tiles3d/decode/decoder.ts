@@ -6,7 +6,6 @@ import { read as readKtx2 } from "ktx-parse";
 
 import { IDENTITY } from "../../camera";
 import {
-  composeSceneTransform,
   flattenPrimitiveToRtc,
   multiplyMat4,
   Y_UP_TO_Z_UP,
@@ -1682,7 +1681,7 @@ const decodeTileContentInner = async (
   }
 
   const sceneTransform = multiplyMat4(
-    composeSceneTransform(request.tilesetToScene, request.accumulatedTransform),
+    multiplyMat4(request.tilesetToScene, request.accumulatedTransform),
     Y_UP_TO_Z_UP,
   );
   const pending = applySceneRtc(parsed, originalJson, sceneTransform);
