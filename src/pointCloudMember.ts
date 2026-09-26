@@ -1,9 +1,7 @@
 import { ADAPTIVE_QUALITY_DEFAULTS } from "./adaptiveBudget";
-import {
-  createLodController,
-  type LodController,
-  type PointPresentation,
-} from "./controller";
+import { createLodController, type LodController } from "./controller";
+import type { PointPresentation } from "./pointPresentation";
+import { pointBudgets } from "./pointQuality";
 import { createRendererAdapter, type RendererAdapter } from "./rendererAdapter";
 import {
   occlusionFromPick,
@@ -132,30 +130,19 @@ export const createPointCloudMember = (
       return;
     }
 
-    const controllerInputs = controller.governorInputs();
-    const full = fullCeiling(controllerInputs.memoryCeilingPoints);
-    const cameraDemand = controllerInputs.demandPoints;
-    const budgetAt = (qualityFraction: number): number => {
-      const requested = Math.floor(full * qualityFraction);
-      const demandCapped =
-        cameraDemand > 0 ? Math.min(requested, cameraDemand) : requested;
-      return Math.min(full, Math.max(adaptiveMinimum(config), demandCapped));
-    };
     if (next.regime === "stationary") {
       stationaryQualityFraction = next.qualityFraction;
-      const points = budgetAt(next.qualityFraction);
-      controller.setPointBudget(points);
-      controller.setDensityFraction(1);
-      return;
     }
-    const drawPoints = budgetAt(next.qualityFraction);
-    const selectionPoints = budgetAt(
-      Math.max(stationaryQualityFraction, next.qualityFraction),
-    );
-    controller.setPointBudget(selectionPoints);
-    controller.setDensityFraction(
-      selectionPoints > 0 ? drawPoints / selectionPoints : 0,
-    );
+    const controllerInputs = controller.governorInputs();
+    const budgets = pointBudgets({
+      allocation: next,
+      stationaryFraction: stationaryQualityFraction,
+      fullCeiling: fullCeiling(controllerInputs.memoryCeilingPoints),
+      demandPoints: controllerInputs.demandPoints,
+      minimum: adaptiveMinimum(config),
+    });
+    controller.setPointBudget(budgets.pointBudget);
+    controller.setDensityFraction(budgets.densityFraction);
   };
 
   return {

@@ -47,12 +47,15 @@ export {
   type LodGovernorInputs,
   type LodSelectionStats,
   type LodDrawPlanStats,
-  type PointPresentation,
-  type FixedPointPresentation,
-  type AutoPointPresentation,
   type TileBatch,
   type TileDrawPlan,
 } from "./controller";
+
+export type {
+  AutoPointPresentation,
+  FixedPointPresentation,
+  PointPresentation,
+} from "./pointPresentation";
 
 export {
   createMemoryPool,

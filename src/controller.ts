@@ -1,18 +1,14 @@
 /**
  * LOD controller: turns camera movement into a bounded set of submitted tiles.
  *
- * Selection is a pure pass (frustum cull → centre-ray cone priority →
- * parent-closed point-budget selection); the controller owns the impure rest:
- * lazy hierarchy pages, a bounded fetch queue with cancellation, an LRU for
- * deselected tiles, and batched delivery to the consumer.
- *
- * COPC hierarchies are additive — children add detail while parents keep
- * rendering — so there is no parent/child swap and no hole risk: the
- * parent-closed selection invariant is the entire hole-free story.
+ * Its decisions are pure functions over read-only views of the state it
+ * holds: `selectPoints` chooses the tiles, `planDraw` thins them and
+ * `largestTerminalSpacing` sizes Auto points. The controller owns the impure
+ * rest: lazy hierarchy pages, a bounded fetch queue with cancellation, an LRU
+ * for deselected tiles, and batched delivery to the consumer.
  */
 
 import {
-  boundsIntersectsFrustum,
   modelFrameOf,
   prepareView,
   sameCameraView,
@@ -20,36 +16,44 @@ import {
   viewInModelFrame,
   type CameraView,
   type ModelFrame,
-  type Plane,
   type PreparedView,
 } from "./camera";
+import {
+  EMPTY_DRAW_PLAN,
+  largestTerminalSpacing,
+  planDraw,
+  samePrefixes,
+  type DrawPlan,
+} from "./drawPlan";
 import { sameMatrix, transformPoint, type Mat16 } from "./mat4";
-import { selectNodes } from "./budget";
 import { scenePoint } from "./frames";
 import { createLruCache } from "./lru";
-import {
-  finiteAtLeast,
-  finiteNonNegative,
-  finitePositive,
-  wholeAtLeast,
-} from "./numeric";
+import { finiteAtLeast, finiteNonNegative, wholeAtLeast } from "./numeric";
 import { defaultMemoryBudgetBytes } from "./memoryPool";
 import {
   pickPointInTiles,
   type PickTile,
   type PointPickResult,
 } from "./picking";
+import { keyFromString, keyToString, type VoxelKey } from "./octree";
 import {
-  ROOT_KEY,
-  childKeys,
-  keyFromString,
-  keyToString,
-  levelFromString,
-  type Bounds,
-  type VoxelKey,
-} from "./octree";
+  INITIAL_AUTO_DIAMETER_CSS_PX,
+  autoDiameterCssPx,
+  checkPresentation,
+  normalizePresentation,
+  samePresentation,
+  type PointPresentation,
+} from "./pointPresentation";
+import {
+  EMPTY_SELECTION,
+  ROOT_KEY_STRING,
+  frontierOrder,
+  selectPoints,
+  type Hierarchy,
+  type HierarchyEntry,
+  type PointSelection,
+} from "./pointSelection";
 import { tileBytes, type TileData, type TileSource } from "./tileSource";
-import { projectedSpacingScale } from "./pointDensity";
 
 export type TileBatch = {
   readonly added: readonly { key: VoxelKey; tile: TileData }[];
@@ -62,22 +66,6 @@ export type TileDrawPlan = {
     readonly pointCount: number;
   }[];
 };
-
-export type FixedPointPresentation = {
-  readonly mode: "fixed";
-  readonly diameterCssPx: number;
-};
-
-export type AutoPointPresentation = {
-  readonly mode: "auto";
-  /** Multiplier for the Auto diameter; 1 matches the projected spacing. */
-  readonly userScale: number;
-  /** Bounds for the unscaled density-aware diameter. */
-  readonly minDiameterCssPx?: number;
-  readonly maxDiameterCssPx?: number;
-};
-
-export type PointPresentation = FixedPointPresentation | AutoPointPresentation;
 
 /**
  * Every numeric option is a programmer error when it is not finite or falls
@@ -438,129 +426,8 @@ export type LodController = {
   dispose(): void;
 };
 
-type HierarchyEntry = {
-  pointCount: number;
-  bounds: Bounds;
-  spacing: number;
-  children: readonly VoxelKey[] | null;
-  pageRef: boolean;
-};
-
 const isAbortError = (error: unknown): boolean =>
   error instanceof Error && error.name === "AbortError";
-
-const ROOT_KEY_STRING = keyToString(ROOT_KEY);
-
-const DEFAULT_PRESENTATION: FixedPointPresentation = {
-  mode: "fixed",
-  diameterCssPx: 2,
-};
-const DEFAULT_AUTO_MIN_DIAMETER_CSS_PX = 1.5;
-const DEFAULT_AUTO_MAX_DIAMETER_CSS_PX = 4;
-const INITIAL_AUTO_DIAMETER_CSS_PX = 2;
-/** Screen-centre improvement required to replace a selected boundary tile. */
-const SELECTION_CENTER_HYSTERESIS_CSS_PX = 8;
-
-const centerOffsetHysteresis = (view: CameraView): number => {
-  const normalized =
-    (2 * SELECTION_CENTER_HYSTERESIS_CSS_PX) / view.viewportHeightCssPx;
-  return view.projection === "perspective"
-    ? Math.atan(normalized * Math.tan(view.fovY / 2))
-    : normalized;
-};
-
-/** What `checkPresentation` returns: Auto bounds are always resolved. */
-type NormalizedPresentation =
-  | FixedPointPresentation
-  | Required<AutoPointPresentation>;
-
-type PresentationCheck =
-  | { readonly presentation: NormalizedPresentation }
-  | { readonly error: string };
-
-/** One validation body for both the throwing and the ignoring boundary. */
-const checkPresentation = (
-  value: PointPresentation | undefined,
-): PresentationCheck => {
-  const presentation = value ?? DEFAULT_PRESENTATION;
-  if (presentation.mode === "fixed") {
-    if (!finitePositive(presentation.diameterCssPx)) {
-      return {
-        error: `Fixed diameterCssPx must be finite and > 0, got ${presentation.diameterCssPx}`,
-      };
-    }
-    return {
-      presentation: {
-        mode: "fixed",
-        diameterCssPx: presentation.diameterCssPx,
-      },
-    };
-  }
-  const min = presentation.minDiameterCssPx ?? DEFAULT_AUTO_MIN_DIAMETER_CSS_PX;
-  const max = presentation.maxDiameterCssPx ?? DEFAULT_AUTO_MAX_DIAMETER_CSS_PX;
-  if (
-    !finitePositive(presentation.userScale) ||
-    !finitePositive(min) ||
-    !Number.isFinite(max) ||
-    max < min
-  ) {
-    return {
-      error:
-        "Auto userScale/minDiameterCssPx/maxDiameterCssPx must be finite, positive, and ordered",
-    };
-  }
-  return {
-    presentation: {
-      mode: "auto",
-      userScale: presentation.userScale,
-      minDiameterCssPx: min,
-      maxDiameterCssPx: max,
-    },
-  };
-};
-
-const normalizePresentation = (
-  value: PointPresentation | undefined,
-): NormalizedPresentation => {
-  const checked = checkPresentation(value);
-  if ("error" in checked) throw new Error(checked.error);
-  return checked.presentation;
-};
-
-const samePresentation = (
-  left: NormalizedPresentation,
-  right: NormalizedPresentation,
-): boolean =>
-  left.mode === "fixed"
-    ? right.mode === "fixed" && left.diameterCssPx === right.diameterCssPx
-    : right.mode === "auto" &&
-      left.userScale === right.userScale &&
-      left.minDiameterCssPx === right.minDiameterCssPx &&
-      left.maxDiameterCssPx === right.maxDiameterCssPx;
-
-/**
- * A selection that has not run, or has been thrown away. The explicit return
- * type is the point: a field added to `LodSelectionStats` becomes one compile
- * error here rather than three silent omissions at the reset sites.
- */
-const emptySelectionStats = (
-  generation: number,
-  targetRevision: number,
-): Omit<
-  LodSelectionStats,
-  "targetUndecodedTiles" | "projectedSpacingCssPx"
-> => ({
-  generation,
-  targetRevision,
-  targetTiles: 0,
-  targetPoints: 0,
-  consideredNodes: 0,
-  availableNodes: 0,
-  sseStoppedNodes: 0,
-  budgetSkippedNodes: 0,
-  budgetSkippedPoints: 0,
-  projectedImportance: 0,
-});
 
 export const createLodController = (
   options: LodControllerOptions,
@@ -654,49 +521,14 @@ export const createLodController = (
     });
   };
 
-  const hierarchy = new Map<string, HierarchyEntry>();
+  const nodes = new Map<string, HierarchyEntry>();
+  const loadedPages = new Set<string>();
+  const hierarchy: Hierarchy = { nodes, loadedPages };
 
-  const sseFor = (keyString: string): number => {
-    const entry = hierarchy.get(keyString);
-    return entry === undefined || view === null
-      ? 0
-      : view.nodeScreenSpaceError(entry);
-  };
-  const centerOffsetFor = (keyString: string): number => {
-    const entry = hierarchy.get(keyString);
-    return entry === undefined || view === null
-      ? Number.POSITIVE_INFINITY
-      : view.centerRayOffset(entry);
-  };
-  /**
-   * Request order for both queues: coarse levels first, then the smallest
-   * 3D centre-ray offset, then screen-space error. That makes the selected
-   * frontier grow as concentric cones through the octree, so a
-   * hierarchy page is fetched in the order the pages it unblocks would be.
-   *
-   * Each key's level and error are read once and sorted alongside it rather
-   * than recomputed inside the comparator, which a comparison-sort calls
-   * O(n log n) times — the queues are rebuilt from scratch on every selection
-   * pass, which is exactly when the camera is moving fastest.
-   */
+  /** Before the first camera only the root page can be asked for. */
   const byFrontierPriority = (keyStrings: readonly string[]): string[] =>
-    keyStrings
-      .map((keyString) => ({
-        keyString,
-        level: levelFromString(keyString),
-        centerOffset: centerOffsetFor(keyString),
-        sse: sseFor(keyString),
-      }))
-      .sort((a, b) =>
-        a.level !== b.level
-          ? a.level - b.level
-          : a.centerOffset - b.centerOffset ||
-            b.sse - a.sse ||
-            a.keyString.localeCompare(b.keyString),
-      )
-      .map((entry) => entry.keyString);
+    view === null ? [...keyStrings] : frontierOrder(keyStrings, nodes, view);
 
-  const pagesLoaded = new Set<string>();
   /** Hierarchy pages requested whose result is still wanted. */
   const pagesInFlight = new Map<string, AbortController>();
   let pageQueue: string[] = [];
@@ -828,7 +660,7 @@ export const createLodController = (
     // Anything that already answers for the key — deselection, an adopted
     // read, a payload that landed anyway — makes this retry pointless.
     if (
-      !target.has(keyString) ||
+      !selection.target.has(keyString) ||
       resident.has(keyString) ||
       tileReads.has(keyString)
     ) {
@@ -850,7 +682,7 @@ export const createLodController = (
   const retryPage = (keyString: string): void => {
     // Nothing is fetched while hidden; reactivation reselects from scratch.
     if (!active) return;
-    if (pagesLoaded.has(keyString) || pagesInFlight.has(keyString)) return;
+    if (loadedPages.has(keyString) || pagesInFlight.has(keyString)) return;
     if (resting(pageFailures, keyString)) {
       schedulePageRetry(keyString);
       return;
@@ -906,16 +738,15 @@ export const createLodController = (
     return bytes === 0 ? 0 : Math.max(1, Math.floor(bytes / bytesPerPoint()));
   };
 
-  let target: ReadonlySet<string> = new Set<string>();
+  let selection: PointSelection = EMPTY_SELECTION;
+  /** Increments only when the selected key set changes. */
   let targetRevision = 0;
   let selectionGeneration = 0;
-  let selectionStats = emptySelectionStats(0, 0);
-  let drawPrefixes: ReadonlyMap<string, number> = new Map();
-  let drawPlanStats: LodDrawPlanStats = {
-    revision: 0,
-    pointBudget: 0,
-    plannedPoints: 0,
-  };
+  let plan: DrawPlan = EMPTY_DRAW_PLAN;
+  /** Increments only when at least one tile prefix changes. */
+  let drawPlanRevision = 0;
+  /** See `LodSelectionStats.projectedSpacingCssPx`. */
+  let largestTerminalSpacingCssPx: number | null = null;
 
   /**
    * What a submitted tile actually draws: the planned prefix, clamped to the
@@ -923,7 +754,7 @@ export const createLodController = (
    * counts, which need not match the decoded tile.
    */
   const drawnPointsOf = (keyString: string, tile: TileData): number =>
-    Math.min(tile.pointCount, drawPrefixes.get(keyString) ?? 0);
+    Math.min(tile.pointCount, plan.prefixes.get(keyString) ?? 0);
 
   type TileRead = {
     readonly abort: AbortController;
@@ -1025,8 +856,8 @@ export const createLodController = (
     }
     for (const keyString of tileRetryTimers.keys()) {
       if (
-        target.has(keyString) &&
-        hierarchy.get(keyString)?.pointCount !== 0 &&
+        selection.target.has(keyString) &&
+        nodes.get(keyString)?.pointCount !== 0 &&
         !resident.has(keyString) &&
         !cache.has(keyString) &&
         !resting(tileFailures, keyString)
@@ -1091,7 +922,7 @@ export const createLodController = (
 
   /** Worth asking for: not held, not already asked for, not resting. */
   const pageWanted = (keyString: string): boolean =>
-    !pagesLoaded.has(keyString) &&
+    !loadedPages.has(keyString) &&
     !pagesInFlight.has(keyString) &&
     !resting(pageFailures, keyString);
 
@@ -1129,12 +960,12 @@ export const createLodController = (
             pumpPages();
             return;
           }
-          pagesLoaded.add(keyString);
+          loadedPages.add(keyString);
           pageFailures.delete(keyString);
           for (const info of infos) {
             // A fresh entry object, so the prepared view measures it afresh
             // rather than reusing the page reference's values.
-            hierarchy.set(keyToString(info.key), {
+            nodes.set(keyToString(info.key), {
               pointCount: info.pointCount,
               bounds: info.bounds,
               spacing: info.spacing,
@@ -1169,56 +1000,15 @@ export const createLodController = (
     }
   };
 
-  const childrenOf = (
-    key: VoxelKey,
-    entry: HierarchyEntry,
-  ): readonly VoxelKey[] =>
-    entry.children ??
-    childKeys(key).filter((child) => hierarchy.has(keyToString(child)));
-
-  const samePrefixes = (
-    left: ReadonlyMap<string, number>,
-    right: ReadonlyMap<string, number>,
-  ): boolean => {
-    if (left.size !== right.size) return false;
-    for (const [key, count] of left) {
-      if (right.get(key) !== count) return false;
-    }
-    return true;
-  };
-
-  /**
-   * Thin every selected tile to the governor's draw allowance.
-   *
-   * Selection and residency stay unchanged: only the progressive VBO prefixes
-   * move, and they move together. Every tile keeps the same fraction of its
-   * points, so a reduced allowance reads as a uniformly sparser cloud rather
-   * than as whole tiles dropping out of the deepest levels while their
-   * neighbours stay dense.
-   */
+  /** Re-plan the prefixes, and hand them on only when one of them moved. */
   const updateDrawPlan = (): void => {
-    const prefixes = new Map<string, number>();
-    let plannedPoints = 0;
-    for (const keyString of target) {
-      const entry = hierarchy.get(keyString);
-      if (entry === undefined || entry.pointCount === 0) continue;
-      const prefix = Math.min(
-        entry.pointCount,
-        Math.ceil(entry.pointCount * densityFraction),
-      );
-      prefixes.set(keyString, prefix);
-      plannedPoints += prefix;
-    }
-    const changed = !samePrefixes(drawPrefixes, prefixes);
-    drawPrefixes = prefixes;
-    drawPlanStats = {
-      revision: drawPlanStats.revision + (changed ? 1 : 0),
-      pointBudget: Math.floor(selectionStats.targetPoints * densityFraction),
-      plannedPoints,
-    };
+    const next = planDraw(selection.target, nodes, densityFraction);
+    const changed = !samePrefixes(plan.prefixes, next.prefixes);
+    plan = next;
     if (!changed) return;
+    drawPlanRevision += 1;
     onDrawPlan({
-      entries: [...drawPrefixes].map(([keyString, pointCount]) => ({
+      entries: [...plan.prefixes].map(([keyString, pointCount]) => ({
         key: keyFromString(keyString),
         pointCount,
       })),
@@ -1226,116 +1016,24 @@ export const createLodController = (
   };
 
   /**
-   * The projected spacing a terminal's drawn prefix leaves on screen, null
-   * when it draws nothing. Thinning a tile to a prefix spreads its points, so
-   * the node's own screen-space error is scaled by the prefix's density.
-   */
-  const terminalSpacing = (
-    keyString: string,
-    entry: HierarchyEntry,
-  ): number | null => {
-    const prefix = drawPrefixes.get(keyString) ?? 0;
-    if (entry.pointCount === 0 || prefix <= 0) return null;
-    return sseFor(keyString) * projectedSpacingScale(prefix / entry.pointCount);
-  };
-
-  /**
-   * Walk the selected tree down to its terminals — the nodes where refinement
-   * stopped, because they are leaves, fall under the refinement cutoff, or
-   * have a visible child the selection did not take.
-   *
-   * The walk follows the selection rather than what has landed. Several fine
-   * tiles arriving under a coarse diameter would otherwise make their parent
-   * cease to be a terminal and shrink every actor at once, producing a
-   * dense -> sparse -> dense sequence under an unchanged selection.
-   */
-  const walkTerminals = (
-    planes: readonly Plane[],
-    onTerminal: (keyString: string, entry: HierarchyEntry) => void,
-  ): void => {
-    const walk = (key: VoxelKey): void => {
-      const keyString = keyToString(key);
-      if (!target.has(keyString)) return;
-      const entry = hierarchy.get(keyString);
-      if (entry === undefined) return;
-
-      const children = childrenOf(key, entry);
-      if (children.length === 0 || sseFor(keyString) < refinementCutoffPx) {
-        onTerminal(keyString, entry);
-        return;
-      }
-
-      let blocked = false;
-      const openChildren: VoxelKey[] = [];
-      for (const child of children) {
-        const childString = keyToString(child);
-        const childEntry = hierarchy.get(childString);
-        if (childEntry === undefined) {
-          blocked = true;
-          continue;
-        }
-        if (!boundsIntersectsFrustum(planes, childEntry.bounds)) continue;
-        // Matches selection: an invisible page reference is not requested, so
-        // it is not blocking anything either.
-        if (childEntry.pageRef && !pagesLoaded.has(childString)) {
-          blocked = true;
-          continue;
-        }
-        // A visible, available child of a selected parent can only be absent
-        // because the breadth-first point budget rejected it.
-        if (!target.has(childString)) {
-          blocked = true;
-          continue;
-        }
-        openChildren.push(child);
-      }
-
-      if (blocked) onTerminal(keyString, entry);
-      for (const child of openChildren) walk(child);
-    };
-
-    walk(ROOT_KEY);
-  };
-
-  /**
-   * The coarsest projected spacing any terminal leaves on screen, or null when
-   * nothing is drawn. Auto sizing derives the point diameter from it, and it
-   * is the one continuous measure of how finely the current view is resolved.
-   */
-  let largestTerminalSpacingCssPx: number | null = null;
-
-  /**
-   * Size Auto points for the density the selection is converging on, not the
-   * subset that has finished loading: the diameter moves once, with the
-   * selection, and tile arrivals only add detail. Hierarchy- and
-   * budget-blocked branches keep their closest sampled parent as a terminal,
-   * because no selected descendant describes a finer density there.
+   * Size Auto points for the density the selection is converging on, not
+   * the subset that has finished loading: the diameter moves once, with the
+   * selection, and tile arrivals only add detail.
    */
   const updateAutoDiameter = (): void => {
-    if (
-      view === null ||
-      drawPlanStats.plannedPoints <= 0 ||
-      !target.has(ROOT_KEY_STRING)
-    ) {
-      largestTerminalSpacingCssPx = null;
-      return;
-    }
-
-    let largestSpacing: number | null = null;
-    walkTerminals(view.planes, (keyString, entry) => {
-      const spacing = terminalSpacing(keyString, entry);
-      if (spacing !== null)
-        largestSpacing = Math.max(largestSpacing ?? 0, spacing);
-    });
-    largestTerminalSpacingCssPx = largestSpacing;
-
-    if (largestSpacing !== null && presentation.mode === "auto") {
+    largestTerminalSpacingCssPx =
+      view === null
+        ? null
+        : largestTerminalSpacing({
+            target: selection.target,
+            hierarchy,
+            view,
+            refinementCutoffPx,
+            plan,
+          });
+    if (largestTerminalSpacingCssPx !== null && presentation.mode === "auto") {
       emitDiameter(
-        presentation.userScale *
-          Math.min(
-            presentation.maxDiameterCssPx,
-            Math.max(presentation.minDiameterCssPx, largestSpacing),
-          ),
+        autoDiameterCssPx(presentation, largestTerminalSpacingCssPx),
       );
     }
   };
@@ -1348,7 +1046,7 @@ export const createLodController = (
     ) {
       const keyString = queue.shift()!;
       if (
-        !target.has(keyString) ||
+        !selection.target.has(keyString) ||
         resident.has(keyString) ||
         tileReads.has(keyString)
       ) {
@@ -1386,7 +1084,7 @@ export const createLodController = (
           // Cancellation is advisory, so a cancelled read can still deliver.
           // If the key was reselected while it ran, this payload is exactly
           // what the selection is waiting for.
-          if (target.has(keyString) && !resident.has(keyString)) {
+          if (selection.target.has(keyString) && !resident.has(keyString)) {
             takeResident(keyString, loadedTile);
             scheduleFlush();
           } else {
@@ -1406,10 +1104,13 @@ export const createLodController = (
           if (!isAbortError(error)) {
             recordFailure(tileFailures, keyString);
             onError(error);
-            if (target.has(keyString) && !resident.has(keyString)) {
+            if (selection.target.has(keyString) && !resident.has(keyString)) {
               scheduleTileRetry(keyString);
             }
-          } else if (target.has(keyString) && !resident.has(keyString)) {
+          } else if (
+            selection.target.has(keyString) &&
+            !resident.has(keyString)
+          ) {
             // A source that honours the signal really stopped, and the key was
             // reselected while the read was cancelled: it needs a fresh one.
             queue.unshift(keyString);
@@ -1420,81 +1121,25 @@ export const createLodController = (
     }
   };
 
-  const rootVisible = (planes: readonly Plane[]): boolean => {
-    const root = hierarchy.get(ROOT_KEY_STRING);
-    return root !== undefined && boundsIntersectsFrustum(planes, root.bounds);
-  };
-
   const runSelection = (seed?: ReadonlySet<string>): void => {
     if (disposed || !active || view === null) return;
-    const budget = currentBudget();
-    const planes = view.planes;
-    const sse = (key: VoxelKey): number => sseFor(keyToString(key));
-    const previousTarget = target;
-    const centerHysteresis = centerOffsetHysteresis(view.view);
-    const centerPriority = (key: VoxelKey): number => {
-      const keyString = keyToString(key);
-      return (
-        -centerOffsetFor(keyString) +
-        (previousTarget.has(keyString) ? centerHysteresis : 0)
-      );
-    };
-
-    const neededPages: VoxelKey[] = [];
-    let sseStoppedNodes = 0;
-    const selection = selectNodes({
-      root: ROOT_KEY,
-      pointBudget: budget,
-      priority: centerPriority,
-      secondaryPriority: sse,
+    const previous = selection.target;
+    selection = selectPoints({
+      hierarchy,
+      view,
+      pointBudget: currentBudget(),
+      refinementCutoffPx,
+      previous,
       seed,
-      getNode: (key) => {
-        const keyString = keyToString(key);
-        const entry = hierarchy.get(keyString);
-        if (entry === undefined) return undefined;
-        // Culling comes first: a page reference carries the bounds of the
-        // subtree it stands for, so an invisible one must not be requested at
-        // all. Reading it would spend a hierarchy slot on a region no
-        // selection can use, which is precisely the fan-out the page queue
-        // exists to bound.
-        if (!boundsIntersectsFrustum(planes, entry.bounds)) return undefined;
-        if (entry.pageRef && !pagesLoaded.has(keyString)) {
-          neededPages.push(key);
-          return undefined;
-        }
-        const children = childrenOf(key, entry);
-        if (children.length > 0 && sse(key) < refinementCutoffPx) {
-          sseStoppedNodes += 1;
-          return { pointCount: entry.pointCount, children: [] };
-        }
-        return { pointCount: entry.pointCount, children };
-      },
     });
-
-    target = selection.selected;
+    const target = selection.target;
     if (
-      previousTarget.size !== target.size ||
-      [...target].some((keyString) => !previousTarget.has(keyString))
+      previous.size !== target.size ||
+      [...target].some((keyString) => !previous.has(keyString))
     ) {
       targetRevision += 1;
     }
     selectionGeneration += 1;
-    selectionStats = {
-      generation: selectionGeneration,
-      targetRevision,
-      targetTiles: target.size,
-      targetPoints: selection.totalPoints,
-      consideredNodes: selection.consideredNodes,
-      availableNodes: selection.availableNodes,
-      sseStoppedNodes,
-      budgetSkippedNodes: selection.budgetSkipped.size,
-      budgetSkippedPoints: selection.budgetSkippedPoints,
-      // Importance says whether the cloud is in view, not whether the budget
-      // admitted anything. A root larger than the budget selects nothing, and
-      // reporting that as culled would earn the cloud no quality, and so no
-      // budget that could ever admit its root.
-      projectedImportance: rootVisible(planes) ? sse(ROOT_KEY) : 0,
-    };
     updateDrawPlan();
     updateAutoDiameter();
     // The root page bootstraps the hierarchy, so it can never come back
@@ -1504,16 +1149,16 @@ export const createLodController = (
     // to the front, and queuePages drops anything already held, in flight, or
     // resting, so this costs nothing on the normal path.
     queuePages(
-      pagesLoaded.has(ROOT_KEY_STRING)
-        ? neededPages.map(keyToString)
-        : [ROOT_KEY_STRING, ...neededPages.map(keyToString)],
+      loadedPages.has(ROOT_KEY_STRING)
+        ? selection.neededPages
+        : [ROOT_KEY_STRING, ...selection.neededPages],
     );
 
     // Deselected submitted tiles leave renderer/GPU residency immediately.
     // `releaseResident` deletes only the key it is handed, which is safe to do
     // while iterating the map it deletes from — no snapshot needed.
     for (const keyString of resident.keys()) {
-      if (target.has(keyString)) continue;
+      if (selection.target.has(keyString)) continue;
       releaseResident(keyString);
     }
 
@@ -1521,7 +1166,7 @@ export const createLodController = (
     // The read keeps its physical slot until it settles: dropping its entry
     // would let a reselect race a second read against work still running.
     for (const [keyString, read] of tileReads) {
-      if (target.has(keyString)) continue;
+      if (selection.target.has(keyString)) continue;
       cancelRead(read);
     }
 
@@ -1538,9 +1183,8 @@ export const createLodController = (
         adoptRead(read);
         continue;
       }
-      const entry = hierarchy.get(keyString);
       // Structural hierarchy nodes participate in selection but carry no tile.
-      if (entry?.pointCount === 0) continue;
+      if (nodes.get(keyString)?.pointCount === 0) continue;
       if (promoteCached(keyString)) continue;
       if (resting(tileFailures, keyString)) {
         // Its rest ends on the clock, not on a selection pass: a key that
@@ -1555,6 +1199,21 @@ export const createLodController = (
 
     scheduleFlush();
     pump();
+  };
+
+  /**
+   * Rerun selection after the budget moved. A larger budget that still covers
+   * the current selection keeps it as a seed, so growth only adds detail.
+   */
+  const reselectForBudget = (previousBudget: number): void => {
+    const nextBudget = currentBudget();
+    runSelection(
+      nextBudget > previousBudget &&
+        selection.target.size > 0 &&
+        selection.targetPoints <= nextBudget
+        ? selection.target
+        : undefined,
+    );
   };
 
   let lastSelection = Number.NEGATIVE_INFINITY;
@@ -1587,6 +1246,11 @@ export const createLodController = (
     }
   };
 
+  const clearSelection = (): void => {
+    if (selection.target.size > 0) targetRevision += 1;
+    selection = EMPTY_SELECTION;
+  };
+
   const dropEverything = (): void => {
     // The epoch bump is what makes every outstanding result irrelevant. The
     // physical operation counts are deliberately left alone: the reads and
@@ -1604,17 +1268,12 @@ export const createLodController = (
     pagesInFlight.clear();
     queue = [];
     pageQueue = [];
-    hierarchy.clear();
-    pagesLoaded.clear();
+    nodes.clear();
+    loadedPages.clear();
     pageFailures.clear();
     tileFailures.clear();
     cache.clear();
-    if (target.size > 0) targetRevision += 1;
-    target = new Set();
-    selectionStats = emptySelectionStats(
-      selectionStats.generation,
-      targetRevision,
-    );
+    clearSelection();
     resident.clear();
     residentPoints = 0;
     residentBytes = 0;
@@ -1672,17 +1331,10 @@ export const createLodController = (
       if (disposed || !finiteNonNegative(points)) return;
       const previousBudget = currentBudget();
       pointBudget = Math.floor(points);
-      const nextBudget = currentBudget();
       // The same budget selects the same frontier: rerunning it would only
       // report work and ask for another allocation.
-      if (nextBudget === previousBudget) return;
-      runSelection(
-        nextBudget > previousBudget &&
-          target.size > 0 &&
-          selectionStats.targetPoints <= nextBudget
-          ? target
-          : undefined,
-      );
+      if (currentBudget() === previousBudget) return;
+      reselectForBudget(previousBudget);
     },
 
     setDensityFraction(nextDensityFraction) {
@@ -1705,14 +1357,7 @@ export const createLodController = (
       if (next === externalMemoryBudgetBytes) return;
       const previousBudget = currentBudget();
       externalMemoryBudgetBytes = next;
-      const nextBudget = currentBudget();
-      runSelection(
-        nextBudget > previousBudget &&
-          target.size > 0 &&
-          selectionStats.targetPoints <= nextBudget
-          ? target
-          : undefined,
-      );
+      reselectForBudget(previousBudget);
     },
 
     setSource(nextSource) {
@@ -1773,10 +1418,8 @@ export const createLodController = (
         cancelRead(read, true);
       }
 
-      if (target.size > 0) targetRevision += 1;
-      target = new Set();
+      clearSelection();
       selectionGeneration += 1;
-      selectionStats = emptySelectionStats(selectionGeneration, targetRevision);
       updateDrawPlan();
 
       // Nothing stays resident while hidden; the flush turns that into
@@ -1791,9 +1434,8 @@ export const createLodController = (
         workPending: workPending(),
         memoryBudgetBytes: memoryBudgetBytes(),
         memoryCeilingPoints: memoryCeilingPoints(),
-        projectedImportance: selectionStats.projectedImportance,
-        demandPoints:
-          selectionStats.targetPoints + selectionStats.budgetSkippedPoints,
+        projectedImportance: selection.rootSseCssPx,
+        demandPoints: selection.targetPoints + selection.budgetSkippedPoints,
         physicalTileOperations,
         physicalHierarchyOperations,
       };
@@ -1803,9 +1445,9 @@ export const createLodController = (
       const cachedBytes = cache.totalBytes();
       let targetUndecodedTiles = 0;
       let restingTiles = 0;
-      for (const keyString of target) {
+      for (const keyString of selection.target) {
         if (
-          hierarchy.get(keyString)?.pointCount !== 0 &&
+          nodes.get(keyString)?.pointCount !== 0 &&
           !resident.has(keyString) &&
           !cache.has(keyString)
         ) {
@@ -1845,7 +1487,11 @@ export const createLodController = (
         pointBudget: currentBudget(),
         densityFraction,
         drawnPoints,
-        drawPlan: drawPlanStats,
+        drawPlan: {
+          revision: drawPlanRevision,
+          pointBudget: Math.floor(selection.targetPoints * densityFraction),
+          plannedPoints: plan.plannedPoints,
+        },
         memoryBudgetBytes: memoryBudgetBytes(),
         memoryCeilingPoints: memoryCeilingPoints(),
         interactionDepth,
@@ -1857,15 +1503,17 @@ export const createLodController = (
         cacheBytes,
         refinementCutoffPx,
         selection: {
-          ...selectionStats,
+          generation: selectionGeneration,
+          targetRevision,
+          targetTiles: selection.target.size,
+          targetPoints: selection.targetPoints,
+          consideredNodes: selection.consideredNodes,
+          availableNodes: selection.availableNodes,
+          sseStoppedNodes: selection.sseStoppedNodes,
+          budgetSkippedNodes: selection.budgetSkippedNodes,
+          budgetSkippedPoints: selection.budgetSkippedPoints,
+          projectedImportance: selection.rootSseCssPx,
           projectedSpacingCssPx: largestTerminalSpacingCssPx,
-          // Live, not a selection-time snapshot: how many selected tiles have
-          // no decoded payload anywhere (neither resident nor cached). This
-          // is the number that distinguishes "the burst issued no reads
-          // because everything it wanted was already decoded" from "it
-          // wanted tiles it does not hold and read nothing" — a global
-          // decoded count cannot, because tiles decoded for *other*
-          // selections mask the deficit.
           targetUndecodedTiles,
         },
       };
@@ -1885,7 +1533,7 @@ export const createLodController = (
           origin: tile.origin,
           positions: tile.positions,
           pointCount,
-          bounds: hierarchy.get(keyString)?.bounds,
+          bounds: nodes.get(keyString)?.bounds,
         });
       }
       const result = pickPointInTiles(
