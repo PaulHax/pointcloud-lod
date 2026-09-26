@@ -118,6 +118,7 @@ describe("createRendererAdapter", () => {
     expect(mapperInstances[0]!.pointSizeScale).toBe(2);
     expect(mapperInstances[0]!.maximumPointCount).toBe(2);
     expect(actorInstances[0]!.pointSize).toBe(3);
+    expect(actorInstances[0]!.forceOpaque).toBe(true);
     // Identity base: the tile matrix is a plain translation to the origin.
     expect(actorInstances[0]!.userMatrix!.slice(12, 15)).toEqual([10, 20, 30]);
   });

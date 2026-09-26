@@ -324,6 +324,9 @@ export const createRendererAdapter = (
     mapper.setStatic?.(true);
     const actor = vtkActor.newInstance();
     actor.setMapper(mapper);
+    // Points carry no alpha. Saying so up front spares vtk.js asking the
+    // mapper, which looks its scalars up again, in several passes a frame.
+    actor.setForceOpaque(true);
     const entry: TileActors = {
       actor,
       mapper,
