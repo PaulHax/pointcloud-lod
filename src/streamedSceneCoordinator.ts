@@ -14,6 +14,7 @@ import {
 import {
   CULLED,
   type Allocation,
+  type AllocationRegime,
   type DecodeWorkerPool,
   type GovernorInputs,
   type Importance,
@@ -89,19 +90,12 @@ export type StreamedCoordinatorMemberStats = {
 };
 
 export type StreamedSceneCoordinatorStats = {
+  /** The governor's fraction now; members hold it from the next prepared frame. */
   readonly viewQualityFraction: number;
   readonly targetOverrideMemberId: string | null;
   readonly governor: ViewGovernorStats;
   readonly submissions: ReturnType<SubmissionScheduler["stats"]>;
   readonly stalledMembers: readonly string[];
-  /**
-   * Refreshes that hit the pass cap with an allocation change still pending.
-   *
-   * Nothing is lost when one does — the next frame refreshes again — but a
-   * scene whose members never stop trading quality would otherwise be
-   * invisible. A number that climbs with the frame count is that scene.
-   */
-  readonly exhaustedRefreshes: number;
   readonly members: readonly StreamedCoordinatorMemberStats[];
 };
 
@@ -123,14 +117,23 @@ export type StreamedSceneCoordinator = {
   setQualityTargets(targets: AdaptiveQualityTargets): void;
   beginInteraction(): void;
   endInteraction(): void;
-  /** Member preparation followed by the shared admission drain. */
+  /**
+   * Run immediately before each paint: member preparation, the shared
+   * admission drain, one read of every member's inputs, and the frame's
+   * allocations. This is the only place members receive allocations.
+   */
   prepareFrame(frameSerial: number): void;
   /**
    * Report one presented frame. The verdict says whether the governor took it
    * as a capacity sample, whether that sample may train quality, and the
    * regime it counted toward, so a host never has to read `stats()` per frame.
+   * It applies nothing: a quality change lands at the next `prepareFrame`.
    */
   recordHostFrame(metrics: HostFrameMetrics): FrameVerdict;
+  /**
+   * Whether the view owes another frame: queued submissions, a governor that
+   * is still measuring, or an allocation that has changed since it was applied.
+   */
   needsFrame(): boolean;
   /** Diagnostics as last observed. Reading them calls no member. */
   stats(): StreamedSceneCoordinatorStats;
@@ -209,6 +212,43 @@ const copyCameraView = (view: CameraView): CameraView => ({
   viewProj: Array.from(view.viewProj) as Mat16,
 });
 
+const isAdaptive = (state: MemberState): boolean =>
+  state.active && state.qualityManaged;
+
+/**
+ * What every member should hold: the view fraction water-filled across the
+ * adaptive members by their last-read inputs, full quality for fixed members,
+ * each active member's page memory share, and nothing for inactive members.
+ */
+const allocate = (
+  states: readonly MemberState[],
+  viewFraction: number,
+  regime: AllocationRegime,
+): ReadonlyMap<MemberState, Allocation> => {
+  const quality = allocateViewQuality(
+    states
+      .filter(isAdaptive)
+      .map((state) => ({ key: state, inputs: state.inputs })),
+    viewFraction,
+  );
+  return new Map(
+    states.map((state) => [
+      state,
+      {
+        qualityFraction: !state.active
+          ? 0
+          : state.qualityManaged
+            ? (quality.get(state) ?? 0)
+            : 1,
+        memoryBudgetBytes: state.active
+          ? (state.memoryMember?.budgetBytes() ?? 0)
+          : 0,
+        regime,
+      },
+    ]),
+  );
+};
+
 export const createStreamedSceneCoordinator = (
   options: StreamedSceneCoordinatorOptions,
 ): StreamedSceneCoordinator => {
@@ -227,11 +267,9 @@ export const createStreamedSceneCoordinator = (
   let stallTimer: ReturnType<typeof setTimeout> | null = null;
   let lastPreparedFrameSerial = -1;
   let capacityWorkSinceLastReport = false;
-  let refreshing = false;
-  let reportedWorkPending = false;
-  let refreshPending = false;
-  let exhaustedRefreshes = 0;
-  let viewQualityFraction = 1;
+  // Some member may now report different inputs than the ones last read.
+  let inputsStale = false;
+  let checkQueued = false;
   let globalQualityTargets: AdaptiveQualityTargets | undefined;
   let appliedTargetState: MemberState | null = null;
   let appliedTargets: AdaptiveQualityTargets | undefined;
@@ -251,74 +289,66 @@ export const createStreamedSceneCoordinator = (
   });
   const governor = createViewGovernor(governorOptions());
 
-  const invalidateCapacity = (): void => {
-    if (disposed || governor.frameCount() === 0) return;
-    governor.invalidateCapacity();
-    // Reject the presentation spanning the mutation as well as the previous
-    // workload's samples. A style or visibility change may enqueue no work.
-    capacityWorkSinceLastReport = true;
-    if (Array.from(members).some(isAdaptive)) options.scheduleRender();
+  const hasAdaptiveMember = (): boolean => {
+    for (const state of members) if (isAdaptive(state)) return true;
+    return false;
+  };
+
+  const plannedAllocations = (): ReadonlyMap<MemberState, Allocation> =>
+    allocate(
+      [...members],
+      governor.qualityFraction(),
+      governor.regime() === "interaction" ? "moving" : "stationary",
+    );
+
+  const allocationOutdated = (): boolean => {
+    for (const [state, next] of plannedAllocations()) {
+      if (!sameAllocation(next, state.allocation)) return true;
+    }
+    return false;
   };
 
   const applyAllocations = (): void => {
-    if (disposed) return;
-    const regime =
-      governor.regime() === "interaction" ? "moving" : "stationary";
-    const contenders = [];
-    for (const state of members) {
-      if (isAdaptive(state))
-        contenders.push({ key: state, inputs: state.inputs });
-    }
-    viewQualityFraction = governor.qualityFraction();
-    const quality = allocateViewQuality(contenders, viewQualityFraction);
-    for (const state of members) {
-      const next: Allocation = {
-        qualityFraction:
-          state.active && state.qualityManaged
-            ? (quality.get(state) ?? 0)
-            : state.active
-              ? 1
-              : 0,
-        memoryBudgetBytes: state.active
-          ? (state.memoryMember?.budgetBytes() ?? 0)
-          : 0,
-        regime,
-      };
+    for (const [state, next] of plannedAllocations()) {
       if (sameAllocation(next, state.allocation)) continue;
       state.allocation = next;
       state.member.applyAllocation(next);
     }
   };
 
-  const isAdaptive = (state: MemberState): boolean =>
-    state.active && state.qualityManaged;
-
-  const adaptiveStates = (): MemberState[] => [...members].filter(isAdaptive);
-
-  const hasAdaptiveMember = (): boolean => {
-    for (const state of members) if (isAdaptive(state)) return true;
-    return false;
+  const invalidateCapacity = (): void => {
+    if (disposed || governor.frameCount() === 0) return;
+    governor.invalidateCapacity();
+    // Reject the presentation spanning the mutation as well as the previous
+    // workload's samples. A style or visibility change may enqueue no work.
+    capacityWorkSinceLastReport = true;
+    if (hasAdaptiveMember()) options.scheduleRender();
   };
 
-  /**
-   * Passes one `refresh` will make before leaving the rest to the next one.
-   *
-   * Applying an allocation calls back into the member, which reports the work
-   * that allocation created, which is another refresh — so a refresh has to
-   * re-run until the allocations stop changing, and two members sharing one
-   * quality budget can trade it back and forth without ever settling. The cap
-   * bounds that. Nothing is lost by stopping: every frame refreshes again, and
-   * the work state a dropped pass would have written is recomputed from the
-   * members rather than accumulated.
-   */
-  const MAX_REFRESH_PASSES = 8;
-
-  const refreshOnce = (): void => {
-    for (const state of members) {
-      state.inputs = state.active
-        ? normalizeInputs(state.member.governorInputs())
-        : EMPTY_INPUTS;
+  const updateTargets = (): void => {
+    // Insertion order is the conflict rule. A hidden managed member yields
+    // to the first active one and regains precedence if it is shown again.
+    // Only adaptive point members supply a target bag. A tiles member is
+    // quality-managed too, but must not mask the first adaptive point's
+    // stable registry-order override; a tiles-only view uses defaults.
+    const targetState = globalQualityTargets
+      ? null
+      : ([...members].find(
+          (state) => isAdaptive(state) && state.qualityTargets !== undefined,
+        ) ?? null);
+    const nextTargets = globalQualityTargets ?? targetState?.qualityTargets;
+    if (
+      targetState === appliedTargetState &&
+      sameTargets(nextTargets, appliedTargets)
+    ) {
+      return;
     }
+    governor.setOptions(governorOptions(nextTargets));
+    appliedTargetState = targetState;
+    appliedTargets = nextTargets ? { ...nextTargets } : undefined;
+  };
+
+  const updateStalls = (): void => {
     if (stallTimer !== null) clearTimeout(stallTimer);
     stallTimer = null;
     const checkedAt = now();
@@ -357,84 +387,85 @@ export const createStreamedSceneCoordinator = (
       }
     }
     if (Number.isFinite(nextStallDelay)) {
-      stallTimer = setTimeout(refresh, Math.max(1, Math.ceil(nextStallDelay)));
+      stallTimer = setTimeout(
+        markStale,
+        Math.max(1, Math.ceil(nextStallDelay)),
+      );
     }
-    // Insertion order is the conflict rule. A hidden managed member yields
-    // to the first active one and regains precedence if it is shown again.
-    const adaptive = adaptiveStates();
-    // Only adaptive point members supply a target bag. A tiles member is
-    // quality-managed too, but must not mask the first adaptive point's
-    // stable registry-order override; a tiles-only view uses defaults.
-    const targetState = globalQualityTargets
-      ? null
-      : (adaptive.find((state) => state.qualityTargets !== undefined) ?? null);
-    const nextTargets = globalQualityTargets ?? targetState?.qualityTargets;
-    if (
-      targetState !== appliedTargetState ||
-      !sameTargets(nextTargets, appliedTargets)
-    ) {
-      governor.setOptions(governorOptions(nextTargets));
-      appliedTargetState = targetState;
-      appliedTargets = nextTargets ? { ...nextTargets } : undefined;
+  };
+
+  /**
+   * Read every member's inputs once and derive the view's work state from
+   * them. Members are only read here, apart from a first stall report.
+   * Returns whether the view's work just drained.
+   */
+  const observe = (): boolean => {
+    inputsStale = false;
+    for (const state of members) {
+      state.inputs = state.active
+        ? normalizeInputs(state.member.governorInputs())
+        : EMPTY_INPUTS;
     }
+    updateStalls();
     // Fixed members do not consume normalized quality, but their frame cost
     // and incomplete work still contaminate the same view-wide sample.
     let tileOperations = 0;
     let hierarchyOperations = 0;
     let pending = submissions.hasPending();
     for (const state of members) {
-      if (!state.active) continue;
-      if (!state.stalled) {
-        tileOperations += state.inputs.physicalTileOperations;
-        hierarchyOperations += state.inputs.physicalHierarchyOperations;
-        pending = pending || state.inputs.work.operations > 0;
-      }
+      if (!state.active || state.stalled) continue;
+      tileOperations += state.inputs.physicalTileOperations;
+      hierarchyOperations += state.inputs.physicalHierarchyOperations;
+      pending ||= state.inputs.work.operations > 0;
     }
-    reportedWorkPending =
-      pending || tileOperations > 0 || hierarchyOperations > 0;
-    capacityWorkSinceLastReport ||= reportedWorkPending;
+    const wasPending = governor.workPending();
     governor.setWorkState({
       physicalTileOperations: tileOperations,
       physicalHierarchyOperations: hierarchyOperations,
       workPending: pending,
     });
-    applyAllocations();
+    const nowPending = governor.workPending();
+    capacityWorkSinceLastReport ||= nowPending;
+    return wasPending && !nowPending;
   };
 
-  const refresh = (): void => {
-    if (disposed) return;
-    // A refresh raised from inside a refresh — an allocation's own work change
-    // — is remembered rather than dropped, and rather than recursing into a
-    // second pass on top of the first. Recursing is what this guard exists to
-    // stop: the member callbacks are several frames deep already, and a scene
-    // whose members trade quality would exhaust the stack rather than settle.
-    if (refreshing) {
-      refreshPending = true;
-      return;
-    }
-    const wasPending = reportedWorkPending;
-    refreshing = true;
+  /**
+   * Cancellation and budget backoff can finish without submitting an actor,
+   * and the governor still needs a frame to measure the result.
+   */
+  const owesMeasurement = (drained: boolean): boolean =>
+    drained && hasAdaptiveMember();
+
+  /**
+   * The coalesced answer to stale inputs: read them, keep the work state
+   * current, and ask for a frame when one is owed. It applies nothing.
+   *
+   * The check counts as queued until it returns, so nothing it calls can
+   * queue another: a member that reports work whenever it is read cannot hold
+   * the page inside microtasks. Such a report still marks the inputs stale,
+   * and the next frame reads them.
+   */
+  const checkInputs = (): void => {
     try {
-      let pass = 0;
-      do {
-        refreshPending = false;
-        refreshOnce();
-        pass += 1;
-      } while (refreshPending && !disposed && pass < MAX_REFRESH_PASSES);
-      if (refreshPending && !disposed) exhaustedRefreshes += 1;
-    } finally {
-      refreshing = false;
-      // Cancellation and budget backoff can finish without submitting an
-      // actor. Still present a frame so the governor can measure the result.
-      if (
-        !disposed &&
-        wasPending &&
-        !reportedWorkPending &&
-        hasAdaptiveMember()
-      ) {
+      if (disposed || !inputsStale) return;
+      if (owesMeasurement(observe()) || allocationOutdated()) {
         options.scheduleRender();
       }
+    } finally {
+      checkQueued = false;
     }
+  };
+
+  /**
+   * Record that some member's inputs, or an allocation, may have changed.
+   * At most one check is queued at a time, and this never calls a member.
+   */
+  const markStale = (): void => {
+    if (disposed) return;
+    inputsStale = true;
+    if (checkQueued) return;
+    checkQueued = true;
+    queueMicrotask(checkInputs);
   };
 
   return {
@@ -447,7 +478,7 @@ export const createStreamedSceneCoordinator = (
       textureCapabilities:
         options.textureCapabilities ?? EMPTY_TEXTURE_CAPABILITIES,
       devicePixelRatio,
-      onWorkChange: refresh,
+      onWorkChange: markStale,
     }),
 
     register(member, registration = {}) {
@@ -482,9 +513,9 @@ export const createStreamedSceneCoordinator = (
         };
       }
       members.add(state);
-      if (state.active) invalidateCapacity();
       if (state.active) {
-        state.memoryMember = memory.register(refresh);
+        invalidateCapacity();
+        state.memoryMember = memory.register(markStale);
       }
       member.setActive(state.active);
       // A member can be realized or rebuilt while the view is already inside
@@ -494,7 +525,8 @@ export const createStreamedSceneCoordinator = (
       for (let index = 0; index < motionReferences.length; index += 1) {
         member.beginInteraction();
       }
-      refresh();
+      updateTargets();
+      markStale();
       let released = false;
       let lastCamera: CameraView | null = null;
       let lastModelMatrix: Mat16 | null = null;
@@ -506,7 +538,7 @@ export const createStreamedSceneCoordinator = (
           if (lastCamera !== null && sameCameraView(lastCamera, view)) return;
           lastCamera = copyCameraView(view);
           state.member.setCamera(view);
-          refresh();
+          markStale();
         },
         setModelMatrix(matrix) {
           if (released || disposed) return;
@@ -515,7 +547,7 @@ export const createStreamedSceneCoordinator = (
           lastModelMatrix =
             matrix === null ? null : (Array.from(matrix) as Mat16);
           state.member.setModelMatrix(matrix);
-          refresh();
+          markStale();
         },
         setDevicePixelRatio(devicePixelRatio) {
           if (released || disposed) return;
@@ -527,19 +559,20 @@ export const createStreamedSceneCoordinator = (
           if (released || disposed || active === state.active) return;
           state.active = active;
           invalidateCapacity();
-          if (active) state.memoryMember = memory.register(refresh);
+          if (active) state.memoryMember = memory.register(markStale);
           else {
             state.memoryMember?.release();
             state.memoryMember = null;
           }
           state.member.setActive(active);
-          refresh();
+          updateTargets();
+          markStale();
         },
         setConfig(kindConfig) {
           if (released || disposed) return;
           if (state.active) invalidateCapacity();
           state.member.setConfig(kindConfig);
-          refresh();
+          markStale();
         },
         setQualityPolicy(managed, targets) {
           if (released || disposed) return;
@@ -551,18 +584,19 @@ export const createStreamedSceneCoordinator = (
           state.qualityManaged = managed;
           state.qualityTargets = targets;
           if (state.active) invalidateCapacity();
-          refresh();
+          updateTargets();
+          markStale();
         },
         release() {
           if (released) return;
           released = true;
-          if (members.delete(state)) {
-            if (state.active) invalidateCapacity();
-            state.memoryMember?.release();
-            state.memoryMember = null;
-            state.member.dispose();
-            refresh();
-          }
+          if (!members.delete(state)) return;
+          if (state.active) invalidateCapacity();
+          state.memoryMember?.release();
+          state.memoryMember = null;
+          state.member.dispose();
+          updateTargets();
+          markStale();
         },
       };
     },
@@ -570,27 +604,27 @@ export const createStreamedSceneCoordinator = (
     noteRenderedCameras(views) {
       if (disposed) return;
       governor.noteRenderedCameras(views, options.scheduleRender);
-      refresh();
     },
 
     setQualityTargets(targets) {
       if (disposed || sameTargets(globalQualityTargets, targets)) return;
       globalQualityTargets = { ...targets };
-      refresh();
+      updateTargets();
+      markStale();
     },
 
     beginInteraction() {
       if (disposed) return;
       motionReferences.push(governor.beginMotion("explicit"));
       for (const state of members) state.member.beginInteraction();
-      refresh();
+      markStale();
     },
 
     endInteraction() {
       if (disposed) return;
       motionReferences.pop()?.release();
       for (const state of members) state.member.endInteraction();
-      refresh();
+      markStale();
     },
 
     prepareFrame(frameSerial) {
@@ -606,7 +640,11 @@ export const createStreamedSceneCoordinator = (
       submissions.prepareFrame();
       capacityWorkSinceLastReport ||=
         submissions.stats().lastFrameAdmittedJobs > 0;
-      refresh();
+      const owed = owesMeasurement(observe());
+      // One application per frame and no loop: whatever a member reports in
+      // answer is read by the next check and applied at the next frame.
+      applyAllocations();
+      if (owed) options.scheduleRender();
     },
 
     recordHostFrame(metrics) {
@@ -618,7 +656,6 @@ export const createStreamedSceneCoordinator = (
       if (disposed || !finiteNonNegative(metrics?.hostFrameMs)) {
         return unsampled();
       }
-      refresh();
       // Fixed-only views have no adaptive fraction to train. Fixed members do
       // still contaminate samples whenever at least one adaptive member is
       // present, because their frame cost belongs to that same host frame.
@@ -631,27 +668,26 @@ export const createStreamedSceneCoordinator = (
           })
         : unsampled();
       // Work that finished during this presentation still contaminated its
-      // cost. Start the next interval clean before allocation can request work.
+      // cost; the next interval starts clean.
       capacityWorkSinceLastReport = false;
-      applyAllocations();
       return verdict;
     },
 
     needsFrame: () =>
       !disposed &&
       (submissions.hasPending() ||
-        (hasAdaptiveMember() && governor.needsFrame())),
+        (hasAdaptiveMember() && governor.needsFrame()) ||
+        allocationOutdated()),
 
     stats() {
       return {
-        viewQualityFraction,
+        viewQualityFraction: governor.qualityFraction(),
         targetOverrideMemberId: appliedTargetState?.id ?? null,
         governor: governor.stats(),
         submissions: submissions.stats(),
         stalledMembers: [...members]
           .filter((state) => state.stalled)
           .map((state) => state.id ?? "<unnamed>"),
-        exhaustedRefreshes,
         members: [...members].map((state) => ({
           id: state.id,
           active: state.active,

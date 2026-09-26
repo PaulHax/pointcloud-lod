@@ -22,8 +22,11 @@ export type StreamedMemberContext = {
   readonly textureCapabilities: TextureCapabilities;
   readonly devicePixelRatio: number;
   /**
-   * Report that asynchronous work state changed without implying new pixels.
-   * This is what keeps retry backoff visible to capacity-sample eligibility.
+   * Report that this member's inputs may have changed, such as work starting,
+   * settling or backing off, without implying new pixels. It only marks the
+   * inputs stale: the coordinator reads them once per microtask and never
+   * calls the member back from inside this call. This is what keeps retry
+   * backoff visible to capacity-sample eligibility.
    */
   readonly onWorkChange?: () => void;
 };
@@ -135,6 +138,7 @@ export type StreamedMember = {
   /** Coordinator-detected lack of progress; implementations may surface it. */
   onStall?(error: Error): void;
   governorInputs(): GovernorInputs;
+  /** Called from the coordinator's `prepareFrame` when it changed, at most once a frame. */
   applyAllocation(allocation: Allocation): void;
   pick(view: CameraView, cssX: number, cssY: number): MemberPickResult | null;
   occlusionDepth(
