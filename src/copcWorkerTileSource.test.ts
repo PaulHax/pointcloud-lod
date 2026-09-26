@@ -1,11 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
+import type { CopcDecodeState, CopcNodeEntry } from "./copcTileSource";
 import { createCopcWorkerTileSource } from "./copcWorkerTileSource";
 import type {
   CopcWorkerRequest,
   CopcWorkerResponse,
 } from "./copcWorkerProtocol";
-import { ROOT_KEY } from "./octree";
+import { ROOT_KEY, keyFromString } from "./octree";
 
 class FakeWorker {
   readonly sent: CopcWorkerRequest[] = [];
@@ -46,24 +47,83 @@ const drainMicrotasks = (): Promise<void> =>
     setTimeout(resolve, 0);
   });
 
-const openSource = async (worker: FakeWorker) => {
+/** The header and shift a hierarchy worker hands its decoders. */
+const STATE: CopcDecodeState = {
+  copc: { info: { cube: [0, 0, 0, 8, 8, 8] } } as CopcDecodeState["copc"],
+  rgbShift: 8,
+};
+
+const entryAt = (offset: number): CopcNodeEntry => ({
+  pointCount: 2,
+  pointDataOffset: offset,
+  pointDataLength: 10,
+});
+
+/** Opens a source over `workers`, the first of which reads the hierarchy. */
+const openSource = async (...workers: FakeWorker[]) => {
+  const unused = [...workers];
   const sourcePromise = createCopcWorkerTileSource({
     source: "https://example.test/cloud.copc.laz",
     lazPerfWasmUrl: "https://example.test/laz-perf.wasm",
-    createWorker: () => worker as unknown as Worker,
+    createWorker: () => unused.shift() as unknown as Worker,
+    workers: workers.length,
   });
-  expect(worker.sent[0]).toMatchObject({
+  const hierarchy = workers[0]!;
+  expect(hierarchy.sent[0]).toMatchObject({
     type: "open",
     source: "https://example.test/cloud.copc.laz",
     lazPerfWasmUrl: "https://example.test/laz-perf.wasm",
   });
-  const open = worker.sent[0]!;
-  worker.respond({
+  hierarchy.respond({
     type: "opened",
-    id: open.id,
+    id: hierarchy.sent[0]!.id,
     metadata: { pointCount: 42 },
+    state: STATE,
   });
   return sourcePromise;
+};
+
+/** Answers every decoder's open request, then lets the source see it. */
+const openDecoders = async (...decoders: FakeWorker[]) => {
+  for (const decoder of decoders) {
+    expect(decoder.sent[0]).toMatchObject({
+      type: "open-decoder",
+      source: "https://example.test/cloud.copc.laz",
+      state: STATE,
+    });
+    decoder.respond({ type: "decoder-opened", id: decoder.sent[0]!.id });
+  }
+  await drainMicrotasks();
+};
+
+/** A request left in flight; disposing the source rejects it. */
+const leaveInFlight = (request: Promise<unknown>): void => {
+  request.catch(() => undefined);
+};
+
+const CHILDREN = ["1-0-0-0", "1-1-0-0", "1-0-1-0"];
+
+/** Reads the root page, whose nodes are the root and `CHILDREN`. */
+const readRootPage = async (
+  source: Awaited<ReturnType<typeof openSource>>,
+  hierarchy: FakeWorker,
+) => {
+  const nodesPromise = source.nodes(ROOT_KEY);
+  const request = hierarchy.sent.at(-1)!;
+  hierarchy.respond({
+    type: "nodes",
+    id: request.id,
+    nodes: ["0-0-0-0", ...CHILDREN].map((key) => ({
+      key: keyFromString(key),
+      pointCount: 2,
+      bounds: { min: [0, 0, 0], max: [1, 1, 1] },
+      spacing: 1,
+    })),
+    entries: ["0-0-0-0", ...CHILDREN].map(
+      (key, index) => [key, entryAt(index * 10)] as const,
+    ),
+  });
+  await nodesPromise;
 };
 
 describe("COPC worker tile source", () => {
@@ -86,6 +146,7 @@ describe("COPC worker tile source", () => {
           spacing: 1,
         },
       ],
+      entries: [["0-0-0-0", entryAt(0)]],
     });
     expect(await nodesPromise).toHaveLength(1);
 
@@ -142,9 +203,11 @@ describe("COPC worker tile source", () => {
 
   it("terminates the worker when opening fails", async () => {
     const worker = new FakeWorker();
+    const createWorker = vi.fn(() => worker as unknown as Worker);
     const sourcePromise = createCopcWorkerTileSource({
       source: "bad.copc.laz",
-      createWorker: () => worker as unknown as Worker,
+      createWorker,
+      workers: 3,
     });
     const open = worker.sent[0]!;
     worker.respond({
@@ -158,5 +221,86 @@ describe("COPC worker tile source", () => {
       message: "not COPC",
     });
     expect(worker.terminated).toBe(true);
+    expect(createWorker).toHaveBeenCalledOnce();
+  });
+
+  it("reads the hierarchy on one worker and spreads tiles over decoders", async () => {
+    const workers = [new FakeWorker(), new FakeWorker(), new FakeWorker()];
+    const [hierarchy, first, second] = workers as [
+      FakeWorker,
+      FakeWorker,
+      FakeWorker,
+    ];
+    const source = await openSource(...workers);
+    await openDecoders(first, second);
+    await readRootPage(source, hierarchy);
+    expect(first.sent).toHaveLength(1);
+    expect(second.sent).toHaveLength(1);
+
+    for (const key of CHILDREN)
+      leaveInFlight(source.loadTile(keyFromString(key)));
+    expect(hierarchy.sent.at(-1)).toMatchObject({
+      type: "load-tile",
+      key: keyFromString("1-0-0-0"),
+    });
+    expect(hierarchy.sent.at(-1)).not.toHaveProperty("entry");
+    expect(first.sent.at(-1)).toMatchObject({
+      type: "load-tile",
+      key: keyFromString("1-1-0-0"),
+      entry: entryAt(20),
+    });
+    expect(second.sent.at(-1)).toMatchObject({
+      type: "load-tile",
+      key: keyFromString("1-0-1-0"),
+      entry: entryAt(30),
+    });
+    source.dispose?.();
+    expect(workers.every((worker) => worker.terminated)).toBe(true);
+  });
+
+  it("keeps the root tile with the worker holding its sampled points", async () => {
+    const workers = [new FakeWorker(), new FakeWorker()];
+    const [hierarchy, decoder] = workers as [FakeWorker, FakeWorker];
+    const source = await openSource(...workers);
+    await openDecoders(decoder);
+    await readRootPage(source, hierarchy);
+    leaveInFlight(source.loadTile(keyFromString(CHILDREN[0]!)));
+    leaveInFlight(source.loadTile(ROOT_KEY));
+    expect(hierarchy.sent.at(-1)).toEqual({
+      type: "load-tile",
+      id: expect.any(Number),
+      key: ROOT_KEY,
+    });
+    source.dispose?.();
+  });
+
+  it("gives tiles only to decoders that have finished opening", async () => {
+    const workers = [new FakeWorker(), new FakeWorker()];
+    const [hierarchy, decoder] = workers as [FakeWorker, FakeWorker];
+    const source = await openSource(...workers);
+    await readRootPage(source, hierarchy);
+    for (const key of CHILDREN)
+      leaveInFlight(source.loadTile(keyFromString(key)));
+    expect(
+      hierarchy.sent.filter((request) => request.type === "load-tile"),
+    ).toHaveLength(3);
+    expect(decoder.sent).toHaveLength(1);
+    source.dispose?.();
+  });
+
+  it("fails the whole source when a decoder cannot open", async () => {
+    const workers = [new FakeWorker(), new FakeWorker()];
+    const [hierarchy, decoder] = workers as [FakeWorker, FakeWorker];
+    const source = await openSource(...workers);
+    const nodesPromise = source.nodes(ROOT_KEY);
+    decoder.respond({
+      type: "error",
+      id: decoder.sent[0]!.id,
+      error: { name: "RuntimeError", message: "no wasm" },
+    });
+    await expect(nodesPromise).rejects.toMatchObject({ message: "no wasm" });
+    expect(hierarchy.terminated).toBe(true);
+    expect(decoder.terminated).toBe(true);
+    await expect(source.loadTile(ROOT_KEY)).rejects.toThrow(/disposed/);
   });
 });
