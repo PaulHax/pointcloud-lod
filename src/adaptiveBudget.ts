@@ -67,8 +67,14 @@ export type AdaptiveQualityOptions = {
   readonly interactionTargetMs?: number;
   /** Presentation intervals judged together. */
   readonly windowSize?: number;
-  /** Share of a window that may miss its budget before quality falls. */
-  readonly lateFrameTolerance?: number;
+  /** Share of a moving window that may miss its budget before quality falls. */
+  readonly interactionLateFrameTolerance?: number;
+  /**
+   * The same for a still view. A late frame at rest only delays refinement,
+   * while a step back is a visible change with nothing moving to hide it, so
+   * a still view gives up detail only once most of its frames miss.
+   */
+  readonly stationaryLateFrameTolerance?: number;
   readonly maxIncreaseStep?: number;
   readonly maxDecreaseStep?: number;
   /** Shortest time between two ordinary adjustments of one track. */
@@ -175,7 +181,8 @@ export const ADAPTIVE_QUALITY_DEFAULTS = {
   stationaryTargetMs: 33,
   interactionTargetMs: 16,
   windowSize: 30,
-  lateFrameTolerance: 0.2,
+  interactionLateFrameTolerance: 0.2,
+  stationaryLateFrameTolerance: 0.5,
   maxIncreaseStep: 0.15,
   maxDecreaseStep: 0.5,
   cooldownMs: 400,
@@ -208,6 +215,7 @@ type Track = {
   readonly samples: number[];
   readonly targetMs: number;
   readonly probeDwellMs: number;
+  readonly lateFrameTolerance: number;
   /** Last ordinary or emergency change; gates the next ordinary one. */
   lastChangeAt: number;
   /** Since when the current level has held; gates probes. */
@@ -250,9 +258,17 @@ export const createAdaptiveQuality = (
     options.windowSize ?? defaults.windowSize,
     1,
   );
-  const lateFrameTolerance = finiteWithin(
-    "lateFrameTolerance",
-    options.lateFrameTolerance ?? defaults.lateFrameTolerance,
+  const interactionLateFrameTolerance = finiteWithin(
+    "interactionLateFrameTolerance",
+    options.interactionLateFrameTolerance ??
+      defaults.interactionLateFrameTolerance,
+    0,
+    1,
+  );
+  const stationaryLateFrameTolerance = finiteWithin(
+    "stationaryLateFrameTolerance",
+    options.stationaryLateFrameTolerance ??
+      defaults.stationaryLateFrameTolerance,
     0,
     1,
   );
@@ -292,11 +308,16 @@ export const createAdaptiveQuality = (
       MAX_VIEW_QUALITY_FRACTION,
       Math.max(MIN_VIEW_QUALITY_FRACTION, fraction),
     );
-  const makeTrack = (targetMs: number, probeDwellMs: number): Track => ({
+  const makeTrack = (
+    targetMs: number,
+    probeDwellMs: number,
+    lateFrameTolerance: number,
+  ): Track => ({
     fraction: initialFraction,
     samples: [],
     targetMs,
     probeDwellMs,
+    lateFrameTolerance,
     lastChangeAt: Number.NEGATIVE_INFINITY,
     heldSince: Number.NEGATIVE_INFINITY,
     lastAdjustment: null,
@@ -304,8 +325,16 @@ export const createAdaptiveQuality = (
     failedLevel: null,
     probedFrom: null,
   });
-  const stationary = makeTrack(stationaryTargetMs, cooldownMs);
-  const interaction = makeTrack(interactionTargetMs, interactionProbeDwellMs);
+  const stationary = makeTrack(
+    stationaryTargetMs,
+    cooldownMs,
+    stationaryLateFrameTolerance,
+  );
+  const interaction = makeTrack(
+    interactionTargetMs,
+    interactionProbeDwellMs,
+    interactionLateFrameTolerance,
+  );
   const trackFor = (interacting: boolean): Track =>
     interacting ? interaction : stationary;
 
@@ -397,7 +426,7 @@ export const createAdaptiveQuality = (
     const hold = (reason: QualityAdjustmentReason): void =>
       record(track, now, "none", reason, from, estimate, late);
 
-    if (late > lateFrameTolerance) {
+    if (late > track.lateFrameTolerance) {
       if (now - track.lastChangeAt < cooldownMs) return hold("cooldown");
       // A probe that failed its first window goes back to the level a full
       // clean window had just proved, not to wherever an overload cut lands.

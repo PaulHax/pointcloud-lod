@@ -610,8 +610,11 @@ refreshes. Each track grants its target a whole number of refreshes (at 60 Hz,
 one while moving and two at rest; at 120 Hz, two and four) and counts the frames
 in its last 30 that missed them:
 
-- More than a fifth late lowers quality: by 15%, or, when most frames are late,
-  by what the median refresh count says the overload is.
+- More than a fifth late while moving, or more than half at rest, lowers
+  quality: by 15%, or, when most frames are late, by what the median refresh
+  count says the overload is. A still view tolerates more because a late frame
+  there only delays refinement, while a step back is a visible change with
+  nothing moving to hide it.
 - A full window without a late frame probes one step up once the level has held
   for a while (1.5 s while moving, 0.4 s at rest). A probe that fails returns to
   the level it left, and later probes close half the distance to the level found

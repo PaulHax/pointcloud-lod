@@ -115,6 +115,23 @@ describe("createAdaptiveQuality", () => {
     });
   });
 
+  it("holds a still view through misses a moving one would cut for", () => {
+    const quality = createAdaptiveQuality(
+      { ...options, initialFraction: 0.8 },
+      () => REFRESH_MS,
+    );
+    // Four of ten frames take a third refresh against a two-refresh budget.
+    let now = frames(quality, 2 * REFRESH_MS, false, 6);
+    now = frames(quality, 3 * REFRESH_MS, false, 4, now);
+    expect(quality.fraction(false)).toBe(0.8);
+    expect(quality.stats().stationary.lastAdjustment?.reason).toBe(
+      "within-hysteresis",
+    );
+    // Most frames missing still gives detail up.
+    frames(quality, 3 * REFRESH_MS, false, 3, now);
+    expect(quality.fraction(false)).toBeLessThan(0.8);
+  });
+
   it("cuts as far as the median says when most frames are late", () => {
     const quality = createAdaptiveQuality(
       { ...options, initialFraction: 0.8 },
@@ -280,7 +297,8 @@ describe("createAdaptiveQuality", () => {
     [{ initialFraction: 1.01 }, "initialFraction"],
     [{ stationaryTargetMs: 0 }, "stationaryTargetMs"],
     [{ interactionTargetMs: Number.NaN }, "interactionTargetMs"],
-    [{ lateFrameTolerance: 2 }, "lateFrameTolerance"],
+    [{ interactionLateFrameTolerance: 2 }, "interactionLateFrameTolerance"],
+    [{ stationaryLateFrameTolerance: -1 }, "stationaryLateFrameTolerance"],
     [{ interactionProbeDwellMs: -1 }, "interactionProbeDwellMs"],
     [{ minSamples: 0 }, "minSamples"],
   ] as const)("rejects invalid option %s", (bad, name) => {
