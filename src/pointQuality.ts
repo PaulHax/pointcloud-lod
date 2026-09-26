@@ -1,4 +1,4 @@
-/** Pure mapping from a view allocation to a point cloud's budgets. */
+/** Pure mappings from a view allocation and a byte share to point budgets. */
 
 import type { Allocation } from "./streamedMember";
 
@@ -49,4 +49,33 @@ export const pointBudgets = (input: {
     pointBudget: selectionPoints,
     densityFraction: selectionPoints > 0 ? drawPoints / selectionPoints : 0,
   };
+};
+
+/** Assumed until enough points are resident to measure bytes per point. */
+const FALLBACK_BYTES_PER_POINT = 16;
+const MEASURE_MIN_POINTS = 100_000;
+const BYTES_PER_POINT_STEPS = 64;
+
+/**
+ * The most points a byte share can hold, at the bytes per point measured over
+ * the resident tiles, or an estimate until enough are resident to measure.
+ * Never below one point unless the share is zero.
+ *
+ * The measure is quantized to 1/64 of a byte. It moves in its last digits
+ * whenever the resident set changes, and the budget that chose that set is
+ * derived from this ceiling: unquantized, a share that exactly covers the
+ * view can flip one tile in and out on every allocation, forever.
+ */
+export const pointCapacity = (
+  budgetBytes: number,
+  residentPoints: number,
+  residentBytes: number,
+): number => {
+  if (budgetBytes === 0) return 0;
+  const bytesPerPoint =
+    residentPoints >= MEASURE_MIN_POINTS
+      ? Math.ceil((residentBytes / residentPoints) * BYTES_PER_POINT_STEPS) /
+        BYTES_PER_POINT_STEPS
+      : FALLBACK_BYTES_PER_POINT;
+  return Math.max(1, Math.floor(budgetBytes / bytesPerPoint));
 };

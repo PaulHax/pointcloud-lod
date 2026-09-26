@@ -28,7 +28,8 @@ import vtkPolyData from "@kitware/vtk.js/Common/DataModel/PolyData";
 import vtkActor from "@kitware/vtk.js/Rendering/Core/Actor";
 import vtkPointGaussianMapper from "@kitware/vtk.js/Rendering/Core/PointGaussianMapper";
 
-import type { TileBatch, TileDrawPlan } from "./controller";
+import type { TileDrawPlan } from "./controller";
+import type { TileBatch } from "./payloadResidency";
 import { IDENTITY, sameMatrix, translatedMatrix } from "./mat4";
 import { finiteAbove, finiteNonNegative } from "./numeric";
 import { keyToString } from "./octree";

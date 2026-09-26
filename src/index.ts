@@ -47,9 +47,10 @@ export {
   type LodGovernorInputs,
   type LodSelectionStats,
   type LodDrawPlanStats,
-  type TileBatch,
   type TileDrawPlan,
 } from "./controller";
+
+export type { TileBatch } from "./payloadResidency";
 
 export type {
   AutoPointPresentation,
