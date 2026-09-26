@@ -3,7 +3,13 @@ import { describe, expect, it } from "vitest";
 import { createTiles3dFixtureTileset } from "../../scripts/generateTiles3dFixture.mjs";
 import type { PerspectiveCameraView } from "../camera";
 import { parseTileset } from "./tilesetSource";
-import { traverseTileset } from "./traversal";
+import {
+  createTilesetTraversal,
+  type TilesetTraversalOptions,
+} from "./traversal";
+
+const traverseTileset = (options: TilesetTraversalOptions) =>
+  createTilesetTraversal()(options);
 
 const perspective = (
   position: readonly [number, number, number],

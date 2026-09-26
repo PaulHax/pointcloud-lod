@@ -6,8 +6,8 @@ import { parseTileset, type TilesetTile } from "./tilesetSource";
 import { createVerticalExaggerationTransform } from "./rtc";
 import {
   createTilesetTraversal,
-  traverseTileset,
   type TileReadiness,
+  type TilesetTraversalOptions,
 } from "./traversal";
 import { parseSubtree } from "./subtree";
 import type { SubtreeHierarchyState } from "./traversal";
@@ -15,6 +15,10 @@ import {
   makeSubtreeFixture,
   SUBTREE_METADATA_SCHEMA,
 } from "../../test/fixtures/subtreeFixture";
+
+/** One traversal with nothing cached from an earlier pass. */
+const traverseTileset = (options: TilesetTraversalOptions) =>
+  createTilesetTraversal()(options);
 
 const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] as const;
 const lookAway = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -10, 0, 0, 1] as const;
