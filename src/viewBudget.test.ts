@@ -40,21 +40,6 @@ describe("allocateViewQuality", () => {
     expect(allocation.get("other")).toBeCloseTo(0.5);
   });
 
-  it("cannot let an out-of-contract importance starve the other members", () => {
-    // Importance is contractually [0, 1]. A member reporting on some other
-    // scale (a raw screen-space error in pixels, say) must at worst take a
-    // full share, never push everyone else down to the quality floor.
-    const allocation = allocateViewQuality(
-      [
-        { key: "misreporting", inputs: inputs(800) },
-        { key: "correct", inputs: inputs(1) },
-      ],
-      0.5,
-    );
-    expect(allocation.get("correct")).toBeCloseTo(0.5);
-    expect(allocation.get("misreporting")).toBeCloseTo(0.5);
-  });
-
   it("water-fills share that a demand-capped member cannot spend", () => {
     const allocation = allocateViewQuality(
       [
@@ -67,15 +52,15 @@ describe("allocateViewQuality", () => {
     expect(allocation.get("large")).toBe(0.9);
   });
 
-  it("allocates zero to culled, demandless, and invalid contenders", () => {
+  it("allocates zero to culled and demandless contenders", () => {
     const allocation = allocateViewQuality(
       [
         { key: "culled", inputs: inputs(0) },
         { key: "no-demand", inputs: inputs(1, 0) },
-        { key: "invalid", inputs: inputs(Number.NaN) },
+        { key: "open", inputs: inputs(1) },
       ],
-      Number.NaN,
+      0.5,
     );
-    expect([...allocation.values()]).toEqual([0, 0, 0]);
+    expect([...allocation.values()]).toEqual([0, 0, 1]);
   });
 });

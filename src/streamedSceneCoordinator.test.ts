@@ -357,6 +357,43 @@ describe("createStreamedSceneCoordinator", () => {
     coordinator.dispose();
   });
 
+  it("keeps a member reporting importance on the wrong scale to its share", () => {
+    const coordinator = createStreamedSceneCoordinator({
+      scheduleRender: vi.fn(),
+      memory: createMemoryPool({ totalBytes: 300 }),
+      governor: { minSamples: 1, cooldownMs: 0 },
+    });
+    // A raw screen-space error in pixels where a [0, 1] weight belongs.
+    const misreporting = makeMember({
+      projectedImportance: 800 as Importance,
+    });
+    const correct = makeMember();
+    coordinator.register(misreporting, { qualityManaged: true });
+    coordinator.register(correct, { qualityManaged: true });
+    coordinator.recordHostFrame({ hostFrameMs: 66, now: 0 });
+    expect(coordinator.stats().viewQualityFraction).toBeCloseTo(0.5);
+    expect(misreporting.allocations.at(-1)?.qualityFraction).toBeCloseTo(0.5);
+    expect(correct.allocations.at(-1)?.qualityFraction).toBeCloseTo(0.5);
+  });
+
+  it("allocates no quality to members reporting unusable inputs", () => {
+    const coordinator = createStreamedSceneCoordinator({
+      scheduleRender: vi.fn(),
+      memory: createMemoryPool({ totalBytes: 300 }),
+    });
+    const noImportance = makeMember({
+      projectedImportance: Number.NaN as Importance,
+    });
+    const noDemand = makeMember({ qualityDemand: Number.NaN });
+    const usable = makeMember();
+    for (const member of [noImportance, noDemand, usable]) {
+      coordinator.register(member, { qualityManaged: true });
+    }
+    expect(noImportance.allocations.at(-1)?.qualityFraction).toBe(0);
+    expect(noDemand.allocations.at(-1)?.qualityFraction).toBe(0);
+    expect(usable.allocations.at(-1)?.qualityFraction).toBe(1);
+  });
+
   it("feeds the governor fraction directly into view allocation", () => {
     const coordinator = createStreamedSceneCoordinator({
       scheduleRender: vi.fn(),
