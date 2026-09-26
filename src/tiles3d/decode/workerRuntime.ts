@@ -17,7 +17,6 @@ const errorMessage = (
 ): DecodeWorkerErrorMessage => ({
   kind: "error",
   jobId: message.jobId,
-  generation: message.generation,
   error:
     error instanceof TileDecodeError
       ? {
@@ -46,8 +45,6 @@ export const installDecodeWorker = (scope: ClassicWorkerScope): void => {
       value.kind !== "decode" ||
       !("jobId" in value) ||
       typeof value.jobId !== "number" ||
-      !("generation" in value) ||
-      typeof value.generation !== "number" ||
       !("request" in value)
     ) {
       return;
@@ -59,7 +56,6 @@ export const installDecodeWorker = (scope: ClassicWorkerScope): void => {
           {
             kind: "complete",
             jobId: message.jobId,
-            generation: message.generation,
             result,
           },
           buildTransferList(result),

@@ -209,6 +209,5 @@ export type DecodeWorkerPoolHandle = {
       Record<string, BasisTargetTimingStats>
     >;
   };
-  invalidate?(): void;
   dispose?(): void;
 };

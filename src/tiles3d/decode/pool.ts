@@ -13,21 +13,18 @@ import {
 type DecodeWorkerRequestMessage = {
   kind: "decode";
   jobId: number;
-  generation: number;
   request: DecodeTileRequest;
 };
 
 type DecodeWorkerCompleteMessage = {
   kind: "complete";
   jobId: number;
-  generation: number;
   result: DecodedTileContent;
 };
 
 type DecodeWorkerErrorMessage = {
   kind: "error";
   jobId: number;
-  generation: number;
   error: {
     readonly name: string;
     readonly message: string;
@@ -60,7 +57,6 @@ export type DecodeWorkerPoolOptions = {
 
 type JobRecord = {
   jobId: number;
-  generation: number;
   request: DecodeTileRequest;
   state: "queued" | "active" | "cancelled" | "settled";
   startedAt: number | null;
@@ -117,7 +113,6 @@ export class DecodeWorkerPool implements DecodeWorkerPoolHandle {
   readonly #factory: (index: number) => DecodeWorkerLike;
   #slots: WorkerSlot[];
   #queued: JobRecord[] = [];
-  #generation = 1;
   #nextJobId = 1;
   #disposed = false;
   #completedJobs = 0;
@@ -165,7 +160,6 @@ export class DecodeWorkerPool implements DecodeWorkerPoolHandle {
     );
     const record: JobRecord = {
       jobId: this.#nextJobId,
-      generation: this.#generation,
       request,
       state: "queued",
       startedAt: null,
@@ -203,15 +197,6 @@ export class DecodeWorkerPool implements DecodeWorkerPoolHandle {
         ]),
       ),
     };
-  }
-
-  invalidate(): void {
-    if (this.#disposed) return;
-    this.#generation += 1;
-    for (const record of this.#queued.splice(0)) {
-      this.#reject(record, abortError());
-    }
-    this.#restartSlots(abortError());
   }
 
   dispose(): void {
@@ -256,7 +241,6 @@ export class DecodeWorkerPool implements DecodeWorkerPoolHandle {
       const message: DecodeWorkerRequestMessage = {
         kind: "decode",
         jobId: record.jobId,
-        generation: record.generation,
         request: record.request,
       };
       slot.worker.postMessage(message, [record.request.content]);
@@ -269,10 +253,8 @@ export class DecodeWorkerPool implements DecodeWorkerPoolHandle {
       typeof value !== "object" ||
       !("kind" in value) ||
       !("jobId" in value) ||
-      !("generation" in value) ||
       (value.kind !== "complete" && value.kind !== "error") ||
-      typeof value.jobId !== "number" ||
-      typeof value.generation !== "number"
+      typeof value.jobId !== "number"
     ) {
       this.#onWorkerFailure(
         slot,
@@ -282,14 +264,8 @@ export class DecodeWorkerPool implements DecodeWorkerPoolHandle {
     }
     const message = value as DecodeWorkerResponseMessage;
     const active = slot.active;
-    if (
-      !active ||
-      message.jobId !== active.jobId ||
-      message.generation !== active.generation ||
-      message.generation !== this.#generation
-    ) {
-      return;
-    }
+    // Job ids are never reused, so the id alone tells a stale message apart.
+    if (!active || message.jobId !== active.jobId) return;
     slot.active = null;
     if (active.state === "active") {
       if (message.kind === "complete") {
@@ -400,18 +376,6 @@ export class DecodeWorkerPool implements DecodeWorkerPoolHandle {
         this.#dispatch();
       }
     }
-  }
-
-  #restartSlots(reason: unknown): void {
-    const previous = this.#slots;
-    this.#slots = previous.map((slot, index) => {
-      if (slot.active) this.#reject(slot.active, reason);
-      slot.worker.onmessage = null;
-      slot.worker.onerror = null;
-      slot.worker.terminate();
-      return this.#makeSlot(index);
-    });
-    this.#dispatch();
   }
 
   #reject(record: JobRecord, reason: unknown): void {
