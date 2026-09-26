@@ -1611,6 +1611,53 @@ describe("createLodController — failing sources", () => {
     vi.useRealTimers();
   });
 
+  it("refetches a tile whose last attempt failed while it was deselected", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const tree: Record<string, FakeEntry> = {
+      "0-0-0-0": { pointCount: 100, children: ["1-0-0-0"] },
+      "1-0-0-0": { pointCount: 60 },
+    };
+    const { controller, loadCalls, deferred } = makeController(tree, {
+      onError: () => {},
+      selectionDelayMs: 150,
+    });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    deferred.get("0-0-0-0")!.resolve();
+    await settle();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      deferred.get("1-0-0-0")!.reject(new Error("500"));
+      await settle();
+      await vi.advanceTimersByTimeAsync(1000);
+      await settle();
+    }
+    const childLoads = () => loadCalls.filter((key) => key === "1-0-0-0");
+    expect(childLoads()).toHaveLength(3);
+
+    // The last allowed attempt fails just after the camera looks away, and
+    // the camera looks back while the key rests.
+    vi.advanceTimersByTime(200);
+    controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
+    deferred.get("1-0-0-0")!.reject(new Error("500"));
+    await settle();
+    await vi.advanceTimersByTimeAsync(200);
+    controller.setCamera(VIEW);
+    await settle();
+
+    // Nothing moves again, yet the key is asked for once its rest is over.
+    await vi.advanceTimersByTimeAsync(60_000);
+    await settle();
+    expect(childLoads()).toHaveLength(4);
+    deferred.get("1-0-0-0")!.resolve();
+    await settle();
+    expect(controller.stats().residentTiles).toBe(2);
+
+    controller.dispose();
+    vi.useRealTimers();
+  });
+
   it("stops claiming pending work for tiles that are out of attempts", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
