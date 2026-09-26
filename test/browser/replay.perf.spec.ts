@@ -30,6 +30,7 @@ import type {
 } from "../../examples/vtk/harness/inputRecorder";
 import type { CacheMode, HttpCache } from "./httpCache";
 import { compareCameraTracks, replayInput } from "./inputReplay";
+import { describeFreeze, watchResponsiveness } from "./watchdog";
 import {
   closeBenchmarkBrowser,
   openScene,
@@ -431,6 +432,7 @@ describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
                     }),
               },
             });
+            const watchdog = await watchResponsiveness(session.page);
             try {
               await session.resizeViewer({
                 width: recording.viewer.widthCssPx,
@@ -583,7 +585,11 @@ describe("recorded-gesture replay benchmark", { tags: ["perf"] }, () => {
                     )
                     .join(""),
               );
+            } catch (error) {
+              const freeze = watchdog.freeze();
+              throw freeze === null ? error : new Error(describeFreeze(freeze));
             } finally {
+              await watchdog.stop();
               await session.close();
             }
           },
