@@ -18,7 +18,6 @@ import {
   createLodController,
   type LodController,
   type LodControllerOptions,
-  type TileBatch,
 } from "./controller";
 import { IDENTITY } from "./mat4";
 import {
@@ -29,6 +28,7 @@ import {
   nodeBounds,
   type VoxelKey,
 } from "./octree";
+import type { TileBatch } from "./payloadResidency";
 import type {
   NodeInfo,
   TileData,

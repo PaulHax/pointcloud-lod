@@ -2,10 +2,12 @@
  * LOD controller: turns camera movement into a bounded set of submitted tiles.
  *
  * Its decisions are pure functions over read-only views of the state it
- * holds: `selectPoints` chooses the tiles, `planDraw` thins them and
- * `largestTerminalSpacing` sizes Auto points. The controller owns the impure
- * rest: one loader for hierarchy pages and one for tiles, an LRU for
- * deselected tiles, and batched delivery to the consumer.
+ * holds: `selectPoints` chooses the tiles, `planDraw` thins them,
+ * `largestTerminalSpacing` sizes Auto points and `pointCapacity` bounds the
+ * budget by memory. Two loaders read hierarchy pages and tiles, and a payload
+ * residency holds what they deliver and hands the consumer deltas. The
+ * controller keeps the configuration, the camera and model frame, and the
+ * selection debounce, and runs one selection pass whenever any of them moves.
  */
 
 import {
@@ -28,7 +30,6 @@ import {
 import { createLoader, type LoaderCounts } from "./loader";
 import { sameMatrix, transformPoint, type Mat16 } from "./mat4";
 import { scenePoint } from "./frames";
-import { createLruCache } from "./lru";
 import { finiteAtLeast, finiteNonNegative, wholeAtLeast } from "./numeric";
 import { defaultMemoryBudgetBytes } from "./memoryPool";
 import {
@@ -37,6 +38,7 @@ import {
   type PointPickResult,
 } from "./picking";
 import { keyFromString, keyToString, type VoxelKey } from "./octree";
+import { createPayloadResidency, type TileBatch } from "./payloadResidency";
 import {
   INITIAL_AUTO_DIAMETER_CSS_PX,
   autoDiameterCssPx,
@@ -54,18 +56,9 @@ import {
   type HierarchyEntry,
   type PointSelection,
 } from "./pointSelection";
+import { pointCapacity } from "./pointQuality";
 import type { RetryPolicy } from "./retryPolicy";
-import {
-  tileBytes,
-  type NodeInfo,
-  type TileData,
-  type TileSource,
-} from "./tileSource";
-
-export type TileBatch = {
-  readonly added: readonly { key: VoxelKey; tile: TileData }[];
-  readonly removed: readonly VoxelKey[];
-};
+import type { NodeInfo, TileData, TileSource } from "./tileSource";
 
 export type TileDrawPlan = {
   readonly entries: readonly {
@@ -555,17 +548,11 @@ export const createLodController = (
   const byFrontierPriority = (keyStrings: readonly string[]): string[] =>
     view === null ? [...keyStrings] : frontierOrder(keyStrings, nodes, view);
 
-  /** Tiles currently delivered to the consumer. */
-  const resident = new Map<string, TileData>();
-  let residentPoints = 0;
-  let residentBytes = 0;
-  /** Deselected tiles kept for cheap reselection. */
-  const cache = createLruCache<string, TileData>({ maxBytes: cacheBytes });
+  const residency = createPayloadResidency({ cacheBytes });
 
-  // Memory governor: the byte share converts to a point ceiling via the
-  // measured bytes-per-point of resident tiles (falling back to an estimate
-  // until enough points are resident to measure). Whatever budget the host
-  // asks for, this ceiling is what keeps selection inside GPU memory.
+  // The byte share converts to a point ceiling at the measured bytes per point
+  // of resident tiles. Whatever budget the host asks for, this ceiling is what
+  // keeps selection inside GPU memory.
   let externalMemoryBudgetBytes =
     options.memoryBudgetBytes === undefined
       ? defaultMemoryBudgetBytes()
@@ -573,28 +560,18 @@ export const createLodController = (
           finiteAtLeast("memoryBudgetBytes", options.memoryBudgetBytes, 0),
         );
 
-  const FALLBACK_BYTES_PER_POINT = 16;
-  const MEASURE_MIN_POINTS = 100_000;
-  const BYTES_PER_POINT_STEPS = 64;
-
-  // Quantized, because the ratio shifts in its last digits whenever the
-  // resident set changes, and the budget that chose that set is derived from
-  // the ceiling this feeds. Unquantized, a share that exactly covers the view
-  // can flip one tile in and out on every allocation, forever.
-  const bytesPerPoint = (): number =>
-    residentPoints >= MEASURE_MIN_POINTS
-      ? Math.ceil((residentBytes / residentPoints) * BYTES_PER_POINT_STEPS) /
-        BYTES_PER_POINT_STEPS
-      : FALLBACK_BYTES_PER_POINT;
-
   // An inactive controller holds no share: it has dropped its resident tiles
   // and must not reselect until reactivated.
   const memoryBudgetBytes = (): number =>
     active ? externalMemoryBudgetBytes : 0;
 
   const memoryCeilingPoints = (): number => {
-    const bytes = memoryBudgetBytes();
-    return bytes === 0 ? 0 : Math.max(1, Math.floor(bytes / bytesPerPoint()));
+    const totals = residency.totals();
+    return pointCapacity(
+      memoryBudgetBytes(),
+      totals.residentPoints,
+      totals.residentBytes,
+    );
   };
 
   let selection: PointSelection = EMPTY_SELECTION;
@@ -615,75 +592,16 @@ export const createLodController = (
   const drawnPointsOf = (keyString: string, tile: TileData): number =>
     Math.min(tile.pointCount, plan.prefixes.get(keyString) ?? 0);
 
-  // Decoded single ownership: a key's payload lives in exactly one place —
-  // a live request, the CPU cache, or renderer residency. A second copy would
-  // double-count decoded bytes and spend cache capacity on a tile the
-  // renderer already holds. Every transition goes through these three.
-  const takeResident = (keyString: string, tile: TileData): void => {
-    cache.delete(keyString);
-    resident.set(keyString, tile);
-    residentPoints += tile.pointCount;
-    residentBytes += tileBytes(tile);
-  };
-
-  /**
-   * Leave renderer/GPU residency. The decoded payload stays in the
-   * byte-bounded CPU cache for cheap reactivation; no dormant actor is kept.
-   */
-  const releaseResident = (keyString: string): void => {
-    const tile = resident.get(keyString);
-    if (tile === undefined) return;
-    resident.delete(keyString);
-    residentPoints -= tile.pointCount;
-    residentBytes -= tileBytes(tile);
-    cache.set(keyString, tile, tileBytes(tile));
-  };
-
-  /** Park a decoded payload unless residency already owns the key. */
-  const cacheDecoded = (keyString: string, tile: TileData): void => {
-    if (resident.has(keyString)) return;
-    cache.set(keyString, tile, tileBytes(tile));
-  };
-
-  /** Promote a cached payload into residency. */
-  const promoteCached = (keyString: string): boolean => {
-    const cached = cache.get(keyString);
-    if (cached === undefined) return false;
-    takeResident(keyString, cached);
-    return true;
-  };
-
-  // The renderer's state as of the last batch it was handed. Every batch is
-  // the delta from here to current residency, so an add and a remove of the
-  // same key inside one microtask window cancel out instead of arriving as a
-  // contradictory batch the consumer has to guess the order of.
-  let submitted = new Map<string, TileData>();
+  /** Hand the consumer the residency delta once per microtask burst. */
   let flushScheduled = false;
-
-  const submittedDelta = (): TileBatch => {
-    const added: { key: VoxelKey; tile: TileData }[] = [];
-    const removed: VoxelKey[] = [];
-    for (const [keyString, tile] of resident) {
-      // A key whose payload was replaced is an addition, never a remove/add
-      // pair: added and removed stay disjoint within one batch.
-      if (submitted.get(keyString) === tile) continue;
-      added.push({ key: keyFromString(keyString), tile });
-    }
-    for (const keyString of submitted.keys()) {
-      if (!resident.has(keyString)) removed.push(keyFromString(keyString));
-    }
-    return { added, removed };
-  };
-
   const scheduleFlush = (): void => {
     if (flushScheduled) return;
     flushScheduled = true;
     queueMicrotask(() => {
       flushScheduled = false;
       if (disposed) return;
-      const batch = submittedDelta();
-      if (batch.added.length === 0 && batch.removed.length === 0) return;
-      submitted = new Map(resident);
+      const batch = residency.flush();
+      if (batch === null) return;
       onTiles(batch);
       markWork();
       scheduleRender();
@@ -731,11 +649,11 @@ export const createLodController = (
       // Cancellation is advisory, so a cancelled read can still deliver. If
       // the key was reselected while it ran, this payload is exactly what the
       // selection is waiting for.
-      if (selection.target.has(keyString) && !resident.has(keyString)) {
-        takeResident(keyString, tile);
+      if (selection.target.has(keyString) && !residency.isResident(keyString)) {
+        residency.hold(keyString, tile);
         scheduleFlush();
       } else {
-        cacheDecoded(keyString, tile);
+        residency.park(keyString, tile);
       }
     },
     onFailed: (_keyString, error) => onError(error),
@@ -823,22 +741,18 @@ export const createLodController = (
         : [ROOT_KEY_STRING, ...selection.neededPages],
     );
 
-    // Deselected submitted tiles leave renderer/GPU residency immediately.
-    // `releaseResident` deletes only the key it is handed, which is safe to do
-    // while iterating the map it deletes from.
-    for (const keyString of resident.keys()) {
-      if (target.has(keyString)) continue;
-      releaseResident(keyString);
-    }
+    // Deselected tiles leave renderer residency immediately; their payloads
+    // stay in the CPU cache.
+    residency.releaseExcept(target);
 
     // Reuse decoded payloads at once; ask for the rest, coarse levels first.
     // A key whose read is still running is adopted rather than read twice.
     const missing: string[] = [];
     for (const keyString of target) {
-      if (resident.has(keyString)) continue;
+      if (residency.isResident(keyString)) continue;
       // Structural hierarchy nodes participate in selection but carry no tile.
       if (nodes.get(keyString)?.pointCount === 0) continue;
-      if (promoteCached(keyString)) continue;
+      if (residency.promote(keyString)) continue;
       missing.push(keyString);
     }
     scheduleFlush();
@@ -903,11 +817,8 @@ export const createLodController = (
     pages.reset();
     nodes.clear();
     loadedPages.clear();
-    cache.clear();
+    residency.clear();
     clearSelection();
-    resident.clear();
-    residentPoints = 0;
-    residentBytes = 0;
     updateDrawPlan();
   };
 
@@ -1051,7 +962,7 @@ export const createLodController = (
 
       // Nothing stays resident while hidden; the flush turns that into
       // removals for exactly the actors the consumer was last handed.
-      for (const keyString of resident.keys()) releaseResident(keyString);
+      residency.releaseExcept(selection.target);
       scheduleFlush();
     },
 
@@ -1073,31 +984,30 @@ export const createLodController = (
     stats() {
       const tileCounts = tiles.counts();
       const pageCounts = pages.counts();
-      const cachedBytes = cache.totalBytes();
+      const totals = residency.totals();
       let targetUndecodedTiles = 0;
       let restingTiles = 0;
       for (const keyString of selection.target) {
         if (
           nodes.get(keyString)?.pointCount !== 0 &&
-          !resident.has(keyString) &&
-          !cache.has(keyString)
+          !residency.isDecoded(keyString)
         ) {
           targetUndecodedTiles += 1;
           if (tiles.resting(keyString)) restingTiles += 1;
         }
       }
       let drawnPoints = 0;
-      for (const [keyString, tile] of submitted) {
+      for (const [keyString, tile] of residency.submitted()) {
         drawnPoints += drawnPointsOf(keyString, tile);
       }
       return {
         active,
-        residentTiles: resident.size,
-        residentPoints,
-        residentBytes,
-        decodedTiles: resident.size + cache.count(),
-        decodedBytes: residentBytes + cachedBytes,
-        cachedBytes,
+        residentTiles: totals.residentTiles,
+        residentPoints: totals.residentPoints,
+        residentBytes: totals.residentBytes,
+        decodedTiles: totals.residentTiles + totals.cachedTiles,
+        decodedBytes: totals.residentBytes + totals.cachedBytes,
+        cachedBytes: totals.cachedBytes,
         inFlight: tileCounts.wantedReading,
         queuedTiles: tileCounts.queued,
         physicalTileOperations: tileCounts.physical,
@@ -1126,7 +1036,7 @@ export const createLodController = (
           config: presentation,
           diameterCssPx,
         },
-        cachedTiles: cache.count(),
+        cachedTiles: totals.cachedTiles,
         cacheBytes,
         refinementCutoffPx,
         selection: {
@@ -1152,11 +1062,11 @@ export const createLodController = (
       const localView = modelFrame
         ? viewInModelFrame(pickView, modelFrame)
         : pickView;
-      const tiles: PickTile[] = [];
-      for (const [keyString, tile] of submitted) {
+      const pickTiles: PickTile[] = [];
+      for (const [keyString, tile] of residency.submitted()) {
         const pointCount = drawnPointsOf(keyString, tile);
         if (pointCount === 0) continue;
-        tiles.push({
+        pickTiles.push({
           origin: tile.origin,
           positions: tile.positions,
           pointCount,
@@ -1167,7 +1077,7 @@ export const createLodController = (
         localView,
         cursorXCssPx,
         cursorYCssPx,
-        tiles,
+        pickTiles,
       );
       // The sweep solved on the model-local ray; hand the answer back in the
       // caller's world coordinates through the same matrix.
@@ -1183,20 +1093,19 @@ export const createLodController = (
     },
 
     activeKeys: () => ({
-      resident: [...resident.keys()].sort(),
-      submitted: [...submitted.keys()].sort(),
+      resident: [...residency.residentKeys()].sort(),
+      submitted: [...residency.submitted().keys()].sort(),
     }),
 
     dispose() {
       if (disposed) return;
       clearSelectionTimer();
       interactionDepth = 0;
-      // The consumer still owns everything the last flush handed it —
+      // The consumer still owns everything the last flush handed it,
       // including tiles a flush this teardown cancels was about to remove.
       // Take all of it back or it keeps actors nothing will ever drop.
-      const removed = [...submitted.keys()].map(keyFromString);
+      const removed = residency.takeBack();
       dropEverything();
-      submitted = new Map();
       disposed = true;
       if (removed.length > 0) {
         onTiles({ added: [], removed });
