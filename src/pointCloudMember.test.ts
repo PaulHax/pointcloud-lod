@@ -175,6 +175,52 @@ describe("createPointCloudMember", () => {
     member.dispose();
   });
 
+  it("draws a visible cloud whose root alone exceeds the minimum budget", async () => {
+    const rootPoints = 250_000;
+    const coordinator = createStreamedSceneCoordinator({
+      scheduleRender: vi.fn(),
+      memory: createMemoryPool({ totalBytes: 512 * 1024 * 1024 }),
+    });
+    const member = createPointCloudMember(
+      coordinator.context({ addActor: vi.fn(), removeActor: vi.fn() }),
+      config({
+        source: {
+          ...source(rootPoints),
+          metadata: () => ({ pointCount: rootPoints + 50_000 }),
+          nodes: async () => [
+            {
+              key: ROOT_KEY,
+              pointCount: rootPoints,
+              bounds: { min: [-1, -1, -0.5], max: [1, 1, 0.5] },
+              spacing: 1,
+              children: [{ level: 1, x: 0, y: 0, z: 0 }],
+            },
+            {
+              key: { level: 1, x: 0, y: 0, z: 0 },
+              pointCount: 50_000,
+              bounds: { min: [-1, -1, -0.5], max: [0, 0, 0] },
+              spacing: 0.5,
+              children: [],
+            },
+          ],
+        },
+        adaptive: true,
+        selectionDelayMs: 0,
+      }),
+    );
+    coordinator
+      .register(member, { id: "cloud", qualityManaged: true })
+      .setCamera(VIEW);
+    for (let frame = 1; frame <= 10; frame += 1) {
+      await settle();
+      coordinator.prepareFrame(frame);
+      coordinator.recordHostFrame({ hostFrameMs: 10 });
+    }
+    const stats = member.stats() as PointCloudMemberStats;
+    expect(stats.controller.residentTiles).toBeGreaterThan(0);
+    coordinator.dispose();
+  });
+
   it("delegates submitted-point picking and positive occlusion depth", async () => {
     const { context } = makeContext();
     const member = createPointCloudMember(
