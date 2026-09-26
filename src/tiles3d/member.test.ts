@@ -993,6 +993,39 @@ describe("createTiles3dMember", () => {
     member.dispose();
   });
 
+  it("stops waiting on refused siblings once a third sibling has failed", async () => {
+    const { member, drain } = replacementMember([-0.5, 0, 0.5], async (url) =>
+      url.endsWith("child-2.glb")
+        ? {
+            ok: false,
+            status: 404,
+            statusText: "Not Found",
+            arrayBuffer: async () => new ArrayBuffer(0),
+          }
+        : {
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            arrayBuffer: async () => new ArrayBuffer(8),
+          },
+    );
+    member.setCamera({ ...view, position: [0, 0, -1000] });
+    await drain();
+    member.setCamera(view);
+    await drain();
+    for (let frame = 0; frame < 5; frame += 1) {
+      member.prepareFrame();
+      await drain();
+    }
+    // The root stays drawn, and the member no longer claims work that
+    // nothing is doing.
+    expect(
+      (member.stats() as Tiles3dMemberStats).renderer.drawnTileIds,
+    ).toEqual(["root"]);
+    expect(member.governorInputs().work.operations).toBe(0);
+    member.dispose();
+  });
+
   it("credits a submitted parent when the complete child frontier fits without the transient peak", async () => {
     const h = harness(true, 88);
     (h.context.workers as any).decode = (request: DecodeTileRequest) => {
