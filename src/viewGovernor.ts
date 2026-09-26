@@ -12,7 +12,6 @@ import {
   createAdaptiveQuality,
   type AdaptiveQuality,
   type AdaptiveQualityOptions,
-  type AdaptiveQualityTrackStats,
   type DisplayQuantumSupplier,
   type QualityAdjustment,
   type QualityRegime,
@@ -87,6 +86,8 @@ export type ViewGovernorStats = {
     readonly cameraStable: boolean;
     readonly workPending: boolean;
     readonly measurementEligible: boolean;
+    /** Frames just after idle measure the GPU waking up, not the scene. */
+    readonly warmingUp: boolean;
   };
   readonly capacitySamples: {
     readonly eligible: number;
@@ -104,11 +105,15 @@ export type ViewGovernorStats = {
    */
   readonly displayQuantumMs: number | null;
   readonly estimateMs: number | null;
+  readonly lateFraction: number | null;
   readonly samples: number;
   readonly lastAdjustment: QualityAdjustment | null;
-  readonly trial: AdaptiveQualityTrackStats["trial"];
-  readonly increaseCeiling: number;
-  readonly trialAttempts: number;
+  readonly failedLevel: number | null;
+  readonly emergency: {
+    /** Cuts are off for the rest of the gesture after one bought nothing. */
+    readonly suspended: boolean;
+    readonly owed: boolean;
+  };
   readonly physicalTileOperations: number;
   readonly physicalHierarchyOperations: number;
   readonly needsFrame: boolean;
@@ -143,7 +148,43 @@ export type ViewGovernor = {
   dispose(): void;
 };
 
-const EMERGENCY_CONSECUTIVE_FRAMES = 2;
+/**
+ * Frames an emergency judges together. A cut needs most of them collapsed, so
+ * one upload hitch or collector pause is outvoted by the frames around it.
+ */
+const EMERGENCY_WINDOW = 5;
+/**
+ * Frames after a cut before its effect is read: the first ones carry the
+ * change itself, which a renderer may pay for in rebuilt draw state.
+ */
+const EMERGENCY_SETTLE_FRAMES = 2;
+/**
+ * A cut that leaves the median interval above this share of the one that
+ * triggered it bought nothing: the time is going somewhere quality does not
+ * reach, such as uploads or scene-graph work, and cutting again would only
+ * empty the view.
+ */
+const EMERGENCY_EFFECTIVE = 0.8;
+/** Presentation gap after which the next frames start from an idle GPU. */
+const IDLE_GAP_MS = 1_000;
+/**
+ * How long frames after idle are kept out of every decision. A GPU that has
+ * dropped to idle clocks presents the first frames of a gesture several
+ * times slower than the same scene a moment later; measured on a laptop
+ * GPU, that lasted up to about 450 ms after a pause of two seconds or more.
+ */
+const WARM_UP_MS = 500;
+/** Continuous on-time presentation that hands back one emergency cut. */
+const RELIEF_CALM_MS = 1_000;
+/**
+ * A frame slower than this multiple of its budget votes for a cut: under
+ * 17 fps at a 60 Hz budget. Anything faster is left to the sampling loop,
+ * which holds while work is pending rather than cutting the detail of a view
+ * whose frame time may not depend on it at all.
+ */
+const EMERGENCY_COLLAPSE = 3.5;
+/** How long cuts stay off after one bought nothing. */
+const EMERGENCY_SUSPEND_MS = 5_000;
 /** Faster than any display refreshes: a shorter interval is a doubled tick. */
 const MIN_DISPLAY_QUANTUM_MS = 3;
 /**
@@ -266,8 +307,22 @@ export const createViewGovernor = (
   let cameraStabilityTimer: ReturnType<typeof setTimeout> | null = null;
   let emergencyCooldownUntil = Number.NEGATIVE_INFINITY;
   let lastEmergencyCutAt = Number.NEGATIVE_INFINITY;
-  let emergencyStreak = 0;
-  let reliefStreak = 0;
+  // The last few moving intervals and whether each was a collapse vote.
+  const emergencyWindow: {
+    readonly ms: number;
+    readonly collapsed: boolean;
+  }[] = [];
+  // A cut waiting to be judged against the frames that follow it.
+  let emergencyCheck: {
+    readonly triggerMs: number;
+    skip: number;
+    readonly after: number[];
+  } | null = null;
+  let emergencySuspendedUntil = Number.NEGATIVE_INFINITY;
+  let calmSince: number | null = null;
+  let lastFrameAt = Number.NEGATIVE_INFINITY;
+  let warmUntil = Number.NEGATIVE_INFINITY;
+  let lastFrameWarming = false;
   let eligibleCapacitySamples = 0;
   let rejectedCapacitySamples = 0;
   let lastCapacitySampleEligible: boolean | null = null;
@@ -303,14 +358,28 @@ export const createViewGovernor = (
     cameraStabilityTimer = null;
   };
 
+  // A pending judgement and a suspension outlive the gesture: whatever made
+  // the frames slow is usually still there when the next one starts.
+  const resetEmergencyWindow = (): void => {
+    emergencyWindow.length = 0;
+    calmSince = null;
+  };
+
   const enterInteraction = (): void => {
-    emergencyStreak = 0;
-    reliefStreak = 0;
-    quality.invalidateCapacity(false, stampNow());
+    resetEmergencyWindow();
+    // A still view that drew more detail inside a moving frame's budget has
+    // measured headroom a moving view cannot see for itself: at one refresh
+    // per frame, on time is all a moving frame can say.
+    const proven = quality.provenWithin(false, quality.lateThresholdMs(true));
+    // The view is about to change: the still view's window no longer
+    // describes it, but a level it found too expensive is still the best
+    // guess at what will be.
+    quality.clearSamples(false, stampNow());
     quality.restartAt(
       true,
       Math.max(
         quality.fraction(true),
+        proven ?? 0,
         INTERACTION_SEED_OF_STATIONARY * quality.fraction(false),
       ),
       stampNow(),
@@ -342,24 +411,13 @@ export const createViewGovernor = (
     let held = !disposed;
     if (held) {
       const wasInteracting = interacting();
-      // A fresh gesture reseeds even while the previous one's settle window is
-      // still open, but only while an emergency cut is actually holding the
-      // track under its seed floor. Otherwise a gesture begun inside
-      // `interactionSettleMs` inherits that floor and only rest can lift it: no
-      // capacity sample is eligible while tiles are streaming, so the very
-      // gestures that trigger cuts are the ones that cannot undo them.
-      //
-      // Reseeding unconditionally would instead clear the sample window and the
-      // emergency streak on every nudge, and a user making many gestures each
-      // shorter than the window could never adapt downward at all.
-      const newGesture =
-        kind === "explicit" &&
-        explicitMotion === 0 &&
-        quality.fraction(true) <
-          INTERACTION_SEED_OF_STATIONARY * quality.fraction(false);
       if (kind === "explicit") explicitMotion += 1;
       else inferredMotion += 1;
-      if (!wasInteracting || newGesture) enterInteraction();
+      // A gesture begun inside the previous one's settle window continues
+      // it. Reseeding there would undo an emergency cut the moment the next
+      // drag starts, only for the same frames to cut it again; a cut is given
+      // back by sustained calm instead, which works while tiles stream.
+      if (!wasInteracting) enterInteraction();
     }
     return {
       release() {
@@ -390,11 +448,7 @@ export const createViewGovernor = (
         ? quality.stats().interaction
         : quality.stats().stationary;
     const reason = current.lastAdjustment?.reason;
-    return (
-      reason === "within-hysteresis" ||
-      reason === "clamped" ||
-      (reason === "trial-accepted" && current.fraction === 1)
-    );
+    return reason === "within-hysteresis" || reason === "clamped";
   };
 
   const shouldRender = (): boolean =>
@@ -450,56 +504,110 @@ export const createViewGovernor = (
     if (quantum !== null) currentQuantum = quantum;
   };
 
+  const median = (values: readonly number[]): number => {
+    const sorted = [...values].sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)]!;
+  };
+
+  /** A cut is judged once its change has reached the screen. */
+  const judgeEmergencyCut = (observedMs: number, now: number): void => {
+    if (emergencyCheck === null) return;
+    if (emergencyCheck.skip > 0) {
+      emergencyCheck.skip -= 1;
+      return;
+    }
+    emergencyCheck.after.push(observedMs);
+    if (emergencyCheck.after.length < EMERGENCY_WINDOW) return;
+    if (
+      median(emergencyCheck.after) >
+      emergencyCheck.triggerMs * EMERGENCY_EFFECTIVE
+    ) {
+      quality.restoreNow(true, now, true);
+      emergencySuspendedUntil = now + EMERGENCY_SUSPEND_MS;
+    }
+    emergencyCheck = null;
+  };
+
+  /**
+   * Answers the frames the sampling loop may not: those drawn while work is
+   * pending. So it is deliberately slow to fire, needing most of a short
+   * window to have collapsed, and it takes back any cut that did not make frames
+   * faster, because a view held at low quality for nothing is the most
+   * visible failure a governor can have.
+   */
+  const considerEmergency = (
+    observedMs: number,
+    severeInput: boolean,
+    now: number,
+  ): void => {
+    const lateMs = quality.lateThresholdMs(true);
+    const collapseMs = quality.onTimeMs(true) * EMERGENCY_COLLAPSE;
+    emergencyWindow.push({
+      ms: observedMs,
+      collapsed: severeInput || observedMs > collapseMs,
+    });
+    if (emergencyWindow.length > EMERGENCY_WINDOW) emergencyWindow.shift();
+    judgeEmergencyCut(observedMs, now);
+    calmSince = observedMs > lateMs ? null : (calmSince ?? now);
+
+    const votes = emergencyWindow.filter((frame) => frame.collapsed).length;
+    if (
+      now >= emergencySuspendedUntil &&
+      emergencyCheck === null &&
+      now >= emergencyCooldownUntil &&
+      emergencyWindow.length === EMERGENCY_WINDOW &&
+      votes > EMERGENCY_WINDOW / 2
+    ) {
+      const triggerMs = median(emergencyWindow.map((frame) => frame.ms));
+      quality.reduceNow(true, now, quality.onTimeMs(true) / triggerMs);
+      emergencyCheck = { triggerMs, skip: EMERGENCY_SETTLE_FRAMES, after: [] };
+      emergencyWindow.length = 0;
+      calmSince = null;
+      lastEmergencyCutAt = now;
+      emergencyCooldownUntil = now + emergencyCooldownMs;
+      return;
+    }
+    // A cut that worked is given back only after a sustained calm: the view
+    // it protected is still the one on screen, and an early restore would
+    // bring the collapse straight back.
+    if (
+      emergencyCheck === null &&
+      calmSince !== null &&
+      now - calmSince >= RELIEF_CALM_MS &&
+      now >= emergencyCooldownUntil &&
+      quality.owesRestore(true)
+    ) {
+      quality.restoreNow(true, now);
+      calmSince = now;
+      emergencyCooldownUntil = now + emergencyCooldownMs;
+    }
+  };
+
   const recordTransientFrame = (metrics: TransientFrameMetrics): number => {
     if (disposed || !finiteNonNegative(metrics?.hostFrameMs)) return 0;
     noteDisplayQuantum(metrics.hostFrameMs);
     const now = stampFrom(metrics);
+    // Only a gap after earlier frames is idle: a governor's first frames are
+    // drawn while its scene loads, not at the start of a gesture.
+    if (Number.isFinite(lastFrameAt) && now - lastFrameAt > IDLE_GAP_MS) {
+      warmUntil = now + WARM_UP_MS;
+    }
+    lastFrameAt = now;
+    lastFrameWarming = now < warmUntil;
     const severeInput =
       (finiteNonNegative(metrics.inputDelayMs) && metrics.inputDelayMs > 50) ||
       (finiteNonNegative(metrics.longTaskMs) && metrics.longTaskMs > 50);
-    const target = quality.target(interacting());
     const observedMs = observedFrameMs(metrics);
     frameCount += 1;
     lastHostFrameMs = metrics.hostFrameMs;
     lastObservedFrameMs = observedMs;
     peakHostFrameMs = Math.max(peakHostFrameMs, metrics.hostFrameMs);
     peakObservedFrameMs = Math.max(peakObservedFrameMs, observedMs);
-    const emergency = moving() && (severeInput || observedMs > target * 2);
-    if (!emergency) emergencyStreak = 0;
-    if (
-      emergency &&
-      now >= emergencyCooldownUntil &&
-      ++emergencyStreak >= EMERGENCY_CONSECUTIVE_FRAMES
-    ) {
-      emergencyStreak = 0;
-      reliefStreak = 0;
-      quality.reduceNow(true, now);
-      lastEmergencyCutAt = now;
-      emergencyCooldownUntil = now + emergencyCooldownMs;
+    if (!moving() || lastFrameWarming) {
+      resetEmergencyWindow();
+      return observedMs;
     }
-    // The cut above answers a frame no capacity sample is allowed to answer:
-    // it fires while work is pending, which is exactly when eligibility is
-    // withheld. Without a relief that reads the same frames under the same
-    // conditions, a gesture long enough to keep tiles streaming can only
-    // ratchet quality down, and recovers no earlier than the next gesture or
-    // rest. Relief hands back one cut and stops at what the cuts took, so the
-    // eligible loop still owns every fraction above that.
-    const relief =
-      moving() &&
-      !severeInput &&
-      observedMs <= quality.increaseThresholdMs(interacting());
-    if (!relief) reliefStreak = 0;
-    if (
-      relief &&
-      now >= emergencyCooldownUntil &&
-      ++reliefStreak >= EMERGENCY_CONSECUTIVE_FRAMES
-    ) {
-      reliefStreak = 0;
-      const before = quality.fraction(true);
-      if (quality.restoreNow(true, now) !== before) {
-        emergencyCooldownUntil = now + emergencyCooldownMs;
-      }
-    }
+    considerEmergency(observedMs, severeInput, now);
     return observedMs;
   };
 
@@ -561,8 +669,9 @@ export const createViewGovernor = (
         quality,
         emergencyCooldownMs,
       } = configuration);
-      emergencyStreak = 0;
-      reliefStreak = 0;
+      resetEmergencyWindow();
+      emergencyCheck = null;
+      emergencySuspendedUntil = Number.NEGATIVE_INFINITY;
       emergencyCooldownUntil = Number.NEGATIVE_INFINITY;
       lastEmergencyCutAt = Number.NEGATIVE_INFINITY;
       eligibleCapacitySamples = 0;
@@ -607,7 +716,10 @@ export const createViewGovernor = (
       recordCapacitySample({
         frameMs: observedMs,
         regime: regime(),
-        eligible: (metrics.capacitySampleEligible ?? true) && coreEligible(),
+        eligible:
+          (metrics.capacitySampleEligible ?? true) &&
+          coreEligible() &&
+          !lastFrameWarming,
         now: metrics.now,
       });
     },
@@ -642,6 +754,7 @@ export const createViewGovernor = (
           cameraStable,
           workPending: pendingWork(),
           measurementEligible: coreEligible(),
+          warmingUp: lastFrameWarming,
         },
         capacitySamples: {
           eligible: eligibleCapacitySamples,
@@ -652,11 +765,14 @@ export const createViewGovernor = (
         configuredFrameTimeMs: track.targetMs,
         displayQuantumMs: adaptive.displayQuantumMs,
         estimateMs: track.estimateMs,
+        lateFraction: track.lateFraction,
         samples: track.samples,
         lastAdjustment: track.lastAdjustment,
-        trial: track.trial,
-        increaseCeiling: track.increaseCeiling,
-        trialAttempts: track.trialAttempts,
+        failedLevel: track.failedLevel,
+        emergency: {
+          suspended: emergencySuspendedUntil > stampNow(),
+          owed: track.emergencyCeiling !== null,
+        },
         physicalTileOperations: work.physicalTileOperations,
         physicalHierarchyOperations: work.physicalHierarchyOperations,
         needsFrame: shouldRender(),
