@@ -711,6 +711,20 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
     return cancelled;
   };
 
+  /**
+   * Bytes held once pending entries land. A submitted tile a pending entry
+   * replaces is released when that entry is admitted, so its bytes are not
+   * charged twice while the replacement uploads.
+   */
+  const committedBytes = (): number => {
+    let replaced = 0;
+    for (const id of replacementClaims.keys()) {
+      const tile = submitted.get(id);
+      if (tile) replaced += tile.geometryBytes + tile.textureBytes;
+    }
+    return reservedBytes() - replaced;
+  };
+
   const trimPool = (additionalBytes = 0): void => {
     for (const [id, tile] of pooled) {
       if (reservedBytes() + additionalBytes <= resourceCeilingBytes) return;
@@ -1194,14 +1208,15 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
     setResourceCeilingBytes(bytes) {
       if (disposed || !Number.isFinite(bytes) || bytes < 0) return [];
       resourceCeilingBytes = Math.floor(bytes);
+      // The speculative pool goes before any wanted upload does. Submitted
+      // coverage is never punched out here: the member first admits a
+      // shallower replacement and then retires descendants.
+      trimPool();
       const cancelled: string[] = [];
-      // Submitted coverage is never punched out here. The member first admits
-      // a shallower replacement and then retires descendants.
       for (const entry of [...pending.values()].reverse()) {
-        if (reservedBytes() <= resourceCeilingBytes) break;
+        if (committedBytes() <= resourceCeilingBytes) break;
         cancelled.push(...cancelPending(entry));
       }
-      trimPool();
       return cancelled;
     },
 

@@ -467,6 +467,21 @@ describe("vtk mesh adapter", () => {
     expect(adapter.stats()).toMatchObject({ pendingTiles: 0, pendingBytes: 0 });
   });
 
+  it("keeps an in-flight replacement that fits once it lands", () => {
+    const { adapter, drain, tileBytes } = replacementScene();
+    // The children replace the root, so the root's bytes are not charged
+    // twice while they upload.
+    expect(adapter.setResourceCeilingBytes(2 * tileBytes)).toEqual([]);
+    // A ceiling the group cannot fit cancels all of it, and says so.
+    expect([...adapter.setResourceCeilingBytes(tileBytes)].sort()).toEqual([
+      "root/0",
+      "root/1",
+    ]);
+    drain();
+    expect(adapter.tileState("root")).toBe("submitted");
+    expect(adapter.tileState("root/0")).toBe("absent");
+  });
+
   it("stages one primitive larger than the scheduler cap without an oversized job", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
     const scheduler = createSubmissionScheduler({
