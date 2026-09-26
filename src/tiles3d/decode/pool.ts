@@ -58,7 +58,7 @@ export type DecodeWorkerPoolOptions = {
 type JobRecord = {
   jobId: number;
   request: DecodeTileRequest;
-  state: "queued" | "active" | "cancelled" | "settled";
+  state: "queued" | "active" | "settled";
   startedAt: number | null;
   resolve(value: DecodedTileContent): void;
   reject(reason: unknown): void;
@@ -226,7 +226,6 @@ export class DecodeWorkerPool implements DecodeWorkerPoolHandle {
       if (slot.active) continue;
       const record = this.#queued.shift();
       if (!record) break;
-      if (record.state !== "queued") continue;
       record.state = "active";
       record.startedAt = globalThis.performance?.now?.() ?? Date.now();
       slot.active = record;
