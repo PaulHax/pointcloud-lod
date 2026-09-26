@@ -361,6 +361,56 @@ describe("createStreamedSceneCoordinator", () => {
     expect(fixed.allocations.at(-1)?.qualityFraction).toBe(1);
   });
 
+  it("holds each member's share while moving until the view fraction changes", () => {
+    const coordinator = makeCoordinator({
+      governor: { minSamples: 1, cooldownMs: 0 },
+    });
+    const points = makeMember();
+    const pointInputs = points.governorInputs();
+    let pointDemand = 1;
+    const tiles = makeMember();
+    coordinator.register(
+      {
+        ...points,
+        governorInputs: () => ({ ...pointInputs, qualityDemand: pointDemand }),
+      },
+      { qualityManaged: true },
+    );
+    coordinator.register(tiles, { qualityManaged: true });
+    coordinator.beginInteraction();
+    let serial = 0;
+    let now = 0;
+    const slowFrame = (): void => {
+      coordinator.prepareFrame(++serial);
+      coordinator.recordHostFrame({ hostFrameMs: 66, now: (now += 100) });
+      coordinator.prepareFrame(++serial);
+    };
+    slowFrame();
+    const moving = coordinator.stats().viewQualityFraction;
+    expect(moving).toBeLessThan(1);
+    expect(points.allocations.at(-1)?.qualityFraction).toBeCloseTo(moving);
+    expect(tiles.allocations.at(-1)?.qualityFraction).toBeCloseTo(moving);
+
+    pointDemand = moving / 4;
+    coordinator.prepareFrame(++serial);
+    expect(points.allocations.at(-1)?.qualityFraction).toBeCloseTo(moving);
+    expect(tiles.allocations.at(-1)?.qualityFraction).toBeCloseTo(moving);
+
+    slowFrame();
+    const cut = coordinator.stats().viewQualityFraction;
+    expect(cut).toBeLessThan(moving);
+    expect(points.allocations.at(-1)?.qualityFraction).toBeCloseTo(pointDemand);
+    expect(tiles.allocations.at(-1)?.qualityFraction).toBeCloseTo(
+      2 * cut - pointDemand,
+    );
+
+    pointDemand = cut / 4;
+    coordinator.endInteraction();
+    coordinator.prepareFrame(++serial);
+    expect(points.allocations.at(-1)?.qualityFraction).toBeCloseTo(pointDemand);
+    coordinator.dispose();
+  });
+
   it("does not train on the frame that drains the final submission", async () => {
     const coordinator = makeCoordinator({
       governor: { minSamples: 1, cooldownMs: 0 },

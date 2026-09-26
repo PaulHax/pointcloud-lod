@@ -219,11 +219,17 @@ const isAdaptive = (state: MemberState): boolean =>
  * What every member should hold: the view fraction water-filled across the
  * adaptive members by their last-read inputs, full quality for fixed members,
  * each active member's page memory share, and nothing for inactive members.
+ *
+ * `fractionApplied` says the current allocations were made at this same view
+ * fraction. While the camera moves, a visible adaptive member then keeps its
+ * share: demand follows the camera, so passing every change on would trade
+ * detail between members, and swap their tiles, all through a gesture.
  */
 const allocate = (
   states: readonly MemberState[],
   viewFraction: number,
   regime: AllocationRegime,
+  fractionApplied: boolean,
 ): ReadonlyMap<MemberState, Allocation> => {
   const quality = allocateViewQuality(
     states
@@ -231,21 +237,31 @@ const allocate = (
       .map((state) => ({ key: state, inputs: state.inputs })),
     viewFraction,
   );
+  const holding = fractionApplied && regime === "moving";
   return new Map(
-    states.map((state) => [
-      state,
-      {
-        qualityFraction: !state.active
-          ? 0
-          : state.qualityManaged
-            ? (quality.get(state) ?? 0)
-            : 1,
-        memoryBudgetBytes: state.active
-          ? (state.memoryMember?.budgetBytes() ?? 0)
-          : 0,
-        regime,
-      },
-    ]),
+    states.map((state) => {
+      const share = !state.active
+        ? 0
+        : state.qualityManaged
+          ? (quality.get(state) ?? 0)
+          : 1;
+      const held =
+        holding &&
+        state.qualityManaged &&
+        state.allocation.regime === "moving" &&
+        state.allocation.qualityFraction > 0 &&
+        share > 0;
+      return [
+        state,
+        {
+          qualityFraction: held ? state.allocation.qualityFraction : share,
+          memoryBudgetBytes: state.active
+            ? (state.memoryMember?.budgetBytes() ?? 0)
+            : 0,
+          regime,
+        },
+      ];
+    }),
   );
 };
 
@@ -294,12 +310,18 @@ export const createStreamedSceneCoordinator = (
     return false;
   };
 
-  const plannedAllocations = (): ReadonlyMap<MemberState, Allocation> =>
-    allocate(
+  // The view fraction the current allocations were applied at.
+  let appliedViewFraction: number | null = null;
+
+  const plannedAllocations = (): ReadonlyMap<MemberState, Allocation> => {
+    const viewFraction = governor.qualityFraction();
+    return allocate(
       [...members],
-      governor.qualityFraction(),
+      viewFraction,
       governor.regime() === "interaction" ? "moving" : "stationary",
+      viewFraction === appliedViewFraction,
     );
+  };
 
   const allocationOutdated = (): boolean => {
     for (const [state, next] of plannedAllocations()) {
@@ -314,6 +336,7 @@ export const createStreamedSceneCoordinator = (
       state.allocation = next;
       state.member.applyAllocation(next);
     }
+    appliedViewFraction = governor.qualityFraction();
   };
 
   const invalidateCapacity = (): void => {
