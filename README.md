@@ -156,9 +156,11 @@ The source calls `createWorker` once per worker and owns every worker it
 makes; call `source.dispose()` after disposing its controller. The first worker
 reads the hierarchy, and every worker decodes tiles, since decoding is what
 bounds how fast a COPC view fills in. `workers` sets how many there are; it
-defaults to one fewer than the logical cores, from one to three. Cancellation
-still settles only when a worker's physical read or decode ends, so controller
-concurrency remains bounded.
+defaults to one fewer than the logical cores, from one to three. If the first
+worker fails the source fails; a decoder that fails is dropped, and the tiles it
+held fail and are retried on the workers left. Cancellation still settles only
+when a worker's physical read or decode ends, so controller concurrency remains
+bounded.
 
 ### Application flows and primary controls
 

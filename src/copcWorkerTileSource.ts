@@ -139,8 +139,10 @@ const openChannel = (worker: Worker, fail: (error: Error) => void): Channel => {
  * decoders, opened from the header and colour shift the first one sampled;
  * each tile goes to the least busy worker, with its file location attached
  * for a decoder. Decoding is what bounds a COPC stream once its ranges are in
- * flight, so this multiplies how fast a view fills in. A worker failure fails
- * the whole source, as it would with one worker.
+ * flight, so this multiplies how fast a view fills in. The hierarchy worker
+ * failing fails the whole source, as it would with one worker; a decoder only
+ * adds capacity, so one that fails is dropped and the tiles it held fail,
+ * to be retried on the workers left.
  */
 export const createCopcWorkerTileSource = async (
   options: CopcWorkerTileSourceOptions,
@@ -150,7 +152,7 @@ export const createCopcWorkerTileSource = async (
     Math.floor(options.workers ?? defaultWorkerCount()),
   );
   const lazPerfWasmUrl = options.lazPerfWasmUrl ?? defaultWasmUrl();
-  const channels: Channel[] = [];
+  const channels = new Set<Channel>();
   let disposed = false;
   let nextId = 0;
 
@@ -159,13 +161,9 @@ export const createCopcWorkerTileSource = async (
     disposed = true;
     for (const channel of channels) channel.close(error);
   };
-  const addChannel = (): Channel => {
-    const channel = openChannel(options.createWorker(), teardown);
-    channels.push(channel);
-    return channel;
-  };
 
-  const hierarchy = addChannel();
+  const hierarchy = openChannel(options.createWorker(), teardown);
+  channels.add(hierarchy);
   let opened: CopcWorkerResponse;
   try {
     opened = await hierarchy.send({
@@ -189,8 +187,17 @@ export const createCopcWorkerTileSource = async (
 
   /** Decoders that have finished opening; only these are given tiles. */
   const decoders: Channel[] = [];
+  const drop = (decoder: Channel, error: unknown): void => {
+    decoder.close(error);
+    channels.delete(decoder);
+    const index = decoders.indexOf(decoder);
+    if (index >= 0) decoders.splice(index, 1);
+  };
   for (let index = 1; index < workerCount; index += 1) {
-    const decoder = addChannel();
+    const decoder: Channel = openChannel(options.createWorker(), (error) =>
+      drop(decoder, error),
+    );
+    channels.add(decoder);
     decoder
       .send({
         type: "open-decoder",
@@ -199,7 +206,12 @@ export const createCopcWorkerTileSource = async (
         lazPerfWasmUrl,
         state,
       })
-      .then(() => decoders.push(decoder), teardown);
+      .then(
+        () => {
+          if (channels.has(decoder)) decoders.push(decoder);
+        },
+        (error: unknown) => drop(decoder, error),
+      );
   }
 
   /** The file location of each node the hierarchy reads have described. */
