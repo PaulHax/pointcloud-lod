@@ -930,10 +930,16 @@ export const createLodController = (
 
   const FALLBACK_BYTES_PER_POINT = 16;
   const MEASURE_MIN_POINTS = 100_000;
+  const BYTES_PER_POINT_STEPS = 64;
 
+  // Quantized, because the ratio shifts in its last digits whenever the
+  // resident set changes, and the budget that chose that set is derived from
+  // the ceiling this feeds. Unquantized, a share that exactly covers the view
+  // can flip one tile in and out on every allocation, forever.
   const bytesPerPoint = (): number =>
     residentPoints >= MEASURE_MIN_POINTS
-      ? residentBytes / residentPoints
+      ? Math.ceil((residentBytes / residentPoints) * BYTES_PER_POINT_STEPS) /
+        BYTES_PER_POINT_STEPS
       : FALLBACK_BYTES_PER_POINT;
 
   // An inactive controller holds no share: it has dropped its resident tiles
@@ -1692,6 +1698,9 @@ export const createLodController = (
       const previousBudget = currentBudget();
       pointBudget = Math.floor(points);
       const nextBudget = currentBudget();
+      // The same budget selects the same frontier: rerunning it would only
+      // report work and ask for another allocation.
+      if (nextBudget === previousBudget) return;
       runSelection(
         nextBudget > previousBudget &&
           target.size > 0 &&

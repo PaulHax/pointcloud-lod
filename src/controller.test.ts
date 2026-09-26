@@ -2830,6 +2830,44 @@ describe("createLodController — numeric configuration", () => {
     }
   });
 
+  it("does not reselect when handed the budget it already has", async () => {
+    const { controller, deferred } = makeController(SMALL_TREE);
+    await bootAndLand(controller, deferred);
+    const before = controller.stats();
+    controller.setPointBudget(before.pointBudget);
+    const after = controller.stats();
+    expect(after.selection.generation).toBe(before.selection.generation);
+    expect(after.workRevision).toBe(before.workRevision);
+    controller.dispose();
+  });
+
+  it("keeps its memory ceiling while bytes per point wobble in the last digits", async () => {
+    const tree: Record<string, FakeEntry> = {
+      "0-0-0-0": { pointCount: 100_000, children: ["1-0-0-0"] },
+      "1-0-0-0": { pointCount: 7 },
+    };
+    const { controller, deferred } = makeController(tree, {
+      pointBudget: 100_000,
+      memoryBudgetBytes: 1 << 30,
+    });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    // Colored root, uncolored child: 15 bytes per point, then a hair under.
+    deferred.get("0-0-0-0")!.resolve({ rgb: new Uint8Array(300_000) });
+    await settle();
+    const ceiling = controller.governorInputs().memoryCeilingPoints;
+    controller.setPointBudget(100_007);
+    await settle();
+    deferred.get("1-0-0-0")!.resolve();
+    await settle();
+    expect(controller.stats().residentTiles).toBe(2);
+    // The budget derived from this ceiling chose that resident set, so a
+    // ceiling moved by it would feed back into the next budget.
+    expect(controller.governorInputs().memoryCeilingPoints).toBe(ceiling);
+    controller.dispose();
+  });
+
   it("truncates fractional construction counts", () => {
     const controller = make({ pointBudget: 1000.9, fetchConcurrency: 2.7 });
     expect(controller.stats().pointBudget).toBe(1000);
