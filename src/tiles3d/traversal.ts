@@ -449,14 +449,10 @@ export const createTilesetTraversal = () => {
   };
 };
 
-export const traverseTileset = (
-  options: TilesetTraversalOptions,
-): TilesetTraversalResult => traverseHierarchy(options);
-
 const traverseHierarchy = (
   options: TilesetTraversalOptions,
-  materialized?: MaterializedHierarchy,
-  placements?: Map<TilesetTile, TilePlacement>,
+  hierarchy: MaterializedHierarchy,
+  placements: Map<TilesetTile, TilePlacement>,
 ): TilesetTraversalResult => {
   if (
     !Number.isFinite(options.maximumScreenSpaceErrorPx) ||
@@ -476,11 +472,6 @@ const traverseHierarchy = (
   }
   const effective = options.maximumScreenSpaceErrorPx / Math.max(quality, 0.05);
   const planes = frustumPlanes(options.camera.viewProj);
-  const hierarchy =
-    materialized ??
-    (options.root.implicitTiling
-      ? implicitHierarchy(options.root, options.subtrees)
-      : explicitHierarchy(options.root));
   const neededSubtrees = new Map<string, TileContentRequest>();
 
   const hasSubmittedDescendant = (tile: TilesetTile): boolean =>
@@ -494,7 +485,7 @@ const traverseHierarchy = (
     tile: TilesetTile,
     parentTransform: readonly number[],
   ): VisitResult => {
-    let placement = placements?.get(tile);
+    let placement = placements.get(tile);
     if (!placement) {
       const transform = multiplyTilesetMatrices(
         parentTransform,
@@ -504,7 +495,7 @@ const traverseHierarchy = (
         transform,
         bounds: worldBox(tile.boundingVolume, transform),
       };
-      placements?.set(tile, placement);
+      placements.set(tile, placement);
     }
     const { transform: accumulated, bounds } = placement;
     if (!boxIntersectsFrustum(bounds, planes)) {

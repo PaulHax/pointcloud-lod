@@ -21,9 +21,9 @@ import {
 } from ".";
 import {
   decodeTileContent,
+  dependencyUrl,
   expandedIndices,
   normalizeTextureCoordinates,
-  resolveGltfDependencyUrl,
   type DecodeTileOptions,
 } from "./decoder";
 
@@ -901,19 +901,19 @@ describe("decoded tile contract", () => {
       tilesetToScene: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
       textureCapabilities: capabilities("rgba", []),
     } satisfies DecodeTileRequest;
-    expect(resolveGltfDependencyUrl(base, "buffers/mesh.bin")).toBe(
+    expect(dependencyUrl(base, "buffers/mesh.bin")).toBe(
       "https://fixture.invalid/root/models/buffers/mesh.bin",
     );
-    expect(resolveGltfDependencyUrl(base, "mesh%2Ebin")).toBe(
+    expect(dependencyUrl(base, "mesh%2Ebin")).toBe(
       "https://fixture.invalid/root/models/mesh.bin",
     );
-    expect(resolveGltfDependencyUrl(base, "%2e/mesh.bin")).toBe(
+    expect(dependencyUrl(base, "%2e/mesh.bin")).toBe(
       "https://fixture.invalid/root/models/mesh.bin",
     );
-    expect(resolveGltfDependencyUrl(base, "%252e/mesh.bin")).toBe(
+    expect(dependencyUrl(base, "%252e/mesh.bin")).toBe(
       "https://fixture.invalid/root/models/mesh.bin",
     );
-    expect(resolveGltfDependencyUrl(base, "buffers//%252e/mesh.bin")).toBe(
+    expect(dependencyUrl(base, "buffers//%252e/mesh.bin")).toBe(
       "https://fixture.invalid/root/models/buffers/mesh.bin",
     );
     for (const value of [
@@ -931,7 +931,7 @@ describe("decoded tile contract", () => {
       "mesh%00.bin",
       "mesh%ZZ.bin",
     ]) {
-      expect(() => resolveGltfDependencyUrl(base, value)).toThrow();
+      expect(() => dependencyUrl(base, value)).toThrow();
     }
   });
 

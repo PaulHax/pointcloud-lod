@@ -471,7 +471,10 @@ const wasmModules = (
   return modules;
 };
 
-const dependencyUrl = (request: DecodeTileRequest, value: string): string => {
+export const dependencyUrl = (
+  request: DecodeTileRequest,
+  value: string,
+): string => {
   if (!request.dependencyRootUrl || !value) {
     throw new Error(
       `external glTF dependency URI is not same-root relative: ${value}`,
@@ -1729,7 +1732,3 @@ export const decodeTileContent = async (
     });
   }
 };
-
-// Keep this exported for focused URI-policy tests without exposing a fetch
-// implementation object on the worker protocol.
-export const resolveGltfDependencyUrl = dependencyUrl;
