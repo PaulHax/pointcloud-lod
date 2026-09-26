@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { CameraView, Mat16 } from "./camera";
 import { createMemoryPool } from "./memoryPool";
-import { createStreamedSceneCoordinator } from "./streamedSceneCoordinator";
+import {
+  createStreamedSceneCoordinator,
+  type StreamedSceneCoordinatorOptions,
+} from "./streamedSceneCoordinator";
 import type {
   Allocation,
   GovernorInputs,
@@ -19,6 +22,19 @@ const VIEW: CameraView = {
   viewportWidthCssPx: 100,
   viewportHeightCssPx: 100,
 };
+
+/** A coordinator over its own small page pool unless a test shares one. */
+const makeCoordinator = ({
+  totalBytes = 300,
+  ...options
+}: Partial<StreamedSceneCoordinatorOptions> & {
+  readonly totalBytes?: number;
+} = {}) =>
+  createStreamedSceneCoordinator({
+    scheduleRender: vi.fn(),
+    memory: createMemoryPool({ totalBytes }),
+    ...options,
+  });
 
 const makeMember = (overrides: Partial<GovernorInputs> = {}) => {
   const inputs: GovernorInputs = {
@@ -56,9 +72,9 @@ describe("createStreamedSceneCoordinator", () => {
     "remeasures after an active peer is removed by %s",
     (action) => {
       const scheduleRender = vi.fn();
-      const coordinator = createStreamedSceneCoordinator({
+      const coordinator = makeCoordinator({
         scheduleRender,
-        memory: createMemoryPool({ totalBytes: 1000 }),
+        totalBytes: 1000,
         governor: { minSamples: 2, windowSize: 10, cooldownMs: 0 },
       });
       coordinator.register(makeMember(), { qualityManaged: true });
@@ -91,9 +107,9 @@ describe("createStreamedSceneCoordinator", () => {
     "remeasures a more expensive workload after %s without queued work",
     (action) => {
       const scheduleRender = vi.fn();
-      const coordinator = createStreamedSceneCoordinator({
+      const coordinator = makeCoordinator({
         scheduleRender,
-        memory: createMemoryPool({ totalBytes: 1000 }),
+        totalBytes: 1000,
         governor: { minSamples: 2, windowSize: 4, cooldownMs: 0 },
       });
       const member = coordinator.register(makeMember(), {
@@ -123,9 +139,9 @@ describe("createStreamedSceneCoordinator", () => {
 
   it("does not restart learning for inactive changes or unchanged visibility", () => {
     const scheduleRender = vi.fn();
-    const coordinator = createStreamedSceneCoordinator({
+    const coordinator = makeCoordinator({
       scheduleRender,
-      memory: createMemoryPool({ totalBytes: 1000 }),
+      totalBytes: 1000,
       governor: { minSamples: 2 },
     });
     const active = coordinator.register(makeMember(), { qualityManaged: true });
@@ -145,9 +161,9 @@ describe("createStreamedSceneCoordinator", () => {
 
   it("remeasures after an active member changes quality policy", () => {
     const scheduleRender = vi.fn();
-    const coordinator = createStreamedSceneCoordinator({
+    const coordinator = makeCoordinator({
       scheduleRender,
-      memory: createMemoryPool({ totalBytes: 1000 }),
+      totalBytes: 1000,
       governor: { minSamples: 2 },
     });
     coordinator.register(makeMember(), { qualityManaged: true });
@@ -165,10 +181,7 @@ describe("createStreamedSceneCoordinator", () => {
 
   it("owns one memory registration per active member and fans out byte shares", () => {
     const memory = createMemoryPool({ totalBytes: 900 });
-    const coordinator = createStreamedSceneCoordinator({
-      scheduleRender: vi.fn(),
-      memory,
-    });
+    const coordinator = makeCoordinator({ memory });
     const a = makeMember();
     const b = makeMember();
     const aRegistration = coordinator.register(a, { qualityManaged: true });
@@ -186,10 +199,7 @@ describe("createStreamedSceneCoordinator", () => {
     (qualityManaged) => {
       let pending = true;
       const scheduleRender = vi.fn();
-      const coordinator = createStreamedSceneCoordinator({
-        scheduleRender,
-        memory: createMemoryPool({ totalBytes: 1000 }),
-      });
+      const coordinator = makeCoordinator({ scheduleRender, totalBytes: 1000 });
       const base = makeMember();
       coordinator.register(
         {
@@ -220,10 +230,7 @@ describe("createStreamedSceneCoordinator", () => {
     // budget can trade it indefinitely; before the refresh loop was made
     // iterative this recursed until the stack ran out, which is how a combined
     // point-cloud and 3D Tiles scene died a few seconds into a gesture.
-    const coordinator = createStreamedSceneCoordinator({
-      scheduleRender: vi.fn(),
-      memory: createMemoryPool({ totalBytes: 1_000 }),
-    });
+    const coordinator = makeCoordinator({ totalBytes: 1000 });
     const context = coordinator.context({} as never);
 
     let serial = 0;
@@ -264,10 +271,7 @@ describe("createStreamedSceneCoordinator", () => {
   });
 
   it("water-fills normalized quality across managed members only", () => {
-    const coordinator = createStreamedSceneCoordinator({
-      scheduleRender: vi.fn(),
-      memory: createMemoryPool({ totalBytes: 300 }),
-    });
+    const coordinator = makeCoordinator();
     const capped = makeMember({ qualityDemand: 0.1 });
     const open = makeMember();
     const fixed = makeMember();
@@ -280,9 +284,7 @@ describe("createStreamedSceneCoordinator", () => {
   });
 
   it("does not train on the frame that drains the final submission", () => {
-    const coordinator = createStreamedSceneCoordinator({
-      scheduleRender: vi.fn(),
-      memory: createMemoryPool({ totalBytes: 300 }),
+    const coordinator = makeCoordinator({
       governor: { minSamples: 1, cooldownMs: 0 },
     });
     let busy = true;
@@ -308,9 +310,7 @@ describe("createStreamedSceneCoordinator", () => {
   });
 
   it("rejects a submission enqueued and drained between work notifications", () => {
-    const coordinator = createStreamedSceneCoordinator({
-      scheduleRender: vi.fn(),
-      memory: createMemoryPool({ totalBytes: 300 }),
+    const coordinator = makeCoordinator({
       governor: { minSamples: 1, cooldownMs: 0 },
     });
     coordinator.register(makeMember(), { qualityManaged: true });
@@ -330,9 +330,7 @@ describe("createStreamedSceneCoordinator", () => {
   });
 
   it("keeps completed fixed-member work until a valid presentation report", () => {
-    const coordinator = createStreamedSceneCoordinator({
-      scheduleRender: vi.fn(),
-      memory: createMemoryPool({ totalBytes: 300 }),
+    const coordinator = makeCoordinator({
       governor: { minSamples: 1, cooldownMs: 0 },
     });
     coordinator.register(makeMember(), { qualityManaged: true });
@@ -358,9 +356,7 @@ describe("createStreamedSceneCoordinator", () => {
   });
 
   it("keeps a member reporting importance on the wrong scale to its share", () => {
-    const coordinator = createStreamedSceneCoordinator({
-      scheduleRender: vi.fn(),
-      memory: createMemoryPool({ totalBytes: 300 }),
+    const coordinator = makeCoordinator({
       governor: { minSamples: 1, cooldownMs: 0 },
     });
     // A raw screen-space error in pixels where a [0, 1] weight belongs.
@@ -377,10 +373,7 @@ describe("createStreamedSceneCoordinator", () => {
   });
 
   it("allocates no quality to members reporting unusable inputs", () => {
-    const coordinator = createStreamedSceneCoordinator({
-      scheduleRender: vi.fn(),
-      memory: createMemoryPool({ totalBytes: 300 }),
-    });
+    const coordinator = makeCoordinator();
     const noImportance = makeMember({
       projectedImportance: Number.NaN as Importance,
     });
@@ -395,9 +388,7 @@ describe("createStreamedSceneCoordinator", () => {
   });
 
   it("feeds the governor fraction directly into view allocation", () => {
-    const coordinator = createStreamedSceneCoordinator({
-      scheduleRender: vi.fn(),
-      memory: createMemoryPool({ totalBytes: 300 }),
+    const coordinator = makeCoordinator({
       governor: { minSamples: 1, cooldownMs: 0 },
     });
     const adaptive = makeMember();
@@ -411,10 +402,7 @@ describe("createStreamedSceneCoordinator", () => {
   });
 
   it("uses the first active adaptive member's targets in stable registry order", () => {
-    const coordinator = createStreamedSceneCoordinator({
-      scheduleRender: vi.fn(),
-      memory: createMemoryPool({ totalBytes: 300 }),
-    });
+    const coordinator = makeCoordinator();
     const first = coordinator.register(makeMember(), {
       id: "first",
       qualityManaged: true,
@@ -437,10 +425,7 @@ describe("createStreamedSceneCoordinator", () => {
   });
 
   it("lets the first adaptive point override targets after targetless members", () => {
-    const coordinator = createStreamedSceneCoordinator({
-      scheduleRender: vi.fn(),
-      memory: createMemoryPool({ totalBytes: 300 }),
-    });
+    const coordinator = makeCoordinator();
     coordinator.register(makeMember(), {
       id: "tiles-first",
       qualityManaged: true,
@@ -457,10 +442,7 @@ describe("createStreamedSceneCoordinator", () => {
   });
 
   it("lets the host own global frame targets", () => {
-    const coordinator = createStreamedSceneCoordinator({
-      scheduleRender: vi.fn(),
-      memory: createMemoryPool({ totalBytes: 300 }),
-    });
+    const coordinator = makeCoordinator();
     coordinator.register(makeMember(), {
       id: "point",
       qualityManaged: true,
@@ -480,10 +462,7 @@ describe("createStreamedSceneCoordinator", () => {
 
   it("keeps camera/model/DPR/config member-specific and drains shared submissions", () => {
     const order: string[] = [];
-    const coordinator = createStreamedSceneCoordinator({
-      scheduleRender: vi.fn(),
-      memory: createMemoryPool({ totalBytes: 300 }),
-    });
+    const coordinator = makeCoordinator();
     const member = makeMember();
     const other = makeMember();
     member.prepareFrame.mockImplementation(() => order.push("member"));
@@ -523,10 +502,7 @@ describe("createStreamedSceneCoordinator", () => {
   });
 
   it("replays held interaction depth to members registered mid-gesture", () => {
-    const coordinator = createStreamedSceneCoordinator({
-      scheduleRender: vi.fn(),
-      memory: createMemoryPool({ totalBytes: 300 }),
-    });
+    const coordinator = makeCoordinator();
     coordinator.beginInteraction();
     coordinator.beginInteraction();
     const member = makeMember();
@@ -541,10 +517,7 @@ describe("createStreamedSceneCoordinator", () => {
   });
 
   it("compares camera snapshots rather than aliases restated by the host", () => {
-    const coordinator = createStreamedSceneCoordinator({
-      scheduleRender: vi.fn(),
-      memory: createMemoryPool({ totalBytes: 300 }),
-    });
+    const coordinator = makeCoordinator();
     const member = makeMember();
     const registration = coordinator.register(member);
     const mutable = {
@@ -571,10 +544,7 @@ describe("createStreamedSceneCoordinator", () => {
       physicalHierarchyOperations: 0,
       residentBytes: 0,
     });
-    const coordinator = createStreamedSceneCoordinator({
-      scheduleRender: vi.fn(),
-      memory: createMemoryPool({ totalBytes: 300 }),
-    });
+    const coordinator = makeCoordinator();
     coordinator.register(member, { qualityManaged: true });
     expect(coordinator.stats().governor.activity.workPending).toBe(true);
     workPending = false;
@@ -583,10 +553,7 @@ describe("createStreamedSceneCoordinator", () => {
   });
 
   it("includes fixed-member work in adaptive sample eligibility", () => {
-    const coordinator = createStreamedSceneCoordinator({
-      scheduleRender: vi.fn(),
-      memory: createMemoryPool({ totalBytes: 300 }),
-    });
+    const coordinator = makeCoordinator();
     coordinator.register(makeMember(), { qualityManaged: true });
     coordinator.register(
       makeMember({ work: { operations: 1, progressSerial: 0 } }),
@@ -604,11 +571,7 @@ describe("createStreamedSceneCoordinator", () => {
       work: { operations: 1, progressSerial: 7 },
       physicalTileOperations: 1,
     });
-    const coordinator = createStreamedSceneCoordinator({
-      scheduleRender: vi.fn(),
-      memory: createMemoryPool({ totalBytes: 300 }),
-      now: () => now,
-    });
+    const coordinator = makeCoordinator({ now: () => now });
     coordinator.register(makeMember(), {
       id: "healthy",
       qualityManaged: true,
@@ -633,14 +596,8 @@ describe("createStreamedSceneCoordinator", () => {
 
   it("shares one page pool across independent view coordinators", () => {
     const memory = createMemoryPool({ totalBytes: 1_000 });
-    const first = createStreamedSceneCoordinator({
-      scheduleRender: vi.fn(),
-      memory,
-    });
-    const second = createStreamedSceneCoordinator({
-      scheduleRender: vi.fn(),
-      memory,
-    });
+    const first = makeCoordinator({ memory });
+    const second = makeCoordinator({ memory });
     const firstMember = makeMember();
     const secondMember = makeMember();
     first.register(firstMember);

@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { createSubmissionScheduler } from "../submissionScheduler";
+import {
+  createSubmissionScheduler,
+  DEFAULT_SUBMISSION_BYTES_PER_FRAME,
+} from "../submissionScheduler";
 import type { DecodedTexture, DecodedTileContent } from "./decode";
 import { createMeshAdapter } from "./meshAdapter";
 import {
@@ -51,6 +54,35 @@ const content = (texture: DecodedTexture = compressed): DecodedTileContent => ({
   byteEstimate: { geometry: 204, textures: 16 },
 });
 
+/** A mesh adapter over a scheduler whose clock never advances. */
+const makeAdapter = ({
+  maxBytesPerFrame = 1024,
+  renderer = { addActor: vi.fn(), removeActor: vi.fn() },
+  scheduleRender = vi.fn(),
+  onError,
+}: {
+  readonly maxBytesPerFrame?: number;
+  readonly renderer?: {
+    addActor(actor: unknown): void;
+    removeActor(actor: unknown): void;
+  };
+  readonly scheduleRender?: () => void;
+  readonly onError?: (error: unknown) => void;
+} = {}) => {
+  const scheduler = createSubmissionScheduler({
+    scheduleRender,
+    maxBytesPerFrame,
+    now: () => 0,
+  });
+  const adapter = createMeshAdapter({
+    renderer,
+    scheduleRender,
+    submissions: scheduler,
+    onError,
+  });
+  return { adapter, scheduler };
+};
+
 const alphaContent = (
   alphaMode: "OPAQUE" | "MASK" | "BLEND",
   alphaCutoff: number,
@@ -68,16 +100,7 @@ describe("vtk mesh adapter", () => {
   beforeEach(resetStubs);
 
   it("keeps vertex colors through bounded geometry submissions", () => {
-    const scheduler = createSubmissionScheduler({
-      scheduleRender: vi.fn(),
-      maxBytesPerFrame: 128,
-      now: () => 0,
-    });
-    const adapter = createMeshAdapter({
-      renderer: { addActor: vi.fn(), removeActor: vi.fn() },
-      submissions: scheduler,
-      scheduleRender: vi.fn(),
-    });
+    const { adapter, scheduler } = makeAdapter({ maxBytesPerFrame: 128 });
     const payload = content();
     payload.primitives.splice(1);
     const primitive = payload.primitives[0]!;
@@ -115,16 +138,7 @@ describe("vtk mesh adapter", () => {
   });
 
   it("reports admission and pooled memory without detailed diagnostics", () => {
-    const scheduler = createSubmissionScheduler({
-      scheduleRender: vi.fn(),
-      maxBytesPerFrame: 128,
-      now: () => 0,
-    });
-    const adapter = createMeshAdapter({
-      renderer: { addActor: vi.fn(), removeActor: vi.fn() },
-      submissions: scheduler,
-      scheduleRender: vi.fn(),
-    });
+    const { adapter, scheduler } = makeAdapter({ maxBytesPerFrame: 128 });
     expect(adapter.workState()).toMatchObject({
       pendingJobs: 0,
       residentBytes: 0,
@@ -161,15 +175,9 @@ describe("vtk mesh adapter", () => {
 
   it("admits a large texture alone while retaining the tile memory ceiling", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
-    const scheduler = createSubmissionScheduler({
-      scheduleRender: vi.fn(),
+    const { adapter, scheduler } = makeAdapter({
       maxBytesPerFrame: 128,
-      now: () => 0,
-    });
-    const adapter = createMeshAdapter({
       renderer,
-      submissions: scheduler,
-      scheduleRender: vi.fn(),
     });
     const payload = content({
       ...compressed,
@@ -201,16 +209,10 @@ describe("vtk mesh adapter", () => {
   it("admits multi-primitive tiles atomically and binds shared compressed textures once", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
     const scheduleRender = vi.fn();
-    const scheduler = createSubmissionScheduler({
-      scheduleRender,
+    const { adapter, scheduler } = makeAdapter({
       maxBytesPerFrame: 128,
-      maxTimeMsPerFrame: 100,
-      now: () => 0,
-    });
-    const adapter = createMeshAdapter({
-      renderer,
       scheduleRender,
-      submissions: scheduler,
+      renderer,
     });
     const admitted = vi.fn();
     adapter.submitTile("tile", content(), admitted);
@@ -269,17 +271,7 @@ describe("vtk mesh adapter", () => {
   });
 
   it("realizes MASK as an opaque-pass alpha test before final color output", () => {
-    const scheduler = createSubmissionScheduler({
-      scheduleRender: vi.fn(),
-      maxBytesPerFrame: 1024,
-      maxTimeMsPerFrame: 100,
-      now: () => 0,
-    });
-    const adapter = createMeshAdapter({
-      renderer: { addActor: vi.fn(), removeActor: vi.fn() },
-      scheduleRender: vi.fn(),
-      submissions: scheduler,
-    });
+    const { adapter, scheduler } = makeAdapter();
     adapter.submitTile("mask", alphaContent("MASK", 0.37, 0.8));
     scheduler.prepareFrame();
 
@@ -311,17 +303,7 @@ describe("vtk mesh adapter", () => {
   });
 
   it("disables vtk lighting for KHR_materials_unlit primitives", () => {
-    const scheduler = createSubmissionScheduler({
-      scheduleRender: vi.fn(),
-      maxBytesPerFrame: 1024,
-      maxTimeMsPerFrame: 100,
-      now: () => 0,
-    });
-    const adapter = createMeshAdapter({
-      renderer: { addActor: vi.fn(), removeActor: vi.fn() },
-      scheduleRender: vi.fn(),
-      submissions: scheduler,
-    });
+    const { adapter, scheduler } = makeAdapter();
     const unlit = content();
     unlit.primitives.splice(1);
     unlit.primitives[0]!.material.raw.unlit = true;
@@ -333,17 +315,7 @@ describe("vtk mesh adapter", () => {
   });
 
   it("keeps OPAQUE texture alpha out of blending and BLEND in the translucent pass", () => {
-    const scheduler = createSubmissionScheduler({
-      scheduleRender: vi.fn(),
-      maxBytesPerFrame: 1024,
-      maxTimeMsPerFrame: 100,
-      now: () => 0,
-    });
-    const adapter = createMeshAdapter({
-      renderer: { addActor: vi.fn(), removeActor: vi.fn() },
-      scheduleRender: vi.fn(),
-      submissions: scheduler,
-    });
+    const { adapter, scheduler } = makeAdapter();
     adapter.submitTile("opaque", alphaContent("OPAQUE", 0.73, 0.25));
     scheduler.prepareFrame();
     adapter.submitTile("blend", alphaContent("BLEND", 0.19, 0.25));
@@ -368,13 +340,6 @@ describe("vtk mesh adapter", () => {
   });
 
   it("uses actual expanded RGBA bytes and applies anchor after the RTC origin", () => {
-    const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
-    const scheduler = createSubmissionScheduler({
-      scheduleRender: vi.fn(),
-      maxBytesPerFrame: 1024,
-      maxTimeMsPerFrame: 100,
-      now: () => 0,
-    });
     const rgba = {
       kind: "rgba" as const,
       rgba: new Uint8Array(4 * 4 * 4),
@@ -383,11 +348,7 @@ describe("vtk mesh adapter", () => {
       colorSpace: "srgb" as const,
       sampler: compressed.sampler,
     };
-    const adapter = createMeshAdapter({
-      renderer,
-      scheduleRender: vi.fn(),
-      submissions: scheduler,
-    });
+    const { adapter, scheduler } = makeAdapter();
     adapter.setBaseMatrix([
       1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 100, 200, 300, 1,
     ]);
@@ -408,16 +369,9 @@ describe("vtk mesh adapter", () => {
 
   it("cancels partial admissions without attaching actors or leaking vtk resources", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
-    const scheduler = createSubmissionScheduler({
-      scheduleRender: vi.fn(),
+    const { adapter, scheduler } = makeAdapter({
       maxBytesPerFrame: 128,
-      maxTimeMsPerFrame: 100,
-      now: () => 0,
-    });
-    const adapter = createMeshAdapter({
       renderer,
-      scheduleRender: vi.fn(),
-      submissions: scheduler,
     });
     adapter.submitTile("tile", content());
     scheduler.prepareFrame();
@@ -429,16 +383,7 @@ describe("vtk mesh adapter", () => {
   });
 
   const replacementScene = () => {
-    const scheduler = createSubmissionScheduler({
-      scheduleRender: vi.fn(),
-      maxBytesPerFrame: 4096,
-      now: () => 0,
-    });
-    const adapter = createMeshAdapter({
-      renderer: { addActor: vi.fn(), removeActor: vi.fn() },
-      submissions: scheduler,
-      scheduleRender: vi.fn(),
-    });
+    const { adapter, scheduler } = makeAdapter({ maxBytesPerFrame: 4096 });
     const drain = () => {
       while (scheduler.hasPending()) scheduler.prepareFrame();
     };
@@ -484,16 +429,9 @@ describe("vtk mesh adapter", () => {
 
   it("stages one primitive larger than the scheduler cap without an oversized job", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
-    const scheduler = createSubmissionScheduler({
-      scheduleRender: vi.fn(),
+    const { adapter, scheduler } = makeAdapter({
       maxBytesPerFrame: 128,
-      maxTimeMsPerFrame: 100,
-      now: () => 0,
-    });
-    const adapter = createMeshAdapter({
       renderer,
-      scheduleRender: vi.fn(),
-      submissions: scheduler,
     });
     const large = content();
     const original = large.primitives[0]!;
@@ -534,15 +472,9 @@ describe("vtk mesh adapter", () => {
 
   it("submits a whole primitive on its own indices rather than as triangle soup", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
-    const scheduler = createSubmissionScheduler({
-      scheduleRender: vi.fn(),
-      maxTimeMsPerFrame: 100,
-      now: () => 0,
-    });
-    const adapter = createMeshAdapter({
+    const { adapter, scheduler } = makeAdapter({
+      maxBytesPerFrame: DEFAULT_SUBMISSION_BYTES_PER_FRAME,
       renderer,
-      scheduleRender: vi.fn(),
-      submissions: scheduler,
     });
     const quad = content();
     quad.primitives = [
@@ -569,17 +501,7 @@ describe("vtk mesh adapter", () => {
   it("hides pooled actors and removes their resources only on eviction", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
     const scheduleRender = vi.fn();
-    const scheduler = createSubmissionScheduler({
-      scheduleRender,
-      maxBytesPerFrame: 1024,
-      maxTimeMsPerFrame: 100,
-      now: () => 0,
-    });
-    const adapter = createMeshAdapter({
-      renderer,
-      scheduleRender,
-      submissions: scheduler,
-    });
+    const { adapter, scheduler } = makeAdapter({ scheduleRender, renderer });
     adapter.submitTile("tile", content());
     scheduler.prepareFrame();
     adapter.retireTile("tile");
@@ -597,17 +519,7 @@ describe("vtk mesh adapter", () => {
 
   it("reuses retired submitted tiles and keeps only the arrays vtk holds", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
-    const scheduler = createSubmissionScheduler({
-      scheduleRender: vi.fn(),
-      maxBytesPerFrame: 1024,
-      maxTimeMsPerFrame: 100,
-      now: () => 0,
-    });
-    const adapter = createMeshAdapter({
-      renderer,
-      scheduleRender: vi.fn(),
-      submissions: scheduler,
-    });
+    const { adapter, scheduler } = makeAdapter({ renderer });
     const payload = content();
     adapter.submitTile("tile", payload);
     scheduler.prepareFrame();
@@ -655,18 +567,7 @@ describe("vtk mesh adapter", () => {
   it("passes asymmetric, mirrored, and mixed filters through the exact sampler seam", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
     const onError = vi.fn();
-    const scheduler = createSubmissionScheduler({
-      scheduleRender: vi.fn(),
-      maxBytesPerFrame: 1024,
-      maxTimeMsPerFrame: 100,
-      now: () => 0,
-    });
-    const adapter = createMeshAdapter({
-      renderer,
-      scheduleRender: vi.fn(),
-      submissions: scheduler,
-      onError,
-    });
+    const { adapter, scheduler } = makeAdapter({ renderer, onError });
     const sampler = {
       magFilter: 9728,
       minFilter: 9987,
@@ -689,17 +590,7 @@ describe("vtk mesh adapter", () => {
 
   it("keeps MASK picking conservative when raster min/mag or mip sampling is unknowable", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
-    const scheduler = createSubmissionScheduler({
-      scheduleRender: vi.fn(),
-      maxBytesPerFrame: 1024,
-      maxTimeMsPerFrame: 100,
-      now: () => 0,
-    });
-    const adapter = createMeshAdapter({
-      renderer,
-      scheduleRender: vi.fn(),
-      submissions: scheduler,
-    });
+    const { adapter, scheduler } = makeAdapter({ renderer });
     const texture: Extract<DecodedTexture, { kind: "rgba" }> = {
       kind: "rgba" as const,
       rgba: new Uint8Array([255, 255, 255, 0, 255, 255, 255, 255]),
@@ -738,17 +629,7 @@ describe("vtk mesh adapter", () => {
 
   it("maps an exact nearest+clamp sampler without broadening either axis or filter", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
-    const scheduler = createSubmissionScheduler({
-      scheduleRender: vi.fn(),
-      maxBytesPerFrame: 1024,
-      maxTimeMsPerFrame: 100,
-      now: () => 0,
-    });
-    const adapter = createMeshAdapter({
-      renderer,
-      scheduleRender: vi.fn(),
-      submissions: scheduler,
-    });
+    const { adapter, scheduler } = makeAdapter({ renderer });
     const nearest = content({
       ...compressed,
       sampler: { magFilter: 9728, minFilter: 9984, wrapS: 33071, wrapT: 33071 },
@@ -770,17 +651,7 @@ describe("vtk mesh adapter", () => {
     // index until it moves, so a change it fails to report is read as a stale
     // admitted set — a tile that silently keeps its resources through a
     // replacement, or one missing from a replacement list.
-    const scheduler = createSubmissionScheduler({
-      scheduleRender: vi.fn(),
-      maxBytesPerFrame: 1024,
-      maxTimeMsPerFrame: 100,
-      now: () => 0,
-    });
-    const adapter = createMeshAdapter({
-      renderer: { addActor: vi.fn(), removeActor: vi.fn() },
-      scheduleRender: vi.fn(),
-      submissions: scheduler,
-    });
+    const { adapter, scheduler } = makeAdapter();
     const seen: number[] = [];
     const note = () => seen.push(adapter.submissionRevision());
 
@@ -809,17 +680,7 @@ describe("vtk mesh adapter", () => {
 
   it("clears submitted actors even when they are outside the exact drawn pick set", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
-    const scheduler = createSubmissionScheduler({
-      scheduleRender: vi.fn(),
-      maxBytesPerFrame: 1024,
-      maxTimeMsPerFrame: 100,
-      now: () => 0,
-    });
-    const adapter = createMeshAdapter({
-      renderer,
-      scheduleRender: vi.fn(),
-      submissions: scheduler,
-    });
+    const { adapter, scheduler } = makeAdapter({ renderer });
     adapter.submitTile("hidden-fallback", content());
     scheduler.prepareFrame();
     adapter.setDrawnTiles([]);
@@ -840,18 +701,7 @@ describe("vtk mesh adapter", () => {
   it("deletes vtk resources when a scheduler realization setter throws", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
     const onError = vi.fn();
-    const scheduler = createSubmissionScheduler({
-      scheduleRender: vi.fn(),
-      maxBytesPerFrame: 1024,
-      maxTimeMsPerFrame: 100,
-      now: () => 0,
-    });
-    const adapter = createMeshAdapter({
-      renderer,
-      scheduleRender: vi.fn(),
-      submissions: scheduler,
-      onError,
-    });
+    const { adapter, scheduler } = makeAdapter({ renderer, onError });
     failNextTexturePayload("compressed");
     expect(adapter.submitTile("throwing", content())).toBe("queued");
     scheduler.prepareFrame();
@@ -882,18 +732,7 @@ describe("vtk mesh adapter", () => {
       removeActor: vi.fn(),
     };
     const onError = vi.fn();
-    const scheduler = createSubmissionScheduler({
-      scheduleRender: vi.fn(),
-      maxBytesPerFrame: 1024,
-      maxTimeMsPerFrame: 100,
-      now: () => 0,
-    });
-    const adapter = createMeshAdapter({
-      renderer,
-      scheduleRender: vi.fn(),
-      submissions: scheduler,
-      onError,
-    });
+    const { adapter, scheduler } = makeAdapter({ renderer, onError });
     expect(adapter.submitTile("throwing-attach", content())).toBe("queued");
     scheduler.prepareFrame();
     expect(onError).toHaveBeenCalledWith(
@@ -917,18 +756,7 @@ describe("vtk mesh adapter", () => {
   it("releases an exact pooled reuse when restoring actor state throws", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
     const onError = vi.fn();
-    const scheduler = createSubmissionScheduler({
-      scheduleRender: vi.fn(),
-      maxBytesPerFrame: 1024,
-      maxTimeMsPerFrame: 100,
-      now: () => 0,
-    });
-    const adapter = createMeshAdapter({
-      renderer,
-      scheduleRender: vi.fn(),
-      submissions: scheduler,
-      onError,
-    });
+    const { adapter, scheduler } = makeAdapter({ renderer, onError });
     const decoded = content();
     adapter.submitTile("reuse", decoded);
     scheduler.prepareFrame();
