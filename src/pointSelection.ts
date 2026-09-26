@@ -66,9 +66,13 @@ const centerOffset = (
   keyString: string,
 ): number => {
   const entry = nodes.get(keyString);
-  return entry === undefined
-    ? Number.POSITIVE_INFINITY
-    : view.centerRayOffset(entry);
+  if (entry === undefined) return Number.POSITIVE_INFINITY;
+  const { min, max } = entry.bounds;
+  return view.centerRayOffset([
+    (min[0] + max[0]) / 2,
+    (min[1] + max[1]) / 2,
+    (min[2] + max[2]) / 2,
+  ]);
 };
 
 /** Screen-centre improvement required to replace a selected boundary tile. */

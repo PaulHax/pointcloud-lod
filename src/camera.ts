@@ -288,11 +288,11 @@ const centerRay = (view: CameraView): CursorRay | null => {
 const offsetFromRay = (
   ray: CursorRay,
   view: CameraView,
-  bounds: Bounds,
+  point: Vec3,
 ): number => {
-  const dx = (bounds.min[0] + bounds.max[0]) / 2 - ray.origin[0];
-  const dy = (bounds.min[1] + bounds.max[1]) / 2 - ray.origin[1];
-  const dz = (bounds.min[2] + bounds.max[2]) / 2 - ray.origin[2];
+  const dx = point[0] - ray.origin[0];
+  const dy = point[1] - ray.origin[1];
+  const dz = point[2] - ray.origin[2];
   const along =
     dx * ray.direction[0] + dy * ray.direction[1] + dz * ray.direction[2];
   const distanceSquared = dx * dx + dy * dy + dz * dz;
@@ -333,11 +333,12 @@ export type PreparedView = {
   /** A node's point spacing projected at its distance from the eye. */
   readonly nodeScreenSpaceError: (node: MeasuredNode) => number;
   /**
-   * How far a node's bounds centre lies off the centre ray. Zero is the
-   * innermost cone; larger values form concentric cones moving away from the
-   * view centre. Selection only compares nodes at the same octree level,
-   * where their bounds have equal size, so centres give the unblurred spatial
-   * order without large coarse bounding spheres masking one another.
+   * How far a point lies off the centre ray. Zero is the innermost cone;
+   * larger values form concentric cones moving away from the view centre.
+   * Both formats order requests by a node's centre: point selection only
+   * compares nodes at the same octree level, where their bounds have equal
+   * size, so centres give the unblurred spatial order without large coarse
+   * bounding spheres masking one another.
    *
    * Perspective views return radians. Parallel views have no angular spread,
    * so they return perpendicular world-space clearance normalized by the
@@ -345,7 +346,7 @@ export type PreparedView = {
    * magnitudes are never compared across different views. Infinite when the
    * view-projection has no centre ray.
    */
-  readonly centerRayOffset: (node: { readonly bounds: Bounds }) => number;
+  readonly centerRayOffset: (point: Vec3) => number;
 };
 
 export const prepareView = (view: CameraView): PreparedView => {
@@ -360,10 +361,8 @@ export const prepareView = (view: CameraView): PreparedView => {
         node.spacing,
         distanceToBounds(view.position, node.bounds),
       ),
-    centerRayOffset: (node) =>
-      ray === null
-        ? Number.POSITIVE_INFINITY
-        : offsetFromRay(ray, view, node.bounds),
+    centerRayOffset: (point) =>
+      ray === null ? Number.POSITIVE_INFINITY : offsetFromRay(ray, view, point),
   };
 };
 

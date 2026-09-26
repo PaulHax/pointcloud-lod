@@ -15,34 +15,7 @@ import {
 } from "./camera";
 import { IDENTITY } from "./mat4";
 import type { Bounds } from "./octree";
-
-/** Column-major perspective matrix (symmetric frustum, looking down -Z). */
-const perspective = (
-  fovY: number,
-  aspect: number,
-  near: number,
-  far: number,
-): number[] => {
-  const f = 1 / Math.tan(fovY / 2);
-  return [
-    f / aspect,
-    0,
-    0,
-    0,
-    0,
-    f,
-    0,
-    0,
-    0,
-    0,
-    (far + near) / (near - far),
-    -1,
-    0,
-    0,
-    (2 * far * near) / (near - far),
-    0,
-  ];
-};
+import { perspective } from "../test/helpers";
 
 /**
  * Column-major symmetric orthographic matrix (half-height `parallelScale`,
@@ -361,25 +334,20 @@ describe("centerRayOffset", () => {
     viewportHeightCssPx: 400,
   };
 
-  it("prefers a distant volume on the 3D centre ray over a nearby side volume", () => {
+  it("puts a distant point on the centre ray ahead of a nearby side point", () => {
     const view = prepareView(perspectiveView);
-    const distantCenter = { bounds: bounds([0, 0, -20], [0.1, 0.1, 0.1]) };
-    const nearbyBottom = { bounds: bounds([0, -2, -5], [0.1, 0.1, 0.1]) };
-
-    expect(view.centerRayOffset(distantCenter)).toBe(0);
-    expect(view.centerRayOffset(nearbyBottom)).toBeGreaterThan(0);
+    expect(view.centerRayOffset([0, 0, -20])).toBe(0);
+    expect(view.centerRayOffset([0, -2, -5])).toBeGreaterThan(0);
   });
 
-  it("orders same-sized 3D volumes by their centre-ray angle", () => {
+  it("orders points by their angle off the centre ray", () => {
     const view = prepareView(perspectiveView);
-    const inner = { bounds: bounds([0.5, 0, -5], [0.1, 0.1, 0.1]) };
-    const outer = { bounds: bounds([2, 0, -5], [0.1, 0.1, 0.1]) };
-    expect(view.centerRayOffset(inner)).toBeLessThan(
-      view.centerRayOffset(outer),
+    expect(view.centerRayOffset([0.5, 0, -5])).toBeLessThan(
+      view.centerRayOffset([2, 0, -5]),
     );
   });
 
-  it("orders parallel volumes by perpendicular clearance from the centre ray", () => {
+  it("orders points in a parallel view by clearance from the centre ray", () => {
     const view: OrthographicCameraView = {
       projection: "orthographic",
       viewProj: orthographic(5, 1, 0.1, 100),
@@ -389,21 +357,16 @@ describe("centerRayOffset", () => {
       viewportHeightCssPx: 400,
     };
     const prepared = prepareView(view);
-    const center = { bounds: bounds([0, 0, -20], [0.1, 0.1, 0.1]) };
-    const side = { bounds: bounds([2, 0, -5], [0.1, 0.1, 0.1]) };
-
-    expect(prepared.centerRayOffset(center)).toBe(0);
-    expect(prepared.centerRayOffset(side)).toBeGreaterThan(0);
+    expect(prepared.centerRayOffset([0, 0, -20])).toBe(0);
+    expect(prepared.centerRayOffset([2, 0, -5])).toBeGreaterThan(0);
   });
 
-  it("puts every node infinitely far off when the matrix has no centre ray", () => {
+  it("puts every point infinitely far off when the matrix has no centre ray", () => {
     const view = prepareView({
       ...perspectiveView,
       viewProj: IDENTITY.map(() => 0),
     });
-    expect(
-      view.centerRayOffset({ bounds: bounds([0, 0, -5], [1, 1, 1]) }),
-    ).toBe(Number.POSITIVE_INFINITY);
+    expect(view.centerRayOffset([0, 0, -5])).toBe(Number.POSITIVE_INFINITY);
   });
 });
 

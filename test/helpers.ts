@@ -13,3 +13,31 @@ export const perspectiveView = (
   viewportHeightCssPx: 100,
   ...overrides,
 });
+
+/** Column-major perspective matrix (symmetric frustum, looking down -Z). */
+export const perspective = (
+  fovY: number,
+  aspect: number,
+  near: number,
+  far: number,
+): number[] => {
+  const f = 1 / Math.tan(fovY / 2);
+  return [
+    f / aspect,
+    0,
+    0,
+    0,
+    0,
+    f,
+    0,
+    0,
+    0,
+    0,
+    (far + near) / (near - far),
+    -1,
+    0,
+    0,
+    (2 * far * near) / (near - far),
+    0,
+  ];
+};
