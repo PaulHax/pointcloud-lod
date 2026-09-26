@@ -302,8 +302,8 @@ export const createTiles3dMember = (
   // The desired set changes only with the selection that produced it, and the
   // admitted set only when the adapter says so, so each index is rebuilt once
   // per change rather than once per admission. Both are read many times per
-  // admission and once per blocked tile across a whole selection refresh,
-  // which is where scanning instead used to cost O(tiles^2).
+  // admission and once per blocked tile across a whole selection refresh, so
+  // scanning instead would cost O(tiles^2).
   let desiredIndex = new Map<string, string[]>();
   let desiredIndexOf: TilesetTraversalResult | null = null;
   let submittedIndex = new Map<string, string[]>();
@@ -523,11 +523,10 @@ export const createTiles3dMember = (
     if (state === "submitted") return "submitted" as const;
     if (state === "failed" || admissionFailed.has(id)) return "failed" as const;
     // A root that will not fit the member's whole byte allowance is terminal
-    // for this budget, not still arriving. Reporting it as outstanding kept
-    // `workPending` true forever, and the view governor stops sampling
-    // capacity for EVERY member while any of them claims pending work — so one
-    // over-budget tileset froze adaptive quality view-wide with nothing drawn.
-    // A larger allowance clears the latch and reopens the tile.
+    // for this budget, not still arriving, so it never holds `workPending`:
+    // the view governor stops sampling capacity for every member while any of
+    // them claims pending work. A larger allowance clears the latch and
+    // reopens the tile.
     if (irreducibleBudget && source && id === source.root.id)
       return "failed" as const;
     if (decoded.has(id)) return "decoded" as const;

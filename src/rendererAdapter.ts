@@ -272,7 +272,7 @@ export const createRendererAdapter = (
   const acceptsScalar = (next: number, current: number): boolean =>
     !disposed && Number.isFinite(next) && next > 0 && next !== current;
 
-  /** Push the adapter's current visual state onto one tile's actor/mapper. */
+  /** The tile's planned draw count; the whole tile when no plan is set. */
   const prefixFor = (keyString: string, entry: TileActors): number =>
     pointPrefixes === null
       ? entry.tile.pointCount
@@ -294,6 +294,7 @@ export const createRendererAdapter = (
     return changed;
   };
 
+  /** Push the adapter's current visual state onto one tile's actor/mapper. */
   const applyTileState = (keyString: string, entry: TileActors): void => {
     // The actor property remains in CSS pixels. The custom dense-point mapper
     // multiplies it by pointSizeScale before assigning physical gl_PointSize.

@@ -33,12 +33,9 @@ declare const IMPORTANCE_BRAND: unique symbol;
 /**
  * A member's share-of-view weight, normalized to [0, 1].
  *
- * Branded so it can only be produced by the constructors below. A bare
- * `number` here was satisfied equally by a screen-space error in CSS pixels
- * (tens to hundreds) and by a literal `1`, and the allocator — which can only
- * read them as relative weights — then handed the pixel-scaled member ~99.9%
- * of the view budget and pinned the other at its floor. The unit is a property
- * of the value, so it has to be carried by the type.
+ * Branded so it can only be produced by the constructors below: the allocator
+ * reads importances only as relative weights, so a screen-space error in
+ * pixels must not be passable where a normalized weight is expected.
  */
 export type Importance = number & { readonly [IMPORTANCE_BRAND]: true };
 

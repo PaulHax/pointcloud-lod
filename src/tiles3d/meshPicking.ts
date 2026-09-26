@@ -49,12 +49,11 @@ export type SubmittedMeshTile = {
 /**
  * Where the member's geometry sits, in the two frames that differ.
  *
- * `drawn` is what the renderer paints — it carries vertical exaggeration, so
+ * `drawn` is what the renderer paints: it carries vertical exaggeration, so
  * it is the only frame in which a screen ray means anything. `scene` is the
  * canonical scene coordinates the rest of the app reasons in: the same placement
- * without exaggeration. Picking happens in `drawn` and reports in `scene`;
- * collapsing the two is what let exaggerated z values reach saved control
- * points.
+ * without exaggeration. Picking happens in `drawn` and reports in `scene`, so
+ * an exaggerated z never reaches a point the host stores.
  */
 export type MeshPlacement = {
   readonly drawn: Mat16 | null;

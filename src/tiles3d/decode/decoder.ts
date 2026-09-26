@@ -283,12 +283,8 @@ const COMPONENT_BYTES: Readonly<Record<number, number>> = {
 };
 
 /**
- * Fetch bytes, refusing to treat an HTTP error body as content.
- *
- * Without the status check a 410 for a retired revision hands ~30 bytes of
- * `text/plain` to the glTF/KTX2 parser, which reports a buffer-overrun or
- * corrupt-container error — sending debugging at the exporter for what was a
- * routine retirement.
+ * Fetch bytes, refusing to treat an HTTP error body as content: a retired
+ * revision's 410 reports as a failed fetch, not as a corrupt container.
  */
 const fetchOkBytes = async (url: string): Promise<ArrayBuffer> => {
   const response = await fetch(url);
