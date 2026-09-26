@@ -570,7 +570,6 @@ describe("createStreamedSceneCoordinator", () => {
     const coordinator = createStreamedSceneCoordinator({
       scheduleRender: vi.fn(),
       memory: createMemoryPool({ totalBytes: 300 }),
-      stallWindowMs: 4_000,
       now: () => now,
     });
     coordinator.register(makeMember(), {

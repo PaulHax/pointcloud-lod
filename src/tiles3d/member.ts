@@ -711,9 +711,6 @@ export const createTiles3dMember = (
       ...(config.maxAttempts === undefined
         ? {}
         : { maxAttempts: config.maxAttempts }),
-      ...(config.retryBackoffMs === undefined
-        ? {}
-        : { retryBackoffMs: config.retryBackoffMs }),
       decode: async (bytes, request, decodeContext) => {
         const tile = materializedTileById.get(request.id);
         if (!tile) throw new Error(`unknown 3D tile ${request.id}`);
@@ -814,9 +811,6 @@ export const createTiles3dMember = (
       ...(config.maxAttempts === undefined
         ? {}
         : { maxAttempts: config.maxAttempts }),
-      ...(config.retryBackoffMs === undefined
-        ? {}
-        : { retryBackoffMs: config.retryBackoffMs }),
       decode: (bytes) =>
         parseSubtree(bytes, implicit.subtreeLevels, implicit.metadataSchema),
       decodedByteLength: (subtree) => subtree.byteLength,

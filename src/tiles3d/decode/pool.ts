@@ -144,10 +144,6 @@ export class DecodeWorkerPool implements DecodeWorkerPoolHandle {
     );
   }
 
-  get size(): number {
-    return this.#size;
-  }
-
   decode(request: DecodeTileRequest): DecodeJob {
     if (this.#disposed) throw new DecodeWorkerPoolDisposedError();
     let resolve!: (value: DecodedTileContent) => void;

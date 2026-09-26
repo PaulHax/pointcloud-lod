@@ -2831,9 +2831,6 @@ describe("createLodController — numeric configuration", () => {
         /memoryBudgetBytes/,
       );
     }
-    for (const value of [...NON_FINITE, -0.01, 1.01]) {
-      expect(() => make({ densityFraction: value })).toThrow(/densityFraction/);
-    }
   });
 
   it("throws for an unusable or inverted presentation contract", () => {

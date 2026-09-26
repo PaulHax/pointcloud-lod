@@ -51,7 +51,6 @@ export type Tiles3dMemberConfig = {
   /** Simultaneous content and subtree fetches. */
   readonly concurrency?: number;
   readonly maxAttempts?: number;
-  readonly retryBackoffMs?: (failedAttempt: number) => number;
   readonly fetchTileset?: TilesetFetch;
   readonly fetchContent?: ContentQueueFetch;
   readonly fetchSubtree?: ContentQueueFetch;

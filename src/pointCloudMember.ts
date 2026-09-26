@@ -35,11 +35,7 @@ export type PointCloudMemberConfig = {
   readonly adaptiveOptions?: PointCloudAdaptiveOptions;
   readonly pointBudget?: number;
   readonly refinementCutoffPx?: number;
-  readonly fetchConcurrency?: number;
-  readonly hierarchyConcurrency?: number;
-  readonly cacheBytes?: number;
   readonly selectionDelayMs?: number;
-  readonly onError?: (error: unknown) => void;
 };
 
 export type PointCloudMemberStats = {
@@ -102,7 +98,7 @@ export const createPointCloudMember = (
     onTiles: adapter.applyBatch,
     onDrawPlan: adapter.applyDrawPlan,
     scheduleRender: context.scheduleRender,
-    onWorkChange: () => context.onWorkChange?.(),
+    onWorkChange: context.onWorkChange,
     onPointDiameterCssPx: adapter.setPointDiameterCssPx,
     active,
     pointBudget: config.adaptive
@@ -110,22 +106,8 @@ export const createPointCloudMember = (
       : (config.pointBudget ?? DEFAULT_FIXED_POINT_BUDGET),
     memoryBudgetBytes: 0,
     presentation: config.presentation,
-    ...(config.refinementCutoffPx === undefined
-      ? {}
-      : { refinementCutoffPx: config.refinementCutoffPx }),
-    ...(config.fetchConcurrency === undefined
-      ? {}
-      : { fetchConcurrency: config.fetchConcurrency }),
-    ...(config.hierarchyConcurrency === undefined
-      ? {}
-      : { hierarchyConcurrency: config.hierarchyConcurrency }),
-    ...(config.cacheBytes === undefined
-      ? {}
-      : { cacheBytes: config.cacheBytes }),
-    ...(config.selectionDelayMs === undefined
-      ? {}
-      : { selectionDelayMs: config.selectionDelayMs }),
-    ...(config.onError === undefined ? {} : { onError: config.onError }),
+    refinementCutoffPx: config.refinementCutoffPx,
+    selectionDelayMs: config.selectionDelayMs,
   });
 
   let cachedWorkRevision = -1;

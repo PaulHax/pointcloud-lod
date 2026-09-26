@@ -10,7 +10,6 @@ const context = (): StreamedMemberContext => ({
   scheduleRender: vi.fn(),
   memory: createMemoryPool({ totalBytes: 1 }),
   workers: {
-    size: 0,
     decode: () => {
       throw new Error("unused");
     },

@@ -10,7 +10,6 @@ import { allocateViewQuality } from "./viewBudget";
 import {
   createSubmissionScheduler,
   type SubmissionScheduler,
-  type SubmissionSchedulerOptions,
 } from "./submissionScheduler";
 import {
   CULLED,
@@ -31,7 +30,6 @@ import {
 } from "./viewGovernor";
 
 const EMPTY_WORKERS: DecodeWorkerPool = {
-  size: 0,
   decode: () => {
     throw new Error("decode workers are unavailable");
   },
@@ -70,15 +68,8 @@ export type StreamedSceneCoordinatorOptions = {
   /** Required page-wide pool shared by every view coordinator on the GPU. */
   readonly memory: MemoryPool;
   readonly workers?: DecodeWorkerPool;
-  readonly submissions?: SubmissionScheduler;
-  readonly submissionLimits?: Omit<
-    SubmissionSchedulerOptions,
-    "scheduleRender"
-  >;
   readonly textureCapabilities?: TextureCapabilities;
   readonly devicePixelRatio?: number;
-  /** Lack-of-progress window before one member is isolated from view gating. */
-  readonly stallWindowMs?: number;
   /** Injectable monotonic-ish clock for deterministic stall tests. */
   readonly now?: () => number;
   /** Motion/sample policy. Quality range and member target override are owned here. */
@@ -187,6 +178,9 @@ const normalizeInputs = (inputs: GovernorInputs): GovernorInputs => ({
   residentBytes: Math.floor(usableNonNegative(inputs.residentBytes)),
 });
 
+/** Lack-of-progress window before one member is isolated from view gating. */
+const STALL_WINDOW_MS = 4_000;
+
 const sameAllocation = (left: Allocation, right: Allocation): boolean =>
   left.qualityFraction === right.qualityFraction &&
   left.memoryBudgetBytes === right.memoryBudgetBytes &&
@@ -214,16 +208,12 @@ export const createStreamedSceneCoordinator = (
     );
   }
   const memory = options.memory;
-  const submissions =
-    options.submissions ??
-    createSubmissionScheduler({
-      scheduleRender: options.scheduleRender,
-      ...options.submissionLimits,
-    });
+  const submissions = createSubmissionScheduler({
+    scheduleRender: options.scheduleRender,
+  });
   const members = new Set<MemberState>();
   let disposed = false;
   const now = options.now ?? Date.now;
-  const stallWindowMs = Math.max(1, options.stallWindowMs ?? 4_000);
   let stallTimer: ReturnType<typeof setTimeout> | null = null;
   let lastPreparedFrameSerial = -1;
   let capacityWorkSinceLastReport = false;
@@ -341,14 +331,14 @@ export const createStreamedSceneCoordinator = (
         state.stalled = false;
         state.stallReported = false;
       }
-      const remaining = stallWindowMs - (checkedAt - state.lastProgressAt);
+      const remaining = STALL_WINDOW_MS - (checkedAt - state.lastProgressAt);
       if (remaining <= 0) {
         state.stalled = true;
         if (!state.stallReported) {
           state.stallReported = true;
           state.member.onStall?.(
             new Error(
-              `streamed member ${state.id ?? "<unnamed>"} made no progress for ${stallWindowMs} ms`,
+              `streamed member ${state.id ?? "<unnamed>"} made no progress for ${STALL_WINDOW_MS} ms`,
             ),
           );
         }
