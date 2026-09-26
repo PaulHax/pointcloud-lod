@@ -273,7 +273,6 @@ export const resolveTilesetContentUri = (
   }
   if (
     /^[A-Za-z][A-Za-z\d+.-]*:/.test(uri) ||
-    uri.startsWith("//") ||
     uri.startsWith("/") ||
     uri.includes("\\") ||
     uri.includes("?") ||
@@ -291,7 +290,6 @@ export const resolveTilesetContentUri = (
       /^[A-Za-z][A-Za-z\d+.-]*:/.test(decoded) ||
       decoded.includes("\\") ||
       decoded.startsWith("/") ||
-      decoded.startsWith("//") ||
       decoded.includes("?") ||
       decoded.includes("#")
     ) {
@@ -364,9 +362,6 @@ const contentUri = (value: unknown, path: string): string => {
   const extension = pathOnly.includes(".")
     ? pathOnly.slice(pathOnly.lastIndexOf("."))
     : "";
-  if ([".b3dm", ".pnts", ".i3dm", ".cmpt"].includes(extension)) {
-    throw new TilesetUnsupportedError("content.uri", `${path}.uri`);
-  }
   if (extension !== ".glb" && extension !== ".gltf") {
     throw new TilesetUnsupportedError("content.uri", `${path}.uri`);
   }
