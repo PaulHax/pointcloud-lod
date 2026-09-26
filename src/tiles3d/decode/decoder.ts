@@ -797,17 +797,43 @@ const normalizedComponent = (value: number, componentType: number): number => {
   }
 };
 
+/** The glTF component type an integer typed array holds, if it is one. */
+const integerComponentType = (value: ArrayBufferView): number | null =>
+  value instanceof Int8Array
+    ? 5120
+    : value instanceof Uint8Array
+      ? 5121
+      : value instanceof Int16Array
+        ? 5122
+        : value instanceof Uint16Array
+          ? 5123
+          : value instanceof Uint32Array
+            ? 5125
+            : null;
+
+/**
+ * `normalized` is the flag the original accessor declared. An expanded
+ * accessor cannot carry it: loaders.gl rebuilds decompressed Draco attributes
+ * without it, so the caller reads it from the glTF as authored.
+ */
 const accessorFloats = (
   reference: number | ExpandedAccessor | undefined,
   expectedType: "VEC2" | "VEC3" | "VEC4",
   gltf: ParsedGltf,
+  normalized = false,
 ): Float32Array | undefined => {
   if (reference === undefined) return undefined;
   if (typeof reference !== "number") {
     if (!ArrayBuffer.isView(reference.value)) {
       throw new Error("expanded glTF accessor has no typed value");
     }
-    return Float32Array.from(reference.value as unknown as ArrayLike<number>);
+    const values = reference.value as unknown as ArrayLike<number>;
+    const componentType = integerComponentType(reference.value);
+    return normalized && componentType !== null
+      ? Float32Array.from(values, (value) =>
+          normalizedComponent(value, componentType),
+        )
+      : Float32Array.from(values);
   }
   const accessor = requireIndex(gltf.json.accessors, reference, "accessor");
   if (accessor.type !== expectedType || accessor.sparse) {
@@ -1036,7 +1062,8 @@ const vertexColors = (
   if (accessor.type !== "VEC3" && accessor.type !== "VEC4") {
     throw new Error("glTF COLOR_0 must be VEC3 or VEC4");
   }
-  const values = accessorFloats(reference, accessor.type, gltf)!;
+  // glTF allows integer colors only as normalized values.
+  const values = accessorFloats(reference, accessor.type, gltf, true)!;
   const components = accessor.type === "VEC3" ? 3 : 4;
   if (
     values.length !== vertexCount * components ||
@@ -1058,6 +1085,7 @@ const vertexColors = (
 
 const applySceneRtc = (
   gltf: ParsedGltf,
+  authored: GltfJson,
   sceneTransform: Mat4,
 ): PendingPrimitive[] => {
   const scene = requireIndex(
@@ -1075,16 +1103,26 @@ const applySceneRtc = (
     const world = multiplyMat4(parent, nodeMatrix(node));
     if (node.mesh !== undefined) {
       const mesh = requireIndex(gltf.json.meshes, node.mesh, "mesh");
-      for (const primitive of mesh.primitives) {
+      for (const [primitiveIndex, primitive] of mesh.primitives.entries()) {
         if (![4, 5].includes(primitive.mode ?? 4)) {
           throw new Error(
             "only glTF TRIANGLES and TRIANGLE_STRIP primitives are supported",
           );
         }
+        const authoredAttributes =
+          authored.meshes?.[node.mesh]?.primitives[primitiveIndex]?.attributes;
+        const normalized = (attribute: string): boolean => {
+          const index = authoredAttributes?.[attribute];
+          return (
+            typeof index === "number" &&
+            authored.accessors?.[index]?.normalized === true
+          );
+        };
         const positions = accessorFloats(
           primitive.attributes.POSITION,
           "VEC3",
           gltf,
+          normalized("POSITION"),
         );
         if (!positions)
           throw new Error("glTF primitive has no POSITION attribute");
@@ -1092,6 +1130,7 @@ const applySceneRtc = (
           primitive.attributes.NORMAL,
           "VEC3",
           gltf,
+          normalized("NORMAL"),
         );
         const material =
           primitive.material === undefined
@@ -1108,6 +1147,7 @@ const applySceneRtc = (
           primitive.attributes[`TEXCOORD_${texCoord}`],
           "VEC2",
           gltf,
+          normalized(`TEXCOORD_${texCoord}`),
         );
         if (textureInfo && !uvs) {
           throw new Error(
@@ -1649,7 +1689,7 @@ const decodeTileContentInner = async (
     composeSceneTransform(request.tilesetToScene, request.accumulatedTransform),
     Y_UP_TO_Z_UP,
   );
-  const pending = applySceneRtc(parsed, sceneTransform);
+  const pending = applySceneRtc(parsed, originalJson, sceneTransform);
   const origin = commonOrigin(pending);
   const context: DecodeContext = {
     gltf: parsed,
