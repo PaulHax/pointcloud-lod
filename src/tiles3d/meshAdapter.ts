@@ -163,6 +163,8 @@ type PendingTile = {
   ready: boolean;
   finishBarrier?: () => void;
   groupError?: (error: unknown) => void;
+  /** The replacement group this entry was admitted with, itself included. */
+  group?: readonly PendingTile[];
 };
 
 type VtkShaderReplacement = {
@@ -684,16 +686,29 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
   const reservedBytes = (): number =>
     sumOf(submittedBytes) + sumOf(pooledBytes) + sumOf(pendingBytes);
 
-  const cancelPending = (entry: PendingTile): void => {
-    if (entry.cancelled) return;
-    entry.cancelled = true;
-    for (const job of entry.jobs) job.cancel();
-    dropPending(entry);
-    for (const id of entry.replacementIds) {
-      if (replacementClaims.get(id) === entry.id) replacementClaims.delete(id);
+  /**
+   * Cancel a pending entry, and with it every entry of its replacement group:
+   * a group admits all together or not at all, so survivors of a partial
+   * cancellation would wait for their cancelled siblings forever. Returns the
+   * ids cancelled.
+   */
+  const cancelPending = (entry: PendingTile): string[] => {
+    const cancelled: string[] = [];
+    for (const member of entry.group ?? [entry]) {
+      if (member.cancelled) continue;
+      member.cancelled = true;
+      for (const job of member.jobs) job.cancel();
+      dropPending(member);
+      for (const id of member.replacementIds) {
+        if (replacementClaims.get(id) === member.id) {
+          replacementClaims.delete(id);
+        }
+      }
+      release(member.resources);
+      cancelled.push(member.id);
     }
-    release(entry.resources);
-    workRevision += 1;
+    if (cancelled.length > 0) workRevision += 1;
+    return cancelled;
   };
 
   const trimPool = (additionalBytes = 0): void => {
@@ -1095,6 +1110,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         for (const entry of groupEntries) {
           entry.finishBarrier = finishGroup;
           entry.groupError = cancelGroup;
+          entry.group = groupEntries;
         }
       } finally {
         for (const { id } of entries) budgetPreapproved.delete(id);
@@ -1183,8 +1199,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
       // a shallower replacement and then retires descendants.
       for (const entry of [...pending.values()].reverse()) {
         if (reservedBytes() <= resourceCeilingBytes) break;
-        cancelled.push(entry.id);
-        cancelPending(entry);
+        cancelled.push(...cancelPending(entry));
       }
       trimPool();
       return cancelled;

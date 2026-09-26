@@ -617,6 +617,18 @@ export const createTiles3dMember = (
       for (const id of nextRequested) {
         if (adapter.restoreTile(id) === "failed") admissionFailed.add(id);
       }
+      // Cancelling a deselected tile cancels its whole replacement group, so
+      // a decoded sibling that is still wanted goes back through admission
+      // below with the refused ones.
+      for (const id of nextRequested) {
+        if (
+          decoded.has(id) &&
+          !admissionFailed.has(id) &&
+          adapter.tileState(id) === "absent"
+        ) {
+          admissionBlocked.add(id);
+        }
+      }
       queue.setSelection(
         nextContentRequests.filter(
           (request) => adapter.tileState(request.id) !== "submitted",

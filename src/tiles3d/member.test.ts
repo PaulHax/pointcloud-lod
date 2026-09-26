@@ -877,6 +877,122 @@ describe("createTiles3dMember", () => {
     member.dispose();
   });
 
+  /**
+   * A root drawn with two triangles over children boxed at the given centers,
+   * each drawn with one, under a 120-byte share: the root costs 104 bytes and
+   * each child 52, so a child fits beside the root only by replacing it.
+   */
+  const replacementMember = (
+    centers: readonly number[],
+    fetchContent?: Tiles3dMemberConfig["fetchContent"],
+  ) => {
+    const h = harness();
+    const box = (x: number, half: number) => [
+      x,
+      0,
+      0,
+      half,
+      0,
+      0,
+      0,
+      half,
+      0,
+      0,
+      0,
+      half,
+    ];
+    const root = {
+      geometricError: 8,
+      refine: "REPLACE",
+      boundingVolume: { box: box(0, 1) },
+      content: { uri: "root.glb" },
+      children: centers.map((x, index) => ({
+        geometricError: 0,
+        boundingVolume: { box: box(x, 1 / centers.length) },
+        content: { uri: `child-${index}.glb` },
+      })),
+    };
+    const twoTriangles = (): DecodedTileContent => {
+      const content = decoded();
+      return {
+        ...content,
+        primitives: [...content.primitives, ...content.primitives],
+      };
+    };
+    const member = createTiles3dMember(
+      {
+        ...h.context,
+        workers: {
+          size: 3,
+          decode: (request) => ({
+            promise: Promise.resolve(
+              request.contentUrl.endsWith("root.glb")
+                ? twoTriangles()
+                : decoded(),
+            ),
+            cancel: vi.fn(),
+          }),
+        },
+      },
+      {
+        ...h.config,
+        maxAttempts: 1,
+        onError: () => {},
+        fetchTileset: async () => ({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: async () => ({
+            asset: { version: "1.1" },
+            geometricError: 8,
+            root,
+          }),
+        }),
+        ...(fetchContent ? { fetchContent } : {}),
+      },
+    );
+    const drain = async () => {
+      for (let round = 0; round < 15; round += 1) {
+        await settle();
+        while (h.submissions.hasPending()) h.submissions.prepareFrame();
+      }
+    };
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 120,
+      regime: "stationary",
+    });
+    return { h, member, drain };
+  };
+
+  it("admits the sibling still wanted when the camera culls one of a group in flight", async () => {
+    const { h, member, drain } = replacementMember([-0.5, 0.5]);
+    member.setCamera({ ...view, position: [0, 0, -1000] });
+    await drain();
+    // Closer, both children are wanted. Each alone is refused beside the
+    // root; together they replace it, and their upload is still queued.
+    member.setCamera(view);
+    for (let round = 0; round < 15; round += 1) await settle();
+    expect((member.stats() as Tiles3dMemberStats).renderer.pendingTiles).toBe(
+      2,
+    );
+    // Pan until the second child leaves the view.
+    const panned = [...identity];
+    panned[12] = 1.2;
+    member.setCamera({ ...view, viewProj: panned });
+    await drain();
+    for (let frame = 0; frame < 5; frame += 1) {
+      member.prepareFrame();
+      await drain();
+    }
+    expect(
+      (member.stats() as Tiles3dMemberStats).renderer.drawnTileIds,
+    ).toEqual(["root/0"]);
+    expect(member.governorInputs().work.operations).toBe(0);
+    expect(h.renderer.addActor).toHaveBeenCalled();
+    member.dispose();
+  });
+
   it("credits a submitted parent when the complete child frontier fits without the transient peak", async () => {
     const h = harness(true, 88);
     (h.context.workers as any).decode = (request: DecodeTileRequest) => {

@@ -428,6 +428,45 @@ describe("vtk mesh adapter", () => {
     expect(adapter.stats().residentBytes).toBe(0);
   });
 
+  const replacementScene = () => {
+    const scheduler = createSubmissionScheduler({
+      scheduleRender: vi.fn(),
+      maxBytesPerFrame: 4096,
+      now: () => 0,
+    });
+    const adapter = createMeshAdapter({
+      renderer: { addActor: vi.fn(), removeActor: vi.fn() },
+      submissions: scheduler,
+      scheduleRender: vi.fn(),
+    });
+    const drain = () => {
+      while (scheduler.hasPending()) scheduler.prepareFrame();
+    };
+    expect(adapter.submitTile("root", content())).toBe("queued");
+    drain();
+    const tileBytes = adapter.stats().residentBytes;
+    expect(
+      adapter.submitTileGroup(
+        [
+          { id: "root/0", content: content() },
+          { id: "root/1", content: content() },
+        ],
+        ["root"],
+      ),
+    ).toBe("queued");
+    return { adapter, drain, tileBytes };
+  };
+
+  it("cancels a replacement group as one unit", () => {
+    const { adapter, drain } = replacementScene();
+    expect(adapter.cancelTile("root/1")).toBe(true);
+    drain();
+    // A survivor would wait for its cancelled sibling forever.
+    expect(adapter.tileState("root/0")).toBe("absent");
+    expect(adapter.tileState("root")).toBe("submitted");
+    expect(adapter.stats()).toMatchObject({ pendingTiles: 0, pendingBytes: 0 });
+  });
+
   it("stages one primitive larger than the scheduler cap without an oversized job", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
     const scheduler = createSubmissionScheduler({
