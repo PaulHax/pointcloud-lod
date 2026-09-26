@@ -457,7 +457,7 @@ Its controls are all runtime, so one build loads any dataset:
 
 The panel answers "why is it drawing N points" without reading internal state:
 regime and what is holding it, explicit versus inferred motion, target frame
-time, percentile estimate, sample count, adaptive track budget, configured
+time, median interval and late-frame share, sample count, adaptive track budget, configured
 maximum, memory ceiling, aggregate view budget, this cloud's share, the last
 adjustment and its reason, the binding constraint, and the physical tile and
 hierarchy work counts — next to the controller's selection, decoded-memory,
@@ -611,37 +611,44 @@ and allocates its fraction across every format member in the view.
 Two regimes, two targets. A moving camera is being steered, so it gets the
 tighter **16 ms** target and trades drawn points for responsiveness; a settled
 camera is being read, so it gets the looser **33 ms** target and spends the
-extra frame time on detail. With the default 20% hysteresis the ordinary adjustment bands
-are 12.8-19.2 ms while moving and 26.4-39.6 ms while settled. Both tracks start
-at quality **1** and never drop below **0.05**.
+extra frame time on detail. Both tracks start at quality **1** and never drop
+below **0.05**.
 
-At rest, an on-target estimate below full quality does not prove that finer
-detail would miss the target. After a complete sample window the governor
-tries up to 25% more quality, accepts it only after another complete window
-meets the existing slow threshold, and reverts if the minimum sample window
-already exceeds that threshold. A rejected on-target probe stays blocked until a
-camera or workload change invalidates the comparison; ordinary increases still
-respond when measured frames fall below the fast threshold. Each stationary episode
-permits at most 16 such trials. Pending streaming work withholds capacity
-samples, and memory limits still apply. Diagnostics expose the active `trial`,
-`trialAttempts`, and `increaseCeiling`; `needsFrame()` remains true while a
-trial needs measurements. These trials seek higher quality that meets the
-target; they do not establish whether reductions help when every tested level
-misses it.
+Frame samples are presentation intervals, and those arrive in whole display
+refreshes. Each track grants its target a whole number of refreshes (at 60 Hz,
+one while moving and two at rest; at 120 Hz, two and four) and counts the frames
+in its last 30 that missed them:
 
-A target below what the display can present is raised to one it can. Frames
-are measured between presentations, so no sample falls below the refresh
-period however little was drawn: at 60 Hz the 16 ms moving target's 12.8 ms
-increase threshold is unreachable, and quality could only ever ratchet down.
+- More than a fifth late lowers quality: by 15%, or, when most frames are late,
+  by what the median refresh count says the overload is.
+- A full window without a late frame probes one step up once the level has held
+  for a while (1.5 s while moving, 0.4 s at rest). A probe that fails returns to
+  the level it left, and later probes close half the distance to the level found
+  too expensive for the next 15 s. With no such level remembered, probes step
+  twice as far and come twice as soon.
+- Anything between holds, so a steady view keeps its detail instead of searching.
+
+At rest, frames that present in fewer refreshes than their budget show real
+headroom, and a probe spends most of it in one step. A still view that fitted a
+moving frame's budget seeds the next gesture at that level.
+
+Pending streaming work withholds capacity samples, so an emergency path answers
+those frames instead. It cuts only when most of the last five moving frames took
+more than 3.5 times the budget (under about 17 fps at 60 Hz), takes back a cut
+that left frames no faster and then holds off cutting for 5 s, and gives back a
+cut that worked after a second of on-time frames. Frames within 500 ms of a
+pause of a second or more feed no decision: a GPU leaving its idle clocks draws
+them several times slower than the same scene a moment later.
+
 The governor learns the refresh period from the shortest intervals it has
-presented — never believing anything above 17 ms, so a page slower than its
-display cannot mistake its own best frame for the floor — and steers to
-`quantum x 1.15 / (1 - hysteresis)`: 24 ms at 60 Hz, and no change at 120.
-`stats().configuredFrameTimeMs` keeps the number that was asked for beside the
-`targetFrameTimeMs` being steered to. Point `minBudget`/`maxBudget`
-remain point-member clamps; they are not governor options. The point member
-keeps the denser proven stationary selection while moving and expresses the
-interaction allocation as parent-closed per-tile prefixes.
+presented, never believing anything above 17 ms, so a page slower than its
+display cannot mistake its own best frame for the floor.
+`stats().configuredFrameTimeMs` keeps the number that was asked for beside
+`targetFrameTimeMs`, the whole refreshes granted to it. Point
+`minBudget`/`maxBudget` remain point-member clamps; they are not governor
+options. The point member keeps the denser proven stationary selection while
+moving and expresses the interaction allocation as parent-closed per-tile
+prefixes.
 
 ```js
 import {
