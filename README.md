@@ -227,7 +227,7 @@ paint frame
   → recordTransientFrame({ hostFrameMs, vtkFrameMs })
   → recordCapacitySample(clean asynchronous GPU result)
   → governor adjusts one normalized view-quality fraction
-  → coordinator demand-caps and water-fills that fraction across members
+  → the next prepareFrame demand-caps and water-fills it across members
   → each point member maps its allocation to selection + draw density
   → moving changes thin existing VBO prefixes; settled changes may reselect
   → needsFrame() says whether another measurement is useful
@@ -679,6 +679,10 @@ coordinator.noteRenderedCameras(new Map([[renderer, view]]));
 // settled regime cannot refine quality it never measures. A scene change with
 // an unchanged camera is not motion.
 
+// Immediately before each paint: member preparation, one bounded submission
+// drain, and the frame's allocations.
+coordinator.prepareFrame(frameSerial);
+
 // When a view stops feeding cameras, drop its baseline. Otherwise the first
 // camera after it returns is compared against one from before it left, and all
 // the travel between reads as a gesture nobody made.
@@ -686,6 +690,13 @@ coordinator.recordHostFrame({ hostFrameMs, vtkFrameMs, gpuMs });
 if (coordinator.needsFrame()) scheduleRender();
 coordinator.dispose();
 ```
+
+Members receive allocations only in `prepareFrame`, at most once per frame.
+When a work report or a lifecycle change moves an allocation, the coordinator
+asks for a frame, and `needsFrame()` stays true while any allocation, including
+one a new governor fraction moved, waits for a frame to apply it.
+`recordHostFrame` returns whether the frame was sampled, whether the sample may
+train quality, and its regime, so a host never reads `stats()` per frame.
 
 The point member reports retry-aware `workPending` through the coordinator
 context's work callback. Fixed point members still register for byte and work

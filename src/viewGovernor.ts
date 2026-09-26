@@ -145,6 +145,8 @@ export type ViewGovernor = {
   converged(): boolean;
   /** Presentations recorded so far. */
   frameCount(): number;
+  /** The last reported work state still has work outstanding. */
+  workPending(): boolean;
   /** Aggregate work from every active member, including fixed-quality members. */
   setWorkState(state: GovernorWorkState): void;
   setOptions(options?: ViewGovernorOptions): void;
@@ -644,6 +646,7 @@ export const createViewGovernor = (
     regime,
     converged,
     frameCount: () => frameCount,
+    workPending: pendingWork,
 
     invalidateCapacity() {
       if (disposed) return;

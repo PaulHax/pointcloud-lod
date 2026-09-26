@@ -262,6 +262,7 @@ describe("createPointCloudMember", () => {
     });
     registration.setCamera(VIEW);
     await settle();
+    coordinator.prepareFrame(1);
     let stats = member.stats() as PointCloudMemberStats;
     expect(memory.memberCount()).toBe(1);
     expect(stats.allocation).toMatchObject({
