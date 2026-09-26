@@ -106,7 +106,7 @@ describe("3DBAG resolution", () => {
       `${ENDPOINT}/tileset.json`,
       `${ENDPOINT}/tileset-5-64-192.json`,
     ]);
-    const contentUrls = source.tiles
+    const contentUrls = [...source.tileById.values()]
       .filter((tile) => tile.contentUrl)
       .map((tile) => tile.contentUrl);
     expect(contentUrls).toEqual([
@@ -125,7 +125,9 @@ describe("3DBAG resolution", () => {
         radiusMeters: 1500,
       }),
     });
-    const errors = source.tiles.map((tile) => tile.geometricError);
+    const errors = [...source.tileById.values()].map(
+      (tile) => tile.geometricError,
+    );
     expect(errors).toEqual([2000, 500, 100, 100, 0]);
   });
 

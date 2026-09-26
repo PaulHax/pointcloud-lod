@@ -130,14 +130,11 @@ describe("loadTileset", () => {
       "/tileset/asset/revision/tileset.json",
       expect.objectContaining({ signal: undefined }),
     );
-    expect(source.endpoint).toBe("/tileset/asset/revision");
     expect(source.root.id).toBe("root");
-    expect(source.tiles.map((entry) => entry.id)).toEqual([
-      "root",
-      "root/0",
-      "root/1",
-    ]);
-    expect(source.tiles.map((entry) => entry.contentUrl)).toEqual([
+    expect([...source.tileById.keys()]).toEqual(["root", "root/0", "root/1"]);
+    expect(
+      [...source.tileById.values()].map((entry) => entry.contentUrl),
+    ).toEqual([
       "/tileset/asset/revision/content/root.glb",
       "/tileset/asset/revision/content/west.glb",
       "/tileset/asset/revision/content/east.gltf",
@@ -164,7 +161,12 @@ describe("loadTileset", () => {
       fetch: vi.fn().mockResolvedValue(response(contentless)),
     });
 
-    expect(source.tiles.map(({ id, contentUrl }) => [id, contentUrl])).toEqual([
+    expect(
+      [...source.tileById.values()].map(({ id, contentUrl }) => [
+        id,
+        contentUrl,
+      ]),
+    ).toEqual([
       ["root", undefined],
       ["root/0", undefined],
       ["root/0/0", "/tiles/content/west-detail.glb"],
@@ -178,7 +180,7 @@ describe("loadTileset", () => {
       fetch: vi.fn().mockResolvedValue(response(implicitDocument())),
     });
 
-    expect(source.tiles).toEqual([source.root]);
+    expect([...source.tileById.values()]).toEqual([source.root]);
     expect(source.root.contentUrl).toBeUndefined();
     expect(source.root).toMatchObject({
       id: "root",

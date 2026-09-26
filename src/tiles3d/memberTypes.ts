@@ -102,12 +102,7 @@ export type Tiles3dMemberStats = {
     readonly queuedBytes: number;
     readonly lastFrameAdmittedJobs: number;
     readonly lastFrameAdmittedBytes: number;
-    readonly admittedJobs: number;
-    readonly admittedBytes: number;
     readonly peakQueuedJobs: number;
-    readonly peakQueuedBytes: number;
     readonly peakFrameAdmittedBytes: number;
-    readonly peakFrameElapsedMs: number;
-    readonly admissionFrames: number;
   };
 };

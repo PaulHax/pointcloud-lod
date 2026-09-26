@@ -72,13 +72,8 @@ export type TilesetImplicitTiling = {
 };
 
 export type TilesetSource = {
-  readonly endpoint: string;
-  readonly tilesetUrl: string;
-  readonly assetVersion: "1.1";
-  readonly geometricError: number;
   readonly root: TilesetTile;
-  /** Stable pre-order traversal in source-document child order. */
-  readonly tiles: readonly TilesetTile[];
+  /** Every tile, in stable pre-order of source-document child order. */
   readonly tileById: ReadonlyMap<string, TilesetTile>;
 };
 
@@ -442,7 +437,6 @@ export const substituteImplicitTemplate = (
 type ParseContext = {
   readonly endpoint: string;
   readonly metadataSchema?: Readonly<Record<string, unknown>>;
-  readonly tiles: TilesetTile[];
   readonly tileById: Map<string, TilesetTile>;
 };
 
@@ -580,7 +574,6 @@ const parseImplicitRootTile = (
     implicitTiling: descriptor,
     implicitAddress: Object.freeze({ level: 0, x: 0, y: 0 }),
   });
-  context.tiles.push(parsed);
   context.tileById.set(id, parsed);
   return parsed;
 };
@@ -649,7 +642,6 @@ const parseTile = (
       : { contentUri: uri, contentUrl: resolved }),
     children,
   };
-  context.tiles.push(parsed);
   context.tileById.set(id, parsed);
   for (let index = 0; index < childrenRaw.length; index += 1) {
     children.push(
@@ -677,10 +669,7 @@ export const parseTileset = (
   if (asset.version !== "1.1") {
     throw new TilesetValidationError("asset.version", 'expected "1.1"');
   }
-  const geometricError = finiteAtLeastZero(
-    raw.geometricError,
-    "geometricError",
-  );
+  finiteAtLeastZero(raw.geometricError, "geometricError");
   if (raw.root === undefined) {
     throw new TilesetValidationError("root", "expected an object");
   }
@@ -689,7 +678,6 @@ export const parseTileset = (
     ...(raw.schema === undefined
       ? {}
       : { metadataSchema: objectAt(raw.schema, "schema") }),
-    tiles: [],
     tileById: new Map(),
   };
   const root = parseTile(
@@ -700,15 +688,7 @@ export const parseTileset = (
     undefined,
     context,
   );
-  return Object.freeze({
-    endpoint,
-    tilesetUrl: `${endpoint}/tileset.json`,
-    assetVersion: "1.1" as const,
-    geometricError,
-    root,
-    tiles: Object.freeze(context.tiles),
-    tileById: context.tileById,
-  });
+  return Object.freeze({ root, tileById: context.tileById });
 };
 
 export const loadTileset = async (

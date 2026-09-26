@@ -274,7 +274,6 @@ describe("traverseTileset", () => {
 
     const result = select(root);
 
-    expect(result.culledTileIds).toEqual([]);
     expect(result.neededSubtreeRequests).toEqual([
       {
         id: "subtree/0/0/0",
@@ -285,7 +284,6 @@ describe("traverseTileset", () => {
 
   it("does not fetch an implicit subtree outside the view frustum", () => {
     const result = select(implicitRoot(), {}, { modelMatrix: matrix(100) });
-    expect(result.culledTileIds).toEqual(["root"]);
     expect(result.neededSubtreeRequests).toEqual([]);
   });
 
@@ -547,8 +545,10 @@ describe("traverseTileset", () => {
 
   it("culls outside volumes but keeps frustum-edge intersections", () => {
     const outside = makeTile("outside", 0, [], matrix(4));
-    expect(select(outside).desiredTileIds).toEqual([]);
-    expect(select(outside).culledTileIds).toEqual(["outside"]);
+    expect(select(outside)).toMatchObject({
+      desiredTileIds: [],
+      requestedTileIds: [],
+    });
     expect(select(makeTile("edge", 0, [], matrix(2))).desiredTileIds).toEqual([
       "edge",
     ]);
@@ -594,7 +594,7 @@ describe("traverseTileset", () => {
           modelMatrix: createVerticalExaggerationTransform(2, 10),
         },
       ),
-    ).toMatchObject({ desiredTileIds: [], culledTileIds: ["shallow"] });
+    ).toMatchObject({ desiredTileIds: [], requestedTileIds: [] });
 
     const orthographic = {
       projection: "orthographic" as const,

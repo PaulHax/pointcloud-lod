@@ -119,8 +119,6 @@ export class DecodeWorkerPool implements DecodeWorkerPoolHandle {
   #failedJobs = 0;
   #cancelledJobs = 0;
   #workerElapsedMs = 0;
-  #decodedGeometryBytes = 0;
-  #decodedTextureBytes = 0;
   #basisRuntimeInitializationMs = 0;
   #basisTranscodeMs = 0;
   #basisTextures = 0;
@@ -180,8 +178,6 @@ export class DecodeWorkerPool implements DecodeWorkerPoolHandle {
       failedJobs: this.#failedJobs,
       cancelledJobs: this.#cancelledJobs,
       workerElapsedMs: this.#workerElapsedMs,
-      decodedGeometryBytes: this.#decodedGeometryBytes,
-      decodedTextureBytes: this.#decodedTextureBytes,
       basisRuntimeInitializationMs: this.#basisRuntimeInitializationMs,
       basisTranscodeMs: this.#basisTranscodeMs,
       basisTextures: this.#basisTextures,
@@ -269,8 +265,6 @@ export class DecodeWorkerPool implements DecodeWorkerPoolHandle {
         const now = globalThis.performance?.now?.() ?? Date.now();
         this.#workerElapsedMs += Math.max(0, now - (active.startedAt ?? now));
         this.#completedJobs += 1;
-        this.#decodedGeometryBytes += message.result.byteEstimate.geometry;
-        this.#decodedTextureBytes += message.result.byteEstimate.textures;
         const diagnostics = message.result.diagnostics;
         if (diagnostics) {
           this.#basisRuntimeInitializationMs +=

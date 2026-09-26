@@ -39,7 +39,6 @@ export type MeshAdapterStats = {
   readonly workRevision: number;
   readonly pendingTiles: number;
   readonly pendingJobs: number;
-  readonly pendingBytes: number;
   readonly submittedTiles: number;
   /** Current submitted tile ids, bounded by the member residency allowance. */
   readonly submittedTileIds: readonly string[];
@@ -158,7 +157,6 @@ type PendingTile = {
   readonly onSubmitted?: () => void;
   readonly replacementIds: readonly string[];
   remainingJobs: number;
-  pendingBytes: number;
   cancelled: boolean;
   ready: boolean;
   finishBarrier?: () => void;
@@ -898,7 +896,6 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         resources,
         replacementIds: normalizedReplacements,
         remainingJobs: 0,
-        pendingBytes: geometryBytes + textureBytes,
         cancelled: false,
         ready: false,
         ...(onSubmitted ? { onSubmitted } : {}),
@@ -950,7 +947,6 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
             if (entry.cancelled || disposed) return;
             run();
             entry.remainingJobs -= 1;
-            entry.pendingBytes -= bytes;
             if (entry.remainingJobs === 0) {
               entry.ready = true;
               if (entry.finishBarrier) entry.finishBarrier();
@@ -1278,10 +1274,6 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         pendingTiles: pending.size,
         pendingJobs: [...pending.values()].reduce(
           (sum, tile) => sum + tile.remainingJobs,
-          0,
-        ),
-        pendingBytes: [...pending.values()].reduce(
-          (sum, tile) => sum + tile.pendingBytes,
           0,
         ),
         submittedTiles: submittedResources.length,

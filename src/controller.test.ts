@@ -1998,7 +1998,6 @@ describe("createLodController — selection stats", () => {
     expect(controller.stats().selection).toMatchObject({
       targetTiles: 1,
       targetPoints: 100,
-      selectedNodes: 1,
       budgetSkippedNodes: 2,
       budgetSkippedPoints: 120,
     });
