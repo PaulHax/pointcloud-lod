@@ -115,6 +115,32 @@ describe("pickPointInTiles", () => {
     expect(result.distancePx).toBeCloseTo(5, 4);
   });
 
+  it("keeps searching later tiles for a nearer inner-bucket support", () => {
+    const result = hit(
+      pickPointInTiles(VIEW, ...CENTER, [
+        tile([
+          [0.05, 0, 0.5],
+          [0.05, 0, 0.9],
+        ]),
+        tile([
+          [0.15, 0, -0.9], // Nearer depth in the larger bucket cannot win.
+          [0.01, 0, 0.5], // Equal depth retains the first supporting vertex.
+          [0.02, 0, 0.2], // A nearer support in the inner bucket still wins.
+          [0.02, 0, 0.8],
+        ]),
+      ]),
+    );
+    expect(result.scenePoint[2]).toBeCloseTo(0.2);
+    expect(result.distancePx).toBeCloseTo(2);
+    const tied = hit(
+      pickPointInTiles(VIEW, ...CENTER, [
+        tile([[0.05, 0, 0.5]]),
+        tile([[0.01, 0, 0.5]]),
+      ]),
+    );
+    expect(tied.distancePx).toBeCloseTo(5);
+  });
+
   it("measures css distance with both viewport dimensions", () => {
     // The same NDC offset is 16 px along x but only 8 px along y.
     const alongY = hit(

@@ -250,14 +250,19 @@ export const createContentQueue = <T>(
   const previouslyEvicted = new Set<string>();
 
   const snapshot = (): ContentQueueSnapshot => {
-    const entries = [...selected.values()].map(({ request, status, attempt }) =>
-      Object.freeze({ ...request, status, attempt }),
-    );
-    const count = (status: ContentQueueEntryStatus): number =>
-      entries.filter((entry) => entry.status === status).length;
-    const queued = count("queued");
-    const retrying = count("retrying");
-    const fetching = count("fetching");
+    const entries: ContentQueueEntrySnapshot[] = [];
+    const counts: Record<ContentQueueEntryStatus, number> = {
+      queued: 0,
+      retrying: 0,
+      fetching: 0,
+      ready: 0,
+      failed: 0,
+    };
+    for (const { request, status, attempt } of selected.values()) {
+      entries.push(Object.freeze({ ...request, status, attempt }));
+      counts[status] += 1;
+    }
+    const { queued, retrying, fetching, ready, failed } = counts;
     return Object.freeze({
       revision,
       configGeneration,
@@ -267,8 +272,8 @@ export const createContentQueue = <T>(
       active: active.size,
       queued,
       retrying,
-      ready: count("ready"),
-      failed: count("failed"),
+      ready,
+      failed,
       cached: cache.size,
       decodedBytes,
       cacheHits,

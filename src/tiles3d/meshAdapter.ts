@@ -12,7 +12,6 @@ import {
 } from "../submissionScheduler";
 import { IDENTITY, translatedMatrix, type Mat16 } from "../mat4";
 import { safeCall } from "../observers";
-import type { Bounds } from "../octree";
 import type {
   DecodedPrimitive,
   DecodedTexture,
@@ -142,7 +141,8 @@ type PrimitiveResources = {
 type TileResources = {
   readonly id: string;
   readonly origin: readonly [number, number, number];
-  readonly bounds?: Bounds;
+  /** Accumulated from actual geometry inside its submission jobs. */
+  bounds?: { min: [number, number, number]; max: [number, number, number] };
   readonly primitiveCount: number;
   readonly primitives: PrimitiveResources[];
   readonly textures: Set<any>;
@@ -269,40 +269,12 @@ const retainedGeometryBytes = (
 
 type RgbaTexture = Extract<DecodedTexture, { kind: "rgba" }>;
 
-/** Evaluate each shared MASK texture once, including unavailable CPU samplers. */
-const exactPickAlphaSources = (
-  content: DecodedTileContent,
-): ReadonlySet<RgbaTexture> => {
-  const seen = new Set<DecodedTexture>();
-  const sources = new Set<RgbaTexture>();
-  for (const primitive of content.primitives) {
-    const texture = primitive.material.baseColorTexture;
-    if (
-      primitive.material.raw.alphaMode !== "MASK" ||
-      !primitive.uvs ||
-      !texture ||
-      seen.has(texture)
-    )
-      continue;
-    seen.add(texture);
-    if (texture.kind === "rgba" && hasExactCpuAlphaSampler(texture)) {
-      sources.add(texture);
-    }
-  }
-  return sources;
-};
-
-const actualGeometryBytes = (
-  content: DecodedTileContent,
-  maxJobBytes: number,
-  alphaSources = exactPickAlphaSources(content),
-): number => {
-  let bytes = 0;
-  for (const primitive of content.primitives) {
-    bytes += retainedGeometryBytes(primitive, maxJobBytes);
-  }
-  for (const texture of alphaSources) bytes += texture.width * texture.height;
-  return bytes;
+type RealizationPlan = {
+  readonly geometryBytes: number;
+  readonly textureBytes: number;
+  readonly textures: ReadonlySet<DecodedTexture>;
+  readonly formats: Set<string>;
+  readonly alphaSources: ReadonlySet<RgbaTexture>;
 };
 
 const textureByteLength = (texture: DecodedTexture): number =>
@@ -310,35 +282,55 @@ const textureByteLength = (texture: DecodedTexture): number =>
     ? texture.levels.reduce((sum, level) => sum + level.data.byteLength, 0)
     : texture.rgba.byteLength;
 
-const actualTextureBytes = (content: DecodedTileContent): number => {
-  const seen = new Set<DecodedTexture>();
-  let bytes = 0;
+/** Shared textures are analyzed once within this synchronous admission. */
+const realizationPlan = (
+  content: DecodedTileContent,
+  maxJobBytes: number,
+): RealizationPlan => {
+  const textures = new Set<DecodedTexture>();
+  const formats = new Set<string>();
+  const evaluatedAlpha = new Set<RgbaTexture>();
+  const alphaSources = new Set<RgbaTexture>();
+  let geometryBytes = 0;
+  let textureBytes = 0;
   for (const primitive of content.primitives) {
+    geometryBytes += retainedGeometryBytes(primitive, maxJobBytes);
     const texture = primitive.material.baseColorTexture;
-    if (texture && !seen.has(texture)) {
-      seen.add(texture);
-      bytes += textureByteLength(texture);
+    if (!texture) continue;
+    if (!textures.has(texture)) {
+      textures.add(texture);
+      textureBytes += textureByteLength(texture);
+      formats.add(texture.kind === "compressed" ? texture.format : "rgba");
     }
-  }
-  return bytes;
-};
-
-const boundsOf = (content: DecodedTileContent): Bounds | undefined => {
-  const min: [number, number, number] = [Infinity, Infinity, Infinity];
-  const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
-  let count = 0;
-  for (const primitive of content.primitives) {
-    for (let index = 0; index + 2 < primitive.positions.length; index += 3) {
-      count += 1;
-      for (let axis = 0; axis < 3; axis += 1) {
-        const value =
-          content.origin[axis]! + primitive.positions[index + axis]!;
-        min[axis] = Math.min(min[axis]!, value);
-        max[axis] = Math.max(max[axis]!, value);
+    if (
+      primitive.material.raw.alphaMode === "MASK" &&
+      primitive.uvs &&
+      texture.kind === "rgba" &&
+      !evaluatedAlpha.has(texture)
+    ) {
+      evaluatedAlpha.add(texture);
+      if (hasExactCpuAlphaSampler(texture)) {
+        alphaSources.add(texture);
+        geometryBytes += texture.width * texture.height;
       }
     }
   }
-  return count ? { min, max } : undefined;
+  return { geometryBytes, textureBytes, textures, formats, alphaSources };
+};
+
+const includeBounds = (tile: TileResources, positions: Float32Array): void => {
+  if (positions.length < 3) return;
+  const bounds = (tile.bounds ??= {
+    min: [Infinity, Infinity, Infinity],
+    max: [-Infinity, -Infinity, -Infinity],
+  });
+  for (let index = 0; index + 2 < positions.length; index += 3) {
+    for (let axis = 0; axis < 3; axis += 1) {
+      const value = tile.origin[axis]! + positions[index + axis]!;
+      bounds.min[axis] = Math.min(bounds.min[axis]!, value);
+      bounds.max[axis] = Math.max(bounds.max[axis]!, value);
+    }
+  }
 };
 
 const cellsFor = (primitive: DecodedPrimitive): Uint32Array => {
@@ -379,10 +371,11 @@ const gather = (
   for (let triangle = 0; triangle < count; triangle += 1) {
     for (let corner = 0; corner < 3; corner += 1) {
       const vertex = vertexAt(primitive, firstTriangle + triangle, corner);
-      out.set(
-        source.subarray(vertex * width, vertex * width + width),
-        (triangle * 3 + corner) * width,
-      );
+      const sourceOffset = vertex * width;
+      const outputOffset = (triangle * 3 + corner) * width;
+      for (let component = 0; component < width; component += 1) {
+        out[outputOffset + component] = source[sourceOffset + component]!;
+      }
     }
   }
   return out;
@@ -482,7 +475,6 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
   let drawn = new Set<string>();
   let logicalGeometryUploadBytes = 0;
   let logicalTextureUploadBytes = 0;
-  const budgetPreapproved = new Set<string>();
 
   const pendingJobs = (): number => {
     let jobs = 0;
@@ -663,6 +655,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         polyData,
         primitive: submittedPrimitive,
       };
+      includeBounds(tile, primitive.positions);
       tile.primitives.push(resources);
       setActorState(tile, resources);
     } catch (error) {
@@ -789,6 +782,198 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
     options.scheduleRender();
   };
 
+  const submitTile = (
+    id: string,
+    content: DecodedTileContent,
+    onSubmitted?: () => void,
+    replacementIds: readonly string[] = [],
+    preapprovedPlan?: RealizationPlan,
+  ): MeshSubmitOutcome => {
+    if (disposed || failed.has(id)) return "failed";
+    if (pending.has(id) || submitted.has(id)) return "queued";
+    if (typeof id !== "string" || id.length === 0)
+      throw new TypeError("mesh tile id must be non-empty");
+    const restored = api.restoreTile(id);
+    if (restored === "failed") return "failed";
+    if (restored === "restored") {
+      try {
+        onSubmitted?.();
+      } catch (error) {
+        safeCall(() => options.onError?.(error));
+      }
+      return "queued";
+    }
+    const plan = preapprovedPlan ?? realizationPlan(content, maxJobBytes);
+    const { alphaSources, geometryBytes, textureBytes, formats } = plan;
+    trimPool(geometryBytes + textureBytes);
+    const normalizedReplacements = [...new Set(replacementIds)].filter(
+      (replacementId) =>
+        replacementId !== id &&
+        submitted.has(replacementId) &&
+        !replacementClaims.has(replacementId),
+    );
+    const replacementBytes = normalizedReplacements.reduce(
+      (sum, replacementId) => {
+        const tile = submitted.get(replacementId)!;
+        return sum + tile.geometryBytes + tile.textureBytes;
+      },
+      0,
+    );
+    if (
+      !preapprovedPlan &&
+      reservedBytes() + geometryBytes + textureBytes - replacementBytes >
+        resourceCeilingBytes
+    ) {
+      return "budget-blocked";
+    }
+    const oversized = content.primitives.find(
+      (primitive) =>
+        splits(primitive, maxJobBytes) &&
+        bytesPerTriangle(primitive) > maxJobBytes,
+    );
+    if (oversized) {
+      failed.add(id);
+      safeCall(() =>
+        options.onError?.(
+          new Error(
+            `one mesh triangle requires ${bytesPerTriangle(oversized)} bytes, exceeding the ${maxJobBytes}-byte submission cap`,
+          ),
+        ),
+      );
+      return "failed";
+    }
+    const resources: TileResources = {
+      id,
+      origin: [...content.origin],
+      primitiveCount: content.primitives.length,
+      primitives: [],
+      textures: new Set(),
+      geometryBytes,
+      textureBytes,
+      formats,
+      attached: false,
+    };
+    const entry: PendingTile = {
+      id,
+      jobs: [],
+      resources,
+      replacementIds: normalizedReplacements,
+      remainingJobs: 0,
+      cancelled: false,
+      ready: false,
+      ...(onSubmitted ? { onSubmitted } : {}),
+    };
+    holdPending(entry);
+    for (const replacementId of normalizedReplacements)
+      replacementClaims.set(replacementId, id);
+    const textures = new Map<DecodedTexture, any>();
+    const pickAlphaTextures = new Map<DecodedTexture, PickAlphaTexture>();
+    const enqueue = (bytes: number, run: () => void, atomic = false): void => {
+      entry.remainingJobs += 1;
+      const submission = options.submissions.enqueue({
+        bytes,
+        atomic,
+        run: () => {
+          if (entry.cancelled || disposed) return;
+          run();
+          entry.remainingJobs -= 1;
+          if (entry.remainingJobs === 0) {
+            entry.ready = true;
+            if (entry.finishBarrier) entry.finishBarrier();
+            else finish(entry);
+          }
+        },
+        onError: (error) => {
+          if (entry.groupError) {
+            entry.groupError(error);
+            return;
+          }
+          cancelPending(entry);
+          failed.add(entry.id);
+          safeCall(() => options.onError?.(error));
+        },
+      });
+      entry.jobs.push(submission);
+    };
+    try {
+      // Texture ownership is indivisible at vtkTexture's payload setter.
+      // The tile already passed the residency budget; a large texture gets
+      // its own admission frame instead of becoming a permanent load error.
+      for (const decodedTexture of plan.textures) {
+        const alphaSource =
+          decodedTexture.kind === "rgba" && alphaSources.has(decodedTexture)
+            ? decodedTexture
+            : undefined;
+        const alphaBytes = alphaSource
+          ? alphaSource.width * alphaSource.height
+          : 0;
+        enqueue(
+          textureByteLength(decodedTexture) + alphaBytes,
+          () => {
+            const texture = createTexture(decodedTexture);
+            textures.set(decodedTexture, texture);
+            resources.textures.add(texture);
+            if (alphaSource) {
+              const alpha = new Uint8Array(alphaBytes);
+              for (let pixel = 0; pixel < alpha.length; pixel += 1)
+                alpha[pixel] = alphaSource.rgba[pixel * 4 + 3]!;
+              pickAlphaTextures.set(decodedTexture, {
+                width: alphaSource.width,
+                height: alphaSource.height,
+                alpha,
+                sampler: alphaSource.sampler,
+              });
+            }
+          },
+          true,
+        );
+      }
+      content.primitives.forEach((primitive) => {
+        const totalTriangles = triangleCount(primitive);
+        const perTriangle = bytesPerTriangle(primitive);
+        const trianglesPerChunk = Math.max(
+          1,
+          Math.floor(maxJobBytes / perTriangle),
+        );
+        // A primitive that fits one slice is submitted as authored, indices
+        // and all. Splitting is what forces triangle soup — a chunk cannot
+        // carry the whole index buffer — and expanding a mesh that was never
+        // going to be split copies every vertex once per triangle that
+        // references it, for geometry identical to what the indices already
+        // describe.
+        if (!splits(primitive, maxJobBytes)) {
+          enqueue(wholeGeometryBytes(primitive), () =>
+            createPrimitive(resources, primitive, textures, pickAlphaTextures),
+          );
+          return;
+        }
+        for (
+          let first = 0;
+          first < totalTriangles;
+          first += trianglesPerChunk
+        ) {
+          const count = Math.min(trianglesPerChunk, totalTriangles - first);
+          enqueue(count * perTriangle, () =>
+            createPrimitive(
+              resources,
+              primitiveChunk(primitive, first, count),
+              textures,
+              pickAlphaTextures,
+            ),
+          );
+        }
+      });
+    } catch (error) {
+      cancelPending(entry);
+      failed.add(id);
+      safeCall(() => options.onError?.(error));
+      return "failed";
+    }
+    if (entry.remainingJobs === 0) finish(entry);
+    workRevision += 1;
+    return "queued";
+  };
+
   const api: MeshAdapter = {
     restoreTile(id) {
       if (disposed || failed.has(id)) return "failed";
@@ -813,216 +998,8 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
       return "restored";
     },
 
-    submitTile(id, content, onSubmitted, replacementIds = []) {
-      if (disposed || failed.has(id)) return "failed";
-      if (pending.has(id) || submitted.has(id)) return "queued";
-      if (typeof id !== "string" || id.length === 0)
-        throw new TypeError("mesh tile id must be non-empty");
-      const restored = api.restoreTile(id);
-      if (restored === "failed") return "failed";
-      if (restored === "restored") {
-        try {
-          onSubmitted?.();
-        } catch (error) {
-          safeCall(() => options.onError?.(error));
-        }
-        return "queued";
-      }
-      const alphaSources = exactPickAlphaSources(content);
-      const geometryBytes = actualGeometryBytes(
-        content,
-        maxJobBytes,
-        alphaSources,
-      );
-      const textureBytes = actualTextureBytes(content);
-      trimPool(geometryBytes + textureBytes);
-      const normalizedReplacements = [...new Set(replacementIds)].filter(
-        (replacementId) =>
-          replacementId !== id &&
-          submitted.has(replacementId) &&
-          !replacementClaims.has(replacementId),
-      );
-      const replacementBytes = normalizedReplacements.reduce(
-        (sum, replacementId) => {
-          const tile = submitted.get(replacementId)!;
-          return sum + tile.geometryBytes + tile.textureBytes;
-        },
-        0,
-      );
-      if (
-        !budgetPreapproved.has(id) &&
-        reservedBytes() + geometryBytes + textureBytes - replacementBytes >
-          resourceCeilingBytes
-      ) {
-        return "budget-blocked";
-      }
-      const formats = new Set<string>();
-      for (const primitive of content.primitives) {
-        const texture = primitive.material.baseColorTexture;
-        if (texture)
-          formats.add(texture.kind === "compressed" ? texture.format : "rgba");
-      }
-      const oversized = content.primitives.find(
-        (primitive) =>
-          splits(primitive, maxJobBytes) &&
-          bytesPerTriangle(primitive) > maxJobBytes,
-      );
-      if (oversized) {
-        failed.add(id);
-        safeCall(() =>
-          options.onError?.(
-            new Error(
-              `one mesh triangle requires ${bytesPerTriangle(oversized)} bytes, exceeding the ${maxJobBytes}-byte submission cap`,
-            ),
-          ),
-        );
-        return "failed";
-      }
-      const resources: TileResources = {
-        id,
-        origin: [...content.origin],
-        bounds: boundsOf(content),
-        primitiveCount: content.primitives.length,
-        primitives: [],
-        textures: new Set(),
-        geometryBytes,
-        textureBytes,
-        formats,
-        attached: false,
-      };
-      const entry: PendingTile = {
-        id,
-        jobs: [],
-        resources,
-        replacementIds: normalizedReplacements,
-        remainingJobs: 0,
-        cancelled: false,
-        ready: false,
-        ...(onSubmitted ? { onSubmitted } : {}),
-      };
-      holdPending(entry);
-      for (const replacementId of normalizedReplacements)
-        replacementClaims.set(replacementId, id);
-      const textures = new Map<DecodedTexture, any>();
-      const pickAlphaTextures = new Map<DecodedTexture, PickAlphaTexture>();
-      const decodedTextures = new Set<DecodedTexture>();
-      for (const primitive of content.primitives) {
-        const texture = primitive.material.baseColorTexture;
-        if (texture) decodedTextures.add(texture);
-      }
-      const enqueue = (
-        bytes: number,
-        run: () => void,
-        atomic = false,
-      ): void => {
-        entry.remainingJobs += 1;
-        const submission = options.submissions.enqueue({
-          bytes,
-          atomic,
-          run: () => {
-            if (entry.cancelled || disposed) return;
-            run();
-            entry.remainingJobs -= 1;
-            if (entry.remainingJobs === 0) {
-              entry.ready = true;
-              if (entry.finishBarrier) entry.finishBarrier();
-              else finish(entry);
-            }
-          },
-          onError: (error) => {
-            if (entry.groupError) {
-              entry.groupError(error);
-              return;
-            }
-            cancelPending(entry);
-            failed.add(entry.id);
-            safeCall(() => options.onError?.(error));
-          },
-        });
-        entry.jobs.push(submission);
-      };
-      try {
-        // Texture ownership is indivisible at vtkTexture's payload setter.
-        // The tile already passed the residency budget; a large texture gets
-        // its own admission frame instead of becoming a permanent load error.
-        for (const decodedTexture of decodedTextures) {
-          const alphaSource =
-            decodedTexture.kind === "rgba" && alphaSources.has(decodedTexture)
-              ? decodedTexture
-              : undefined;
-          const alphaBytes = alphaSource
-            ? alphaSource.width * alphaSource.height
-            : 0;
-          enqueue(
-            textureByteLength(decodedTexture) + alphaBytes,
-            () => {
-              const texture = createTexture(decodedTexture);
-              textures.set(decodedTexture, texture);
-              resources.textures.add(texture);
-              if (alphaSource) {
-                const alpha = new Uint8Array(alphaBytes);
-                for (let pixel = 0; pixel < alpha.length; pixel += 1)
-                  alpha[pixel] = alphaSource.rgba[pixel * 4 + 3]!;
-                pickAlphaTextures.set(decodedTexture, {
-                  width: alphaSource.width,
-                  height: alphaSource.height,
-                  alpha,
-                  sampler: alphaSource.sampler,
-                });
-              }
-            },
-            true,
-          );
-        }
-        content.primitives.forEach((primitive) => {
-          const totalTriangles = triangleCount(primitive);
-          const perTriangle = bytesPerTriangle(primitive);
-          const trianglesPerChunk = Math.max(
-            1,
-            Math.floor(maxJobBytes / perTriangle),
-          );
-          // A primitive that fits one slice is submitted as authored, indices
-          // and all. Splitting is what forces triangle soup — a chunk cannot
-          // carry the whole index buffer — and expanding a mesh that was never
-          // going to be split copies every vertex once per triangle that
-          // references it, for geometry identical to what the indices already
-          // describe.
-          if (!splits(primitive, maxJobBytes)) {
-            enqueue(wholeGeometryBytes(primitive), () =>
-              createPrimitive(
-                resources,
-                primitive,
-                textures,
-                pickAlphaTextures,
-              ),
-            );
-            return;
-          }
-          for (
-            let first = 0;
-            first < totalTriangles;
-            first += trianglesPerChunk
-          ) {
-            const count = Math.min(trianglesPerChunk, totalTriangles - first);
-            enqueue(count * perTriangle, () =>
-              createPrimitive(
-                resources,
-                primitiveChunk(primitive, first, count),
-                textures,
-                pickAlphaTextures,
-              ),
-            );
-          }
-        });
-      } catch (error) {
-        cancelPending(entry);
-        failed.add(id);
-        safeCall(() => options.onError?.(error));
-        return "failed";
-      }
-      if (entry.remainingJobs === 0) finish(entry);
-      workRevision += 1;
-      return "queued";
+    submitTile(id, content, onSubmitted, replacementIds) {
+      return submitTile(id, content, onSubmitted, replacementIds);
     },
 
     submitTileGroup(entries, replacementIds) {
@@ -1048,11 +1025,11 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         const tile = submitted.get(id)!;
         return sum + tile.geometryBytes + tile.textureBytes;
       }, 0);
-      const groupBytes = entries.reduce(
-        (sum, entry) =>
-          sum +
-          actualGeometryBytes(entry.content, maxJobBytes) +
-          actualTextureBytes(entry.content),
+      const plans = entries.map((entry) =>
+        realizationPlan(entry.content, maxJobBytes),
+      );
+      const groupBytes = plans.reduce(
+        (sum, plan) => sum + plan.geometryBytes + plan.textureBytes,
         0,
       );
       trimPool(groupBytes);
@@ -1063,55 +1040,51 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         return "budget-blocked";
       }
 
-      for (const { id } of entries) budgetPreapproved.add(id);
       const admitted: string[] = [];
-      try {
-        for (let index = 0; index < entries.length; index += 1) {
-          const entry = entries[index]!;
-          const outcome = api.submitTile(
-            entry.id,
-            entry.content,
-            entry.onSubmitted,
-            index === entries.length - 1 ? normalizedReplacements : [],
-          );
-          if (outcome !== "queued") {
-            for (const id of admitted) {
-              if (!api.cancelTile(id)) api.retireTile(id);
-            }
-            return outcome;
+      for (let index = 0; index < entries.length; index += 1) {
+        const entry = entries[index]!;
+        const outcome = submitTile(
+          entry.id,
+          entry.content,
+          entry.onSubmitted,
+          index === entries.length - 1 ? normalizedReplacements : [],
+          plans[index],
+        );
+        if (outcome !== "queued") {
+          for (const id of admitted) {
+            if (!api.cancelTile(id)) api.retireTile(id);
           }
-          admitted.push(entry.id);
+          return outcome;
         }
-        const groupEntries = admitted.map((id) => pending.get(id)!);
-        let groupFailed = false;
-        const cancelGroup = (error: unknown): void => {
-          if (groupFailed) return;
-          groupFailed = true;
-          for (const entry of groupEntries) cancelPending(entry);
-          for (const { id } of entries) failed.add(id);
-          safeCall(() => options.onError?.(error));
-        };
-        const finishGroup = (): void => {
-          if (groupFailed || groupEntries.some((entry) => !entry.ready)) return;
-          // The replacement remains attached until every child resource is
-          // ready. Then the displayed frontier swaps synchronously: no paint
-          // can observe the gap, and replacement residency is released before
-          // any child becomes submitted.
-          for (const id of normalizedReplacements) {
-            const tile = withdraw(id);
-            if (!tile) continue;
-            drawn.delete(id);
-            release(tile);
-          }
-          for (const entry of groupEntries) finish(entry);
-        };
-        for (const entry of groupEntries) {
-          entry.finishBarrier = finishGroup;
-          entry.groupError = cancelGroup;
-          entry.group = groupEntries;
+        admitted.push(entry.id);
+      }
+      const groupEntries = admitted.map((id) => pending.get(id)!);
+      let groupFailed = false;
+      const cancelGroup = (error: unknown): void => {
+        if (groupFailed) return;
+        groupFailed = true;
+        for (const entry of groupEntries) cancelPending(entry);
+        for (const { id } of entries) failed.add(id);
+        safeCall(() => options.onError?.(error));
+      };
+      const finishGroup = (): void => {
+        if (groupFailed || groupEntries.some((entry) => !entry.ready)) return;
+        // The replacement remains attached until every child resource is
+        // ready. Then the displayed frontier swaps synchronously: no paint
+        // can observe the gap, and replacement residency is released before
+        // any child becomes submitted.
+        for (const id of normalizedReplacements) {
+          const tile = withdraw(id);
+          if (!tile) continue;
+          drawn.delete(id);
+          release(tile);
         }
-      } finally {
-        for (const { id } of entries) budgetPreapproved.delete(id);
+        for (const entry of groupEntries) finish(entry);
+      };
+      for (const entry of groupEntries) {
+        entry.finishBarrier = finishGroup;
+        entry.groupError = cancelGroup;
+        entry.group = groupEntries;
       }
       return "queued";
     },
@@ -1150,11 +1123,22 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
       const next = new Set(ids.filter((id) => submitted.has(id)));
       let changed = next.size !== drawn.size;
       if (!changed) for (const id of next) if (!drawn.has(id)) changed = true;
+      if (!changed) return;
+      const previous = drawn;
       drawn = next;
-      for (const tile of submitted.values()) {
-        for (const primitive of tile.primitives) setActorState(tile, primitive);
+      for (const id of previous) {
+        if (next.has(id)) continue;
+        const tile = submitted.get(id);
+        if (tile)
+          for (const primitive of tile.primitives)
+            primitive.actor.setVisibility(false);
       }
-      if (changed) options.scheduleRender();
+      for (const id of next) {
+        if (previous.has(id)) continue;
+        for (const primitive of submitted.get(id)!.primitives)
+          primitive.actor.setVisibility(visible);
+      }
+      options.scheduleRender();
     },
 
     setBaseMatrix(matrix) {
@@ -1175,8 +1159,11 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
     setVisible(next) {
       if (disposed || visible === next) return;
       visible = next;
-      for (const tile of submitted.values()) {
-        for (const primitive of tile.primitives) setActorState(tile, primitive);
+      for (const id of drawn) {
+        const tile = submitted.get(id);
+        if (tile)
+          for (const primitive of tile.primitives)
+            primitive.actor.setVisibility(visible);
       }
       options.scheduleRender();
     },

@@ -128,6 +128,228 @@ const coloredMask = (
 describe("vtk mesh adapter", () => {
   beforeEach(resetStubs);
 
+  it("preserves indexed attributes and aggregate bounds through scheduled chunks", () => {
+    const { adapter, scheduler } = makeAdapter({ maxBytesPerFrame: 160 });
+    const payload = content();
+    const primitive = payload.primitives[0]!;
+    payload.primitives = [primitive];
+    delete primitive.material.baseColorTexture;
+    primitive.positions = new Float32Array([
+      -0.5, -0.5, 0, 0.5, -0.5, 1, 0, 0.5, 2, 1, 1, 3,
+    ]);
+    primitive.normals = new Float32Array([0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, -1]);
+    primitive.colors = new Float32Array([
+      1, 0, 0, 1, 0, 1, 0, 0.75, 0, 0, 1, 0.5, 1, 1, 1, 0.25,
+    ]);
+    primitive.uvs = new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]);
+    primitive.indices = new Uint16Array([2, 0, 1, 1, 2, 3]);
+    primitive.material.baseColorFactor = [1, 1, 1, 1];
+    const originals = [
+      primitive.positions,
+      primitive.normals,
+      primitive.colors,
+      primitive.uvs,
+    ].map((array) => Array.from(array!));
+    adapter.submitTile("indexed", payload);
+    scheduler.prepareFrame();
+    expect(adapter.tileState("indexed")).toBe("queued");
+    expect(polyDataInstances).toHaveLength(1);
+    expect(Array.from(polyDataInstances[0]!.points as Float32Array)).toEqual([
+      0, 0.5, 2, -0.5, -0.5, 0, 0.5, -0.5, 1,
+    ]);
+    expect(
+      Array.from(
+        (polyDataInstances[0]!.normals as { values: Float32Array }).values,
+      ),
+    ).toEqual([1, 0, 0, 0, 0, 1, 0, 1, 0]);
+    expect(
+      Array.from(
+        (polyDataInstances[0]!.tcoords as { values: Float32Array }).values,
+      ),
+    ).toEqual([0, 1, 0, 0, 1, 0]);
+    expect(
+      Array.from(
+        (polyDataInstances[0]!.scalars as { values: Float32Array }).values,
+      ),
+    ).toEqual([0, 0, 1, 0.5, 1, 0, 0, 1, 0, 1, 0, 0.75]);
+    scheduler.prepareFrame();
+    expect(adapter.tileState("indexed")).toBe("submitted");
+    expect(Array.from(polyDataInstances[1]!.points as Float32Array)).toEqual([
+      0.5, -0.5, 1, 0, 0.5, 2, 1, 1, 3,
+    ]);
+    adapter.setDrawnTiles(["indexed"]);
+    expect(adapter.submittedTiles()[0]!.bounds).toEqual({
+      min: [9.5, 19.5, 30],
+      max: [11, 21, 33],
+    });
+    expect(
+      [
+        primitive.positions,
+        primitive.normals,
+        primitive.colors,
+        primitive.uvs,
+      ].map((array) => Array.from(array!)),
+    ).toEqual(originals);
+    adapter.dispose();
+  });
+
+  it("reads sparse positions only in charged jobs and bounds only their submitted vertices", () => {
+    const { adapter, scheduler } = makeAdapter({ maxBytesPerFrame: 52 });
+    const payload = content();
+    payload.origin = [0, 0, 0];
+    const primitive = payload.primitives[0]!;
+    payload.primitives = [primitive];
+    delete primitive.normals;
+    delete primitive.uvs;
+    delete primitive.material.baseColorTexture;
+    const positions = new Float32Array(10000 * 3).fill(100000);
+    positions.set([-0.5, -0.5, 0, 0.5, -0.5, 0, 0, 0.5, 0]);
+    let positionReads = 0;
+    primitive.positions = new Proxy(positions, {
+      get(target, key) {
+        if (typeof key === "string" && /^\d+$/u.test(key)) positionReads += 1;
+        const value = Reflect.get(target, key, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    adapter.submitTile("sparse-bounds", payload);
+    expect(positionReads).toBe(0);
+    expect(adapter.stats().submittedTiles).toBe(0);
+    scheduler.prepareFrame();
+    expect(positionReads).toBe(9);
+    adapter.setDrawnTiles(["sparse-bounds"]);
+    expect(adapter.submittedTiles()[0]!.bounds).toEqual({
+      min: [-0.5, -0.5, 0],
+      max: [0.5, 0.5, 0],
+    });
+    expect(
+      pickSubmittedTriangles(pickView, 50, 50, adapter.submittedTiles()),
+    ).toMatchObject({
+      status: "hit",
+      scenePoint: [0, 0, 0],
+    });
+    adapter.dispose();
+  });
+
+  it("analyzes shared MASK alpha once per group entry and rechecks later source changes", () => {
+    const { adapter, scheduler } = makeAdapter({ maxBytesPerFrame: 128 });
+    const pixels = new Uint8Array(8 * 4).fill(255);
+    let alphaReads = 0;
+    const texture: Extract<DecodedTexture, { kind: "rgba" }> = {
+      kind: "rgba",
+      width: 8,
+      height: 1,
+      colorSpace: "srgb",
+      sampler: compressed.sampler,
+      rgba: new Proxy(pixels, {
+        get(target, key) {
+          if (typeof key === "string" && /^\d+$/u.test(key)) alphaReads += 1;
+          const value = Reflect.get(target, key, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      }),
+    };
+    const payload = content(texture);
+    for (const primitive of payload.primitives)
+      primitive.material.raw.alphaMode = "MASK";
+    expect(
+      adapter.submitTileGroup(
+        [
+          { id: "a", content: payload },
+          { id: "b", content: payload },
+        ],
+        [],
+      ),
+    ).toBe("queued");
+    // Each group entry has its own resources, but reservation and realization
+    // share the same analysis within that admission.
+    expect(alphaReads).toBe(8 * 2);
+    while (scheduler.hasPending()) scheduler.prepareFrame();
+    adapter.setDrawnTiles(["a", "b"]);
+    expect(
+      adapter
+        .submittedTiles()
+        .every((tile) =>
+          tile.primitives.every(
+            (primitive) => primitive.alphaMask?.kind === "known",
+          ),
+        ),
+    ).toBe(true);
+    adapter.clearTiles();
+    // A new admission can reuse the decoded object with changed pixels.
+    // A persistent identity cache would now claim an exact mip sampler.
+    pixels[7] = 0;
+    alphaReads = 0;
+    adapter.submitTile("changed", payload);
+    expect(alphaReads).toBe(2);
+    while (scheduler.hasPending()) scheduler.prepareFrame();
+    adapter.setDrawnTiles(["changed"]);
+    expect(
+      adapter
+        .submittedTiles()[0]!
+        .primitives.every(
+          (primitive) => primitive.alphaMask?.kind === "unknown",
+        ),
+    ).toBe(true);
+    adapter.dispose();
+  });
+
+  it("changes draw visibility without resetting placement and reapplies placement on reuse", () => {
+    const scheduleRender = vi.fn();
+    const { adapter, scheduler } = makeAdapter({ scheduleRender });
+    adapter.submitTile("a", content());
+    adapter.submitTile("b", content());
+    while (scheduler.hasPending()) scheduler.prepareFrame();
+    adapter.setDrawnTiles(["a"]);
+    const matrixSetters = actorInstances.map((actor) =>
+      vi.spyOn(actor, "setUserMatrix"),
+    );
+    const visibilitySetters = actorInstances.map((actor) =>
+      vi.spyOn(actor, "setVisibility"),
+    );
+    scheduleRender.mockClear();
+    adapter.setDrawnTiles(["a", "a", "absent"]);
+    expect(scheduleRender).not.toHaveBeenCalled();
+    expect(
+      visibilitySetters.every((setter) => setter.mock.calls.length === 0),
+    ).toBe(true);
+    adapter.setVisible(false);
+    expect(actorInstances.every((actor) => !actor.visibility)).toBe(true);
+    adapter.setVisible(true);
+    expect(actorInstances.map((actor) => actor.visibility)).toEqual([
+      true,
+      true,
+      false,
+      false,
+    ]);
+    adapter.setDrawnTiles(["b"]);
+    expect(actorInstances.map((actor) => actor.visibility)).toEqual([
+      false,
+      false,
+      true,
+      true,
+    ]);
+    expect(
+      matrixSetters.every((setter) => setter.mock.calls.length === 0),
+    ).toBe(true);
+    adapter.retireTile("b");
+    adapter.setBaseMatrix([
+      1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 100, 200, 300, 1,
+    ]);
+    expect(adapter.restoreTile("b")).toBe("restored");
+    adapter.setDrawnTiles(["b"]);
+    expect(actorInstances.slice(2).every((actor) => actor.visibility)).toBe(
+      true,
+    );
+    expect(
+      actorInstances.slice(2).map((actor) => actor.userMatrix!.slice(12, 15)),
+    ).toEqual([
+      [110, 220, 330],
+      [110, 220, 330],
+    ]);
+    adapter.dispose();
+  });
+
   it("keeps vertex colors through bounded geometry submissions", () => {
     const { adapter, scheduler } = makeAdapter({ maxBytesPerFrame: 128 });
     const payload = content();

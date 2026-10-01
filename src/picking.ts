@@ -176,6 +176,13 @@ export const sweepPickPoints = (
       const x = originX + positions[index * 3]!;
       const y = originY + positions[index * 3 + 1]!;
       const z = originZ + positions[index * 3 + 2]!;
+      // Once the innermost bucket has a hit, larger buckets cannot win.
+      // Only a nearer support can replace it, so skip the rest before projection.
+      let depth = 0;
+      if (bestDepth[0]! > 0) {
+        depth = (x - rayX) * dirX + (y - rayY) * dirY + (z - rayZ) * dirZ;
+        if (!(depth > 0) || depth >= bestDepth[0]!) continue;
+      }
       const clipW = m3 * x + m7 * y + m11 * z + m15;
       if (!Number.isFinite(clipW) || clipW <= CLIP_W_EPSILON) continue;
       const invW = 1 / clipW;
@@ -186,7 +193,8 @@ export const sweepPickPoints = (
       const ndcX = (m0 * x + m4 * y + m8 * z + m12) * invW;
       const ndcY = (m1 * x + m5 * y + m9 * z + m13) * invW;
       if (!(ndcX >= -1 && ndcX <= 1 && ndcY >= -1 && ndcY <= 1)) continue;
-      const depth = (x - rayX) * dirX + (y - rayY) * dirY + (z - rayZ) * dirZ;
+      if (depth === 0)
+        depth = (x - rayX) * dirX + (y - rayY) * dirY + (z - rayZ) * dirZ;
       if (!(depth > 0)) continue;
       const offsetX = ((ndcX + 1) / 2) * width - cursorXCssPx;
       const offsetY = ((1 - ndcY) / 2) * height - cursorYCssPx;

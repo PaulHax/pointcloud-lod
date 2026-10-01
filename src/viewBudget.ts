@@ -61,7 +61,8 @@ export const allocateViewQuality = <Key>(
       allocations.set(key, inputs.qualityDemand);
       remaining = Math.max(0, remaining - inputs.qualityDemand);
     }
-    open = open.filter((contender) => !capped.includes(contender));
+    const cappedSet = new Set(capped);
+    open = open.filter((contender) => !cappedSet.has(contender));
   }
   return allocations;
 };

@@ -590,6 +590,23 @@ export const createLodController = (
   let drawPlanRevision = 0;
   /** See `LodSelectionStats.projectedSpacingCssPx`. */
   let largestTerminalSpacingCssPx: number | null = null;
+  let terminalSpacingInputs:
+    | Parameters<typeof largestTerminalSpacing>[0]
+    | null = null;
+  let terminalSpacingDirty = false;
+
+  /** Fixed presentation only needs this diagnostic when a host asks for it. */
+  const readTerminalSpacing = (): number | null => {
+    if (!terminalSpacingDirty) return largestTerminalSpacingCssPx;
+    largestTerminalSpacingCssPx =
+      terminalSpacingInputs === null
+        ? null
+        : largestTerminalSpacing(terminalSpacingInputs);
+    terminalSpacingDirty = false;
+    // A resolved diagnostic retains only its scalar, not an old frontier.
+    terminalSpacingInputs = null;
+    return largestTerminalSpacingCssPx;
+  };
 
   /**
    * What a submitted tile actually draws: the planned prefix, clamped to the
@@ -624,6 +641,9 @@ export const createLodController = (
     // only buy a refetch of the same bytes.
     cancelGraceMs: Number.POSITIVE_INFINITY,
     onLoaded: (keyString, infos) => {
+      // Resolve a deferred diagnostic before changing its hierarchy inputs.
+      // This avoids copying the hierarchy merely to preserve an old snapshot.
+      readTerminalSpacing();
       loadedPages.add(keyString);
       for (const info of infos) {
         const nodeKeyString = keyToString(info.key);
@@ -711,21 +731,23 @@ export const createLodController = (
    * selection, and tile arrivals only add detail.
    */
   const updateAutoDiameter = (): void => {
-    largestTerminalSpacingCssPx =
+    // Keep the camera and frontier of this update: a later debounced camera
+    // must not change the diagnostic before another selection or density pass.
+    terminalSpacingInputs =
       view === null
         ? null
-        : largestTerminalSpacing({
+        : {
             target: selection.target,
             hierarchy,
             view,
             refinementCutoffPx,
             plan,
-          });
-    if (largestTerminalSpacingCssPx !== null && presentation.mode === "auto") {
-      emitDiameter(
-        autoDiameterCssPx(presentation, largestTerminalSpacingCssPx),
-      );
-    }
+          };
+    terminalSpacingDirty = true;
+    if (presentation.mode !== "auto") return;
+    const spacing = readTerminalSpacing();
+    if (spacing !== null)
+      emitDiameter(autoDiameterCssPx(presentation, spacing));
   };
 
   const runSelection = (
@@ -841,11 +863,14 @@ export const createLodController = (
   };
 
   const clearSelection = (): void => {
+    // Outstanding hierarchy pages may still land while the member is hidden.
+    readTerminalSpacing();
     if (selection.target.size > 0) targetRevision += 1;
     selection = EMPTY_SELECTION;
   };
 
   const dropEverything = (): void => {
+    readTerminalSpacing();
     // Every outstanding result becomes irrelevant, but the reads behind them
     // keep their slots until they settle: pretending otherwise is how a
     // source swap under a moving camera doubles real I/O.
@@ -1086,7 +1111,7 @@ export const createLodController = (
           budgetSkippedNodes: selection.budgetSkippedNodes,
           budgetSkippedPoints: selection.budgetSkippedPoints,
           projectedImportance: selection.rootSseCssPx,
-          projectedSpacingCssPx: largestTerminalSpacingCssPx,
+          projectedSpacingCssPx: readTerminalSpacing(),
           targetUndecodedTiles,
         },
       };
