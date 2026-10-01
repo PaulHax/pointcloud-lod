@@ -146,6 +146,86 @@ describe("vtk glTF alpha realization", () => {
     },
   );
 
+  it.each([
+    { vertexAlpha: "zero", cutoff: 0 },
+    { vertexAlpha: "zero", cutoff: 0.5 },
+    { vertexAlpha: "quantized", cutoff: 0.499 },
+    { vertexAlpha: "quantized", cutoff: 0.5 },
+    { vertexAlpha: "quantized", cutoff: 0.501 },
+  ])(
+    "matches MASK pixels, picks, and occlusion for $vertexAlpha vertex alpha at cutoff $cutoff",
+    async ({ vertexAlpha, cutoff }) => {
+      const page = await browser.newPage({
+        viewport: { width: 96, height: 48 },
+      });
+      const browserErrors: string[] = [];
+      page.on("pageerror", (error) => browserErrors.push(error.message));
+      page.on("console", (message) => {
+        if (message.type() === "error") browserErrors.push(message.text());
+      });
+      try {
+        await page.goto(
+          `${server.origin}/fixture/index.html?mode=VERTEX_MASK&vertexAlpha=${vertexAlpha}&cutoff=${cutoff}`,
+        );
+        await page
+          .locator("html[data-ready='true']")
+          .waitFor({ timeout: 10_000 });
+        const image = await page.locator("canvas").screenshot();
+        const decoded = await sharp(image)
+          .ensureAlpha()
+          .raw()
+          .toBuffer({ resolveWithObject: true });
+        const left = patchMedian(
+          new Uint8Array(decoded.data),
+          decoded.info.width,
+          24,
+          24,
+        );
+        const right = patchMedian(
+          new Uint8Array(decoded.data),
+          decoded.info.width,
+          72,
+          24,
+        );
+        const adapterErrors = JSON.parse(
+          (await page.locator("html").getAttribute("data-adapter-errors")) ??
+            "null",
+        );
+        const picks = JSON.parse(
+          (await page.locator("html").getAttribute("data-picks")) ?? "null",
+        );
+        const occlusion = JSON.parse(
+          (await page.locator("html").getAttribute("data-occlusion")) ?? "null",
+        );
+        expect(browserErrors).toEqual([]);
+        expect(adapterErrors).toEqual([]);
+        // The factor is applied before VTK rounds vertex alpha to bytes:
+        // 0.4999 becomes 127/255, and 0.5001 becomes 128/255.
+        if (cutoff === 0) {
+          expect(left[0]).toBeGreaterThan(220);
+          expect(left[2]).toBeLessThan(30);
+        } else {
+          expect(left[2]).toBeGreaterThan(220);
+          expect(left[0]).toBeLessThan(30);
+        }
+        expect(right[0]).toBeGreaterThan(220);
+        expect(right[2]).toBeLessThan(30);
+        expect(picks[0].status).toBe("hit");
+        expect(picks[0].scenePoint[2]).toBeCloseTo(cutoff === 0 ? 0 : -0.2);
+        expect(picks[1].status).toBe("hit");
+        expect(picks[1].scenePoint[2]).toBeCloseTo(0);
+        expect(occlusion).toEqual(
+          picks.map((pick: { rayDepth: number }) => ({
+            status: "hit",
+            rayDepth: pick.rayDepth,
+          })),
+        );
+      } finally {
+        await page.close();
+      }
+    },
+  );
+
   it("renders KHR_materials_unlit under a light that leaves the equivalent lit primitive dark", async () => {
     const page = await browser.newPage({ viewport: { width: 96, height: 48 } });
     const browserErrors: string[] = [];

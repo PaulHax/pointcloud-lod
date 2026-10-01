@@ -366,6 +366,30 @@ describe("createViewGovernor", () => {
     expect(governor.stats().regime).toBe("stationary");
   });
 
+  it.each(["position", "matrix"])(
+    "infers motion when the host mutates its reused %s",
+    (field) => {
+      vi.useFakeTimers();
+      const governor = createViewGovernor({ motionDebounceMs: 10 });
+      const scheduleRender = vi.fn();
+      const matrix = new Float64Array(VIEW.viewProj);
+      const position: [number, number, number] = [0, 0, 0];
+      const camera = { ...VIEW, viewProj: matrix, position };
+      const cameras = new Map([["view", camera]]);
+      governor.noteRenderedCameras(cameras, scheduleRender);
+      if (field === "position") position[0] = 1;
+      else matrix[12] = 1;
+      governor.noteRenderedCameras(cameras, scheduleRender);
+      expect(governor.stats()).toMatchObject({
+        regime: "interaction",
+        motion: { inferredReferences: 1 },
+      });
+      vi.advanceTimersByTime(10);
+      expect(scheduleRender).toHaveBeenCalledOnce();
+      governor.dispose();
+    },
+  );
+
   it("retargets in place while preserving held motion", () => {
     const governor = createViewGovernor();
     const held = governor.beginMotion("explicit");

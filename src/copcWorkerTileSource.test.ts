@@ -333,3 +333,44 @@ describe("COPC worker tile source", () => {
     source.dispose?.();
   });
 });
+
+describe("COPC optional worker construction", () => {
+  it("returns a working disposable source when the browser cannot construct a decoder", async () => {
+    const hierarchy = new FakeWorker();
+    const createWorker = vi
+      .fn()
+      .mockReturnValueOnce(hierarchy as unknown as Worker)
+      .mockImplementation(() => {
+        throw new Error("Worker allocation failed");
+      });
+    const opening = createCopcWorkerTileSource({
+      source: "https://example.test/cloud.copc.laz",
+      workers: 3,
+      createWorker,
+    });
+    hierarchy.respond({
+      type: "opened",
+      id: hierarchy.sent[0]!.id,
+      metadata: { pointCount: 42 },
+      state: STATE,
+    });
+    const source = await opening;
+    expect(createWorker).toHaveBeenCalledTimes(2);
+    expect(hierarchy.terminated).toBe(false);
+    await readRootPage(source, hierarchy);
+    const tile = source.loadTile(keyFromString(CHILDREN[0]!));
+    const request = hierarchy.sent.at(-1)!;
+    hierarchy.respond({
+      type: "tile",
+      id: request.id,
+      tile: {
+        origin: [0, 0, 0],
+        positions: new Float32Array(6),
+        pointCount: 2,
+      },
+    });
+    await expect(tile).resolves.toMatchObject({ pointCount: 2 });
+    source.dispose?.();
+    expect(hierarchy.terminated).toBe(true);
+  });
+});

@@ -32,7 +32,13 @@ export type HierarchyEntry = {
   readonly children: readonly VoxelKey[] | null;
   /** The entry stands in for a hierarchy page that has to be read first. */
   readonly pageRef: boolean;
+  /** Actual decoded payload cost, retained after its payload is evicted. */
+  readonly tileBytes?: number;
 };
+
+/** RGB is the largest TileData payload: 12 position bytes + 3 color bytes. */
+export const nodePayloadBytes = (entry: HierarchyEntry): number =>
+  entry.pointCount === 0 ? 0 : (entry.tileBytes ?? entry.pointCount * 15 + 64);
 
 export type Hierarchy = {
   readonly nodes: ReadonlyMap<string, HierarchyEntry>;
@@ -129,6 +135,7 @@ export const selectPoints = (input: {
   readonly hierarchy: Hierarchy;
   readonly view: PreparedView;
   readonly pointBudget: number;
+  readonly memoryBudgetBytes?: number;
   readonly refinementCutoffPx: number;
   /** The selection being replaced, which the hysteresis favours. */
   readonly previous: ReadonlySet<string>;
@@ -143,6 +150,7 @@ export const selectPoints = (input: {
   const selection = selectNodes({
     root: ROOT_KEY,
     pointBudget: input.pointBudget,
+    memoryBudgetBytes: input.memoryBudgetBytes,
     priority: (key) => {
       const keyString = keyToString(key);
       return (
@@ -171,9 +179,17 @@ export const selectPoints = (input: {
         view.nodeScreenSpaceError(entry) < input.refinementCutoffPx
       ) {
         sseStoppedNodes += 1;
-        return { pointCount: entry.pointCount, children: [] };
+        return {
+          pointCount: entry.pointCount,
+          children: [],
+          memoryBytes: nodePayloadBytes(entry),
+        };
       }
-      return { pointCount: entry.pointCount, children };
+      return {
+        pointCount: entry.pointCount,
+        children,
+        memoryBytes: nodePayloadBytes(entry),
+      };
     },
   });
   const root = nodes.get(ROOT_KEY_STRING);

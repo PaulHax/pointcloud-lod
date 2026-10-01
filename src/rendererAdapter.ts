@@ -407,7 +407,20 @@ export const createRendererAdapter = (
           // screen is a payload replacement — never a duplicate. Keeping the
           // old actor would draw superseded points for the rest of the
           // session, and its payload can never be reused, so it goes now.
-          if (holdsPayload(current, tile)) continue;
+          if (holdsPayload(current, tile)) {
+            if (
+              current.tile.pointCount === tile.pointCount &&
+              current.tile.origin.every(
+                (value, index) => value === tile.origin[index],
+              )
+            )
+              continue;
+            submittedPoints += tile.pointCount - current.tile.pointCount;
+            current.tile = tile;
+            applyTileState(keyString, current);
+            changed = true;
+            continue;
+          }
           dropSubmitted(keyString, current);
           releaseTile(current);
         }

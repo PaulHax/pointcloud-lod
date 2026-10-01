@@ -544,6 +544,33 @@ describe("adapter resource pool", () => {
     });
   });
 
+  it("updates placement and point count while reusing submitted buffers", () => {
+    const { adapter, renderer, scheduleRender } = makeAdapter();
+    const data = tile([0, 0, 0]);
+    add(adapter, { key: KEY_A, tile: data });
+    const refreshed: TileData = { ...data, origin: [5, 6, 7], pointCount: 1 };
+    scheduleRender.mockClear();
+    add(adapter, { key: KEY_A, tile: refreshed });
+
+    expect(actorInstances).toHaveLength(1);
+    expect(renderer.removeActor).not.toHaveBeenCalled();
+    expect(polyDataInstances[0]!.points).toBe(data.positions);
+    expect(actorInstances[0]!.userMatrix!.slice(12, 15)).toEqual([5, 6, 7]);
+    expect(mapperInstances[0]!.maximumPointCount).toBe(1);
+    expect(adapter.stats()).toMatchObject({
+      submittedPoints: 1,
+      gpuResidentPoints: 1,
+      drawnPoints: 1,
+      submittedBytes: 94,
+      builtTiles: 1,
+    });
+    expect(scheduleRender).toHaveBeenCalledOnce();
+    scheduleRender.mockClear();
+    add(adapter, { key: KEY_A, tile: refreshed });
+    expect(scheduleRender).not.toHaveBeenCalled();
+    adapter.dispose();
+  });
+
   it("ignores a repeated addition of the payload already on screen", () => {
     const { adapter, renderer, scheduleRender } = makeAdapter();
     const data = tile([0, 0, 0]);

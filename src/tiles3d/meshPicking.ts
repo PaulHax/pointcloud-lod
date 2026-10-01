@@ -27,14 +27,15 @@ export type SubmittedMeshPrimitive = Pick<
   DecodedPrimitive,
   "positions" | "indices" | "uvs"
 > & {
-  readonly alphaMask?:
-    | {
-        readonly kind: "known";
-        readonly factorAlpha: number;
-        readonly cutoff: number;
-        readonly texture?: PickAlphaTexture;
-      }
-    | { readonly kind: "unknown" };
+  readonly alphaMask?: {
+    readonly factorAlpha: number;
+    readonly cutoff: number;
+    /** The VTK color array, with the base-color factor already applied. */
+    readonly vertexColors?: Float32Array;
+  } & (
+    | { readonly kind: "known"; readonly texture?: PickAlphaTexture }
+    | { readonly kind: "unknown" }
+  );
 };
 
 /** Triangles a primitive draws: indexed triples, or consecutive vertex triples. */
@@ -188,6 +189,13 @@ const textureAlpha = (
   );
 };
 
+/** vtkScalarsToColors DIRECT_SCALARS rounds floating RGBA to bytes before
+ * the rasterizer interpolates them. Match that order at the picked triangle.
+ */
+const submittedVertexAlpha = (colors: Float32Array, vertex: number): number =>
+  Math.floor(Math.min(1, Math.max(0, colors[vertex * 4 + 3]!)) * 255 + 0.5) /
+  255;
+
 const alphaAtHit = (
   primitive: SubmittedMeshPrimitive,
   triangle: number,
@@ -196,13 +204,21 @@ const alphaAtHit = (
 ): "opaque" | "transparent" | "unknown" => {
   const mask = primitive.alphaMask;
   if (!mask) return "opaque";
-  if (mask.kind === "unknown") return "unknown";
   let alpha = mask.factorAlpha;
+  const ia = vertexAt(primitive, triangle, 0);
+  const ib = vertexAt(primitive, triangle, 1);
+  const ic = vertexAt(primitive, triangle, 2);
+  const weightA = 1 - barycentricU - barycentricV;
+  if (mask.vertexColors) {
+    alpha *=
+      submittedVertexAlpha(mask.vertexColors, ia) * weightA +
+      submittedVertexAlpha(mask.vertexColors, ib) * barycentricU +
+      submittedVertexAlpha(mask.vertexColors, ic) * barycentricV;
+  }
+  // Texture alpha is in [0, 1], so it cannot restore a known MASK hole.
+  if (alpha >= 0 && alpha < mask.cutoff) return "transparent";
+  if (mask.kind === "unknown") return "unknown";
   if (mask.texture && primitive.uvs) {
-    const ia = vertexAt(primitive, triangle, 0);
-    const ib = vertexAt(primitive, triangle, 1);
-    const ic = vertexAt(primitive, triangle, 2);
-    const weightA = 1 - barycentricU - barycentricV;
     const u =
       primitive.uvs[ia * 2]! * weightA +
       primitive.uvs[ib * 2]! * barycentricU +

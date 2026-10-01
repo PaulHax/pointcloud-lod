@@ -77,7 +77,7 @@ describe("submitted mesh picking", () => {
       primitives: [
         {
           ...tile("unknown", 0).primitives[0]!,
-          alphaMask: { kind: "unknown" },
+          alphaMask: { kind: "unknown", factorAlpha: 1, cutoff: 0.5 },
         },
       ],
     };
@@ -85,6 +85,34 @@ describe("submitted mesh picking", () => {
       pickSubmittedTriangles(view, 50, 50, [tile("behind", 1), unknown]),
     ).toBeNull();
   });
+
+  it.each([
+    { cutoff: 0.5005, status: "hit" },
+    { cutoff: 0.5015, status: "miss" },
+  ])(
+    "quantizes vertex alpha before barycentric interpolation at cutoff $cutoff",
+    ({ cutoff, status }) => {
+      const masked: SubmittedMeshTile = {
+        ...tile("quantized", 0),
+        primitives: [
+          {
+            ...tile("quantized", 0).primitives[0]!,
+            alphaMask: {
+              kind: "known",
+              factorAlpha: 1,
+              cutoff,
+              vertexColors: new Float32Array([
+                1, 1, 1, 0.4999, 1, 1, 1, 0.5001, 1, 1, 1, 0.5001,
+              ]),
+            },
+          },
+        ],
+      };
+      expect(pickSubmittedTriangles(view, 50, 50, [masked])).toMatchObject({
+        status,
+      });
+    },
+  );
 
   it("uses indexed and unindexed triangles and applies the live anchor matrix", () => {
     const translated: SubmittedMeshTile = {

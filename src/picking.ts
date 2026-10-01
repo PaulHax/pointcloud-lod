@@ -119,8 +119,8 @@ const tileIsPickCandidate = (
 /**
  * Sweep every point of the candidate tiles. A point is rejected when its
  * projection is unusable (non-finite, or `clip.w <= CLIP_W_EPSILON`), it
- * falls outside the rendered near/far interval (`|ndc z| > 1`), or its ray
- * depth is negative. Survivors land in every bucket whose radius covers their
+ * falls outside the rendered clip volume, or its ray depth is negative.
+ * Survivors land in every bucket whose radius covers their
  * css distance from the cursor; the smallest non-empty bucket then answers
  * with its minimum-depth point, mirroring `ray_depth.py`.
  *
@@ -183,14 +183,13 @@ export const sweepPickPoints = (
       // coordinate rejects its point rather than passing through.
       const ndcZ = (m2 * x + m6 * y + m10 * z + m14) * invW;
       if (!(ndcZ >= -1 && ndcZ <= 1)) continue;
+      const ndcX = (m0 * x + m4 * y + m8 * z + m12) * invW;
+      const ndcY = (m1 * x + m5 * y + m9 * z + m13) * invW;
+      if (!(ndcX >= -1 && ndcX <= 1 && ndcY >= -1 && ndcY <= 1)) continue;
       const depth = (x - rayX) * dirX + (y - rayY) * dirY + (z - rayZ) * dirZ;
       if (!(depth > 0)) continue;
-      const offsetX =
-        (((m0 * x + m4 * y + m8 * z + m12) * invW + 1) / 2) * width -
-        cursorXCssPx;
-      const offsetY =
-        ((1 - (m1 * x + m5 * y + m9 * z + m13) * invW) / 2) * height -
-        cursorYCssPx;
+      const offsetX = ((ndcX + 1) / 2) * width - cursorXCssPx;
+      const offsetY = ((1 - ndcY) / 2) * height - cursorYCssPx;
       const distanceSq = offsetX * offsetX + offsetY * offsetY;
       if (!(distanceSq <= WIDEST_PICK_RADIUS_SQ)) continue;
       for (let bucket = bucketCount - 1; bucket >= 0; bucket -= 1) {

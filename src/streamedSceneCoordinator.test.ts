@@ -412,6 +412,65 @@ describe("createStreamedSceneCoordinator", () => {
     coordinator.dispose();
   });
 
+  it("reallocates moving quality when a member enters or leaves the view", () => {
+    const coordinator = makeCoordinator({
+      governor: { minSamples: 1, cooldownMs: 0 },
+    });
+    const first = makeMember();
+    const second = makeMember({ projectedImportance: 0 as Importance });
+    const secondInputs = second.governorInputs();
+    let visible = false;
+    second.governorInputs = () => ({
+      ...secondInputs,
+      projectedImportance: (visible ? 1 : 0) as Importance,
+    });
+    coordinator.register(first, { qualityManaged: true });
+    coordinator.register(second, { qualityManaged: true });
+    coordinator.beginInteraction();
+    coordinator.prepareFrame(1);
+    coordinator.recordHostFrame({ hostFrameMs: 66, now: 100 });
+    coordinator.prepareFrame(2);
+    expect(coordinator.stats().viewQualityFraction).toBe(0.5);
+    expect(first.allocations.at(-1)?.qualityFraction).toBe(1);
+    expect(second.allocations.at(-1)?.qualityFraction).toBe(0);
+
+    visible = true;
+    coordinator.prepareFrame(3);
+    expect(first.allocations.at(-1)?.qualityFraction).toBe(0.5);
+    expect(second.allocations.at(-1)?.qualityFraction).toBe(0.5);
+    visible = false;
+    coordinator.prepareFrame(4);
+    expect(first.allocations.at(-1)?.qualityFraction).toBe(1);
+    expect(second.allocations.at(-1)?.qualityFraction).toBe(0);
+    coordinator.dispose();
+  });
+
+  it.each(["hide", "release", "fixed"])(
+    "recomputes moving shares after a member becomes %s",
+    (action) => {
+      const coordinator = makeCoordinator({
+        governor: { minSamples: 1, cooldownMs: 0 },
+      });
+      const first = makeMember();
+      const second = makeMember({ projectedImportance: 0 as Importance });
+      coordinator.register(first, { qualityManaged: true });
+      const membership = coordinator.register(second, { qualityManaged: true });
+      coordinator.beginInteraction();
+      coordinator.prepareFrame(1);
+      coordinator.recordHostFrame({ hostFrameMs: 66, now: 100 });
+      coordinator.prepareFrame(2);
+      expect(first.allocations.at(-1)?.qualityFraction).toBe(1);
+      if (action === "hide") membership.setActive(false);
+      else if (action === "release") membership.release();
+      else membership.setQualityPolicy(false);
+      coordinator.prepareFrame(3);
+      expect(first.allocations.at(-1)?.qualityFraction).toBe(0.5);
+      if (action === "fixed")
+        expect(second.allocations.at(-1)?.qualityFraction).toBe(1);
+      coordinator.dispose();
+    },
+  );
+
   it("does not train on the frame that drains the final submission", async () => {
     const coordinator = makeCoordinator({
       governor: { minSamples: 1, cooldownMs: 0 },
