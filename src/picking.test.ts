@@ -77,6 +77,32 @@ describe("pick radii", () => {
 });
 
 describe("pickPointInTiles", () => {
+  it.each([
+    { point: [-1.05, 0, 0] as Vec3, cursor: [0, 50] },
+    { point: [1.05, 0, 0] as Vec3, cursor: [200, 50] },
+    { point: [0, -1.05, 0] as Vec3, cursor: [100, 100] },
+    { point: [0, 1.05, 0] as Vec3, cursor: [100, 0] },
+  ])(
+    "rejects a clipped vertex near the viewport edge: %o",
+    ({ point, cursor }) => {
+      expect(
+        pickPointInTiles(VIEW, cursor[0]!, cursor[1]!, [tile([point])]),
+      ).toEqual({ status: "miss" });
+      // A vertex exactly on the clip boundary is still rendered and pickable.
+      const clamp = (coordinate: number) =>
+        Math.max(-1, Math.min(1, coordinate));
+      const boundary: Vec3 = [
+        clamp(point[0]),
+        clamp(point[1]),
+        clamp(point[2]),
+      ];
+      expect(
+        pickPointInTiles(VIEW, cursor[0]!, cursor[1]!, [tile([boundary])])
+          ?.status,
+      ).toBe("hit");
+    },
+  );
+
   it("answers on the cursor ray at the support depth, not at the vertex", () => {
     // 5 px right of the cursor, half a unit deep.
     const result = hit(

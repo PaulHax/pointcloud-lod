@@ -1,5 +1,5 @@
 /**
- * Pure point-budget node selection.
+ * Pure node selection under point and optional payload-byte budgets.
  *
  * Walks the hierarchy breadth-first (level by level), trying candidates in
  * descending priority within each level. Selection stops at the first
@@ -19,6 +19,8 @@ export type HierarchyNode = {
   readonly pointCount: number;
   /** Children known to exist in the hierarchy. */
   readonly children: readonly VoxelKey[];
+  /** Decoded payload bytes reserved by an optional memory ceiling. */
+  readonly memoryBytes?: number;
 };
 
 export type SelectNodesOptions = {
@@ -38,6 +40,8 @@ export type SelectNodesOptions = {
   secondaryPriority?: (key: VoxelKey) => number;
   /** Maximum total points across all selected nodes. */
   pointBudget: number;
+  /** Optional ceiling on decoded payload bytes across selected nodes. */
+  memoryBudgetBytes?: number;
   /**
    * Parent-closed selection to retain while a larger budget adds detail. Its
    * cost is reserved before optional candidates compete, measured against the
@@ -56,9 +60,9 @@ export type NodeSelection = {
   readonly consideredNodes: number;
   /** Candidates for which `getNode` returned hierarchy data. */
   readonly availableNodes: number;
-  /** Points stored in the nodes rejected only by the point budget. */
+  /** Points stored in nodes rejected by the point or memory budget. */
   readonly budgetSkippedPoints: number;
-  /** Keys rejected only because their points did not fit. */
+  /** Keys rejected because their points or payload bytes did not fit. */
   readonly budgetSkipped: ReadonlySet<string>;
 };
 
@@ -71,14 +75,15 @@ type ResolveNode = (
  * Cost of the seed under the hierarchy this call sees: a breadth-first walk of
  * the seeded keys from the root. An unavailable one — culled, or on a page that
  * has gone away — ends the walk there, so neither it nor its descendants (which
- * are unreachable in a parent-closed set) reserve any points.
+ * are unreachable in a parent-closed set) reserve no points or bytes.
  */
-const seedPoints = (
+const seedCost = (
   root: VoxelKey,
   seed: ReadonlySet<string>,
   resolve: ResolveNode,
-): number => {
-  let total = 0;
+): { points: number; bytes: number } => {
+  let points = 0;
+  let bytes = 0;
   let frontier: VoxelKey[] = [root];
   while (frontier.length > 0) {
     const next: VoxelKey[] = [];
@@ -87,12 +92,13 @@ const seedPoints = (
       if (!seed.has(keyString)) continue;
       const node = resolve(key, keyString);
       if (node === undefined) continue;
-      total += node.pointCount;
+      points += node.pointCount;
+      bytes += node.memoryBytes ?? 0;
       next.push(...node.children);
     }
     frontier = next;
   }
-  return total;
+  return { points, bytes };
 };
 
 export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
@@ -102,6 +108,7 @@ export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
     priority,
     secondaryPriority = () => 0,
     pointBudget,
+    memoryBudgetBytes = Number.POSITIVE_INFINITY,
     seed,
   } = options;
 
@@ -118,10 +125,19 @@ export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
   const selected = new Set<string>();
   const budgetSkipped = new Set<string>();
   let totalPoints = 0;
+  let totalBytes = 0;
   let consideredNodes = 0;
   let availableNodes = 0;
   let budgetSkippedPoints = 0;
-  let reservedSeedPoints = seed ? seedPoints(root, seed, resolve) : 0;
+  const seedCosts = seed
+    ? seedCost(root, seed, resolve)
+    : { points: 0, bytes: 0 };
+  // A seed that no longer fits must not reserve its descendants ahead of the
+  // root. Fall back to the normal parent-closed priority walk in that case.
+  const retainSeed =
+    seedCosts.points <= pointBudget && seedCosts.bytes <= memoryBudgetBytes;
+  let reservedSeedPoints = retainSeed ? seedCosts.points : 0;
+  let reservedSeedBytes = retainSeed ? seedCosts.bytes : 0;
   let candidates: VoxelKey[] = [root];
   // Once one node in breadth-first priority order cannot fit, selection has
   // reached this budget's spatial boundary. Do not spend the leftover on
@@ -159,13 +175,18 @@ export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
 
     const nextCandidates: VoxelKey[] = [];
     for (const { keyString, node } of ranked) {
-      const required = seed?.has(keyString) ?? false;
+      const required = retainSeed && (seed?.has(keyString) ?? false);
+      const memoryBytes = node.memoryBytes ?? 0;
       const reservedAfter = required
         ? Math.max(0, reservedSeedPoints - node.pointCount)
         : reservedSeedPoints;
+      const reservedBytesAfter = required
+        ? Math.max(0, reservedSeedBytes - memoryBytes)
+        : reservedSeedBytes;
       if (
         (!required && optionalBoundaryReached) ||
-        totalPoints + node.pointCount + reservedAfter > pointBudget
+        totalPoints + node.pointCount + reservedAfter > pointBudget ||
+        totalBytes + memoryBytes + reservedBytesAfter > memoryBudgetBytes
       ) {
         // A seeded selection remains required even after an earlier optional
         // candidate hits the boundary. Everything else stays a priority
@@ -177,7 +198,9 @@ export const selectNodes = (options: SelectNodesOptions): NodeSelection => {
       }
       selected.add(keyString);
       totalPoints += node.pointCount;
+      totalBytes += memoryBytes;
       reservedSeedPoints = reservedAfter;
+      reservedSeedBytes = reservedBytesAfter;
       nextCandidates.push(...node.children);
     }
     candidates = nextCandidates;

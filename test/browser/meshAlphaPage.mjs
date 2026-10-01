@@ -3,13 +3,16 @@ import vtkGenericRenderWindow from "@kitware/vtk.js/Rendering/Misc/GenericRender
 
 import { createSubmissionScheduler } from "../../src/submissionScheduler";
 import { createMeshAdapter } from "../../src/tiles3d/meshAdapter";
+import { createMeshPickSet } from "../../src/tiles3d/meshPicking";
 
-const mode = new URLSearchParams(window.location.search).get("mode");
+const params = new URLSearchParams(window.location.search);
+const mode = params.get("mode");
 if (
   mode !== "MASK" &&
   mode !== "OPAQUE" &&
   mode !== "BLEND" &&
-  mode !== "UNLIT"
+  mode !== "UNLIT" &&
+  mode !== "VERTEX_MASK"
 ) {
   throw new Error(`unsupported alpha mode ${mode}`);
 }
@@ -108,6 +111,32 @@ const texture = {
   colorSpace: "srgb",
   sampler,
 };
+const vertexMaskPrimitives = () => {
+  const factorAlpha = 0.8;
+  const zero = params.get("vertexAlpha") === "zero";
+  const opaqueTexture = {
+    ...texture,
+    rgba: new Uint8Array([255, 0, 0, 255]),
+    width: 1,
+  };
+  return [zero ? 0 : 0.4999 / factorAlpha, zero ? 1 : 0.5001 / factorAlpha].map(
+    (alpha, side) => {
+      const result = primitive(
+        0,
+        [1, 1, 1, factorAlpha],
+        "MASK",
+        opaqueTexture,
+        true,
+        side === 0 ? [-2, 0] : [0, 2],
+      );
+      result.colors = new Float32Array(
+        Array.from({ length: 4 }, () => [1, 1, 1, alpha]).flat(),
+      );
+      result.material.raw.alphaCutoff = Number(params.get("cutoff") ?? 0.5);
+      return result;
+    },
+  );
+};
 const foreground = {
   origin: [0, 0, 0],
   primitives:
@@ -116,7 +145,9 @@ const foreground = {
           primitive(0, [1, 0, 0, 1], "OPAQUE", undefined, true, [-2, 0], -1),
           primitive(0, [1, 0, 0, 1], "OPAQUE", undefined, false, [0, 2], -1),
         ]
-      : [primitive(0, [1, 1, 1, 1], mode, texture)],
+      : mode === "VERTEX_MASK"
+        ? vertexMaskPrimitives()
+        : [primitive(0, [1, 1, 1, 1], mode, texture)],
   byteEstimate: { geometry: 0, textures: mode === "UNLIT" ? 0 : 8 },
 };
 adapter.submitTile("background", background);
@@ -131,6 +162,29 @@ camera.setViewUp(0, 1, 0);
 camera.setParallelScale(1);
 renderer.resetCameraClippingRange();
 renderWindow.render();
+if (mode === "VERTEX_MASK") {
+  const matrix = camera.getCompositeProjectionMatrix(2, -1, 1);
+  const view = {
+    projection: "orthographic",
+    viewProj: Array.from(
+      { length: 16 },
+      (_, i) => matrix[(i % 4) * 4 + Math.floor(i / 4)],
+    ),
+    position: [...camera.getPosition()],
+    parallelScale: camera.getParallelScale(),
+    viewportWidthCssPx: 96,
+    viewportHeightCssPx: 48,
+  };
+  const picks = createMeshPickSet();
+  picks.replaceDrawn(adapter.submittedTiles());
+  const samples = [24, 72];
+  document.documentElement.dataset.picks = JSON.stringify(
+    samples.map((x) => picks.pick(view, x, 24)),
+  );
+  document.documentElement.dataset.occlusion = JSON.stringify(
+    samples.map((x) => picks.occlusionDepth(view, x, 24)),
+  );
+}
 document.documentElement.dataset.stats = JSON.stringify(adapter.stats());
 document.documentElement.dataset.adapterErrors = JSON.stringify(adapterErrors);
 document.documentElement.dataset.ready = "true";

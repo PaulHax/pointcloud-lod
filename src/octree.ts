@@ -33,7 +33,7 @@ export const keyToString = (key: VoxelKey): string =>
 
 const KEY_RE = /^(\d+)-(\d+)-(\d+)-(\d+)$/;
 
-/** Decode `'l-x-y-z'` back into a key. Throws on malformed input. */
+/** Decode `'l-x-y-z'` into a key on a safe-integer grid (levels 0..53). */
 export const keyFromString = (s: string): VoxelKey => {
   const m = KEY_RE.exec(s);
   if (m === null) {
@@ -46,8 +46,15 @@ export const keyFromString = (s: string): VoxelKey => {
     y: Number(y),
     z: Number(z),
   };
-  const extent = 1 << key.level;
-  if (key.x >= extent || key.y >= extent || key.z >= extent) {
+  const extent = 2 ** key.level;
+  if (
+    !Number.isSafeInteger(key.level) ||
+    key.level > 53 ||
+    ![key.x, key.y, key.z].every(Number.isSafeInteger) ||
+    key.x >= extent ||
+    key.y >= extent ||
+    key.z >= extent
+  ) {
     throw new Error(`Voxel key out of range for its level: '${s}'`);
   }
   return key;
@@ -68,8 +75,9 @@ export const levelFromString = (s: string): number => {
   return end === -1 ? Number.NaN : Number(s.slice(0, end));
 };
 
-/** The 8 children of a node, in z-major bit order (dx fastest). */
+/** Eight children in z-major bit order, or none at the safe grid's last level. */
 export const childKeys = (key: VoxelKey): VoxelKey[] => {
+  if (key.level >= 53) return [];
   const children: VoxelKey[] = [];
   for (let dz = 0; dz <= 1; dz += 1) {
     for (let dy = 0; dy <= 1; dy += 1) {
@@ -91,7 +99,7 @@ export const childKeys = (key: VoxelKey): VoxelKey[] => {
  * (COPC convention — every node is itself a cube).
  */
 export const nodeBounds = (root: Cube, key: VoxelKey): Bounds => {
-  const size = (root.halfSize * 2) / (1 << key.level);
+  const size = (root.halfSize * 2) / 2 ** key.level;
   const rootMin: Vec3 = [
     root.center[0] - root.halfSize,
     root.center[1] - root.halfSize,
@@ -110,7 +118,7 @@ export const nodeBounds = (root: Cube, key: VoxelKey): Bounds => {
 
 /** Node bounds expressed as a cube (center + half size). */
 export const nodeCube = (root: Cube, key: VoxelKey): Cube => {
-  const halfSize = root.halfSize / (1 << key.level);
+  const halfSize = root.halfSize / 2 ** key.level;
   const { min } = nodeBounds(root, key);
   return {
     center: [min[0] + halfSize, min[1] + halfSize, min[2] + halfSize],

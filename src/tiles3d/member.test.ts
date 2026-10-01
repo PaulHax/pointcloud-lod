@@ -428,6 +428,35 @@ describe("createTiles3dMember", () => {
     member.dispose();
   });
 
+  it("reselects when the host mutates its reused camera matrix", async () => {
+    const h = harness();
+    const member = createTiles3dMember(h.context, h.config);
+    member.applyAllocation({
+      qualityFraction: 1,
+      memoryBudgetBytes: 4096,
+      regime: "stationary",
+    });
+    const matrix = new Float64Array(IDENTITY);
+    const camera = { ...view, viewProj: matrix };
+    member.setCamera(camera);
+    await settle();
+    while (h.submissions.hasPending()) h.submissions.prepareFrame();
+    expect(member.stats()).toMatchObject({ renderer: { drawnTiles: 1 } });
+    const passes = (member.stats() as Tiles3dMemberStats).selectionPasses;
+    matrix[12] = 10;
+    member.setCamera(camera);
+    expect(
+      (member.stats() as Tiles3dMemberStats).selectionPasses,
+    ).toBeGreaterThan(passes);
+    expect(member.stats()).toMatchObject({ renderer: { drawnTiles: 0 } });
+    matrix[12] = 0;
+    member.setCamera(camera);
+    await settle();
+    while (h.submissions.hasPending()) h.submissions.prepareFrame();
+    expect(member.stats()).toMatchObject({ renderer: { drawnTiles: 1 } });
+    member.dispose();
+  });
+
   it("implements the streamed member lifecycle without a second memory owner", async () => {
     const h = harness();
     const member = createTiles3dMember(h.context, h.config);

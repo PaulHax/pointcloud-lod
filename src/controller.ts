@@ -11,6 +11,7 @@
  */
 
 import {
+  copyCameraView,
   modelFrameOf,
   prepareView,
   sameCameraView,
@@ -51,6 +52,7 @@ import {
   EMPTY_SELECTION,
   ROOT_KEY_STRING,
   frontierOrder,
+  nodePayloadBytes,
   selectPoints,
   type Hierarchy,
   type HierarchyEntry,
@@ -58,7 +60,12 @@ import {
 } from "./pointSelection";
 import { pointCapacity } from "./pointQuality";
 import type { RetryPolicy } from "./retryPolicy";
-import type { NodeInfo, TileData, TileSource } from "./tileSource";
+import {
+  tileBytes,
+  type NodeInfo,
+  type TileData,
+  type TileSource,
+} from "./tileSource";
 
 export type TileDrawPlan = {
   readonly entries: readonly {
@@ -619,12 +626,14 @@ export const createLodController = (
     onLoaded: (keyString, infos) => {
       loadedPages.add(keyString);
       for (const info of infos) {
-        nodes.set(keyToString(info.key), {
+        const nodeKeyString = keyToString(info.key);
+        nodes.set(nodeKeyString, {
           pointCount: info.pointCount,
           bounds: info.bounds,
           spacing: info.spacing,
           children: info.children ?? null,
           pageRef: info.pageRef === true,
+          tileBytes: nodes.get(nodeKeyString)?.tileBytes,
         });
       }
       // A page reshapes the subtree below it, so the next page queue is the
@@ -644,6 +653,19 @@ export const createLodController = (
     // recent tile adopts its read instead of cancelling and refetching it.
     cancelGraceMs: selectionDelayMs,
     onLoaded: (keyString, tile) => {
+      const entry = nodes.get(keyString);
+      const bytes = tileBytes(tile);
+      const exceedsEstimate =
+        entry !== undefined && bytes > nodePayloadBytes(entry);
+      if (entry !== undefined)
+        nodes.set(keyString, { ...entry, tileBytes: bytes });
+      // A source may decode more points than its hierarchy advertised. Learn
+      // that cost before admitting the payload, and keep it after cache
+      // eviction so another selection cannot refetch the same oversized tile.
+      if (exceedsEstimate && selection.target.has(keyString)) {
+        runSelection(undefined, { keyString, tile });
+        return;
+      }
       // Cancellation is advisory, so a cancelled read can still deliver. If
       // the key was reselected while it ran, this payload is exactly what the
       // selection is waiting for.
@@ -706,13 +728,17 @@ export const createLodController = (
     }
   };
 
-  const runSelection = (seed?: ReadonlySet<string>): void => {
+  const runSelection = (
+    seed?: ReadonlySet<string>,
+    arrival?: { readonly keyString: string; readonly tile: TileData },
+  ): void => {
     if (disposed || !active || view === null) return;
     const previous = selection.target;
     selection = selectPoints({
       hierarchy,
       view,
       pointBudget: currentBudget(),
+      memoryBudgetBytes: memoryBudgetBytes(),
       refinementCutoffPx,
       previous,
       seed,
@@ -742,6 +768,18 @@ export const createLodController = (
     // Deselected tiles leave renderer residency immediately; their payloads
     // stay in the CPU cache.
     residency.releaseExcept(target);
+    if (arrival !== undefined) {
+      // Handle the just-decoded tile directly: parking it before selection
+      // could evict it from a smaller CPU cache even when GPU residency fits.
+      if (
+        target.has(arrival.keyString) &&
+        !residency.isResident(arrival.keyString)
+      ) {
+        residency.hold(arrival.keyString, arrival.tile);
+      } else {
+        residency.park(arrival.keyString, arrival.tile);
+      }
+    }
 
     // Reuse decoded payloads at once; ask for the rest, coarse levels first.
     // A key whose read is still running is adopted rather than read twice.
@@ -842,7 +880,7 @@ export const createLodController = (
       // Hosts feed the camera on every render, so an unchanged view is a
       // no-op rather than a reason to rerun selection.
       if (worldView !== null && sameCameraView(worldView, nextView)) return;
-      worldView = nextView;
+      worldView = copyCameraView(nextView);
       applyWorldView();
     },
 

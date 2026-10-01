@@ -16,7 +16,7 @@ import {
   type QualityAdjustment,
   type QualityRegime,
 } from "./adaptiveBudget";
-import { cameraMoved, type CameraView } from "./camera";
+import { cameraMoved, copyCameraView, type CameraView } from "./camera";
 import { finiteAtLeast, finiteNonNegative, finiteWithin } from "./numeric";
 
 export type TransientFrameMetrics = {
@@ -711,7 +711,12 @@ export const createViewGovernor = (
       for (const [key, view] of views) {
         if (view && cameraMoved(renderedCameras.get(key), view)) moved = true;
       }
-      renderedCameras = new Map(views);
+      renderedCameras = new Map(
+        [...views].map(([key, view]) => [
+          key,
+          view ? copyCameraView(view) : view,
+        ]),
+      );
       if (!moved) return;
       markCameraChanged();
       if (!inferredBurst) inferredBurst = takeMotionReference("inferred");

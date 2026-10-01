@@ -312,3 +312,55 @@ describe("selectNodes", () => {
     }
   });
 });
+
+describe("selectNodes — byte ceiling", () => {
+  const counts = { "0-0-0-0": 10, "1-0-0-0": 10, "1-1-0-0": 10 };
+  const bytes: Record<string, number> = {
+    "0-0-0-0": 10,
+    "1-0-0-0": 80,
+    "1-1-0-0": 30,
+  };
+  const hierarchy = hierarchyOf(counts);
+  const getNode = (key: VoxelKey): HierarchyNode | undefined => {
+    const node = hierarchy(key);
+    return node === undefined
+      ? undefined
+      : { ...node, memoryBytes: bytes[keyToString(key)] };
+  };
+  const priority = (key: VoxelKey): number => (key.x === 0 ? 100 : 1);
+  const seed = new Set(["0-0-0-0", "1-1-0-0"]);
+
+  it("reserves a growth seed's bytes before optional nodes compete", () => {
+    const selected = selectNodes({
+      root: ROOT_KEY,
+      getNode,
+      priority,
+      pointBudget: 100,
+      memoryBudgetBytes: 90,
+      seed,
+    });
+    expect(selected.selected).toEqual(seed);
+    const grown = selectNodes({
+      root: ROOT_KEY,
+      getNode,
+      priority,
+      pointBudget: 100,
+      memoryBudgetBytes: 120,
+      seed,
+    });
+    expect(grown.selected).toEqual(new Set(Object.keys(counts)));
+  });
+
+  it("drops an unaffordable seed without excluding its affordable root", () => {
+    const selected = selectNodes({
+      root: ROOT_KEY,
+      getNode,
+      priority,
+      pointBudget: 100,
+      memoryBudgetBytes: 35,
+      seed,
+    });
+    expect(selected.selected).toEqual(new Set(["0-0-0-0"]));
+    expect(selected.budgetSkipped).toEqual(new Set(["1-0-0-0", "1-1-0-0"]));
+  });
+});

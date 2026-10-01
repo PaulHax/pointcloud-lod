@@ -30,7 +30,7 @@ npm install github:PaulHax/pointcloud-lod#<commit-sha>
 
 ### Requirements
 
-The package has three entry points, and only one of them needs vtk.js:
+The core, vtk.js adapters, and optional worker endpoints have separate entry points:
 
 - **`pointcloud-lod`** — tile sources, LOD controller, and camera math. No
   vtk.js dependency; runs standalone (e.g. in a worker or a test).
@@ -51,6 +51,9 @@ The package has three entry points, and only one of them needs vtk.js:
 - **`pointcloud-lod/copc-worker`** — the optional COPC worker endpoint. Pair it
   with `createCopcWorkerTileSource` to keep range reads, LAZ decoding, and
   point extraction off the interaction/render thread.
+- **`pointcloud-lod/tiles3d-decode-worker`** — the optional classic worker
+  endpoint for 3D Tiles decoding. The 3D Tiles member and mesh adapter are
+  exported from `pointcloud-lod/vtk` and use the same vtk.js fork.
 
 vtk.js is deliberately not declared as a peer dependency: no published version
 satisfies the adapter, so any semver range would be false.
@@ -188,7 +191,8 @@ camera or budget changes
 `setCamera()` is the normal entry point. It should receive the actual camera
 used for rendering, including the CSS viewport height. The first change
 selects immediately; repeated changes are rate-limited by `selectionDelayMs`
-and the last one still gets a trailing selection.
+and the last one still gets a trailing selection. Camera values are copied,
+so hosts may update and reuse their position arrays and view-projection matrices.
 
 Selection is parent-closed: a child adds points without replacing its parent.
 While a selected child is still loading, missing from the hierarchy, or
@@ -253,8 +257,12 @@ controller.setPointBudget(1_500_000);
 ```
 
 The effective budget is still capped by the controller's memory-derived point
-ceiling. A higher budget permits more selected detail; it does not require
-that every dataset contain that many useful visible points.
+ceiling. Selection also reserves each tile's logical payload bytes, including
+per-tile overhead. Before decoding it assumes position and RGB arrays; afterward
+it uses the decoded array sizes. Learned costs survive CPU-cache eviction, so
+an oversized payload is not repeatedly fetched under the same byte budget.
+A higher budget permits more selected detail; it does not require that every
+dataset contain that many useful visible points.
 
 #### Point-presentation flow: Auto or Fixed
 
@@ -304,7 +312,7 @@ These methods are useful when application policy lives outside the library:
 | `governor.setOptions(options)`                        | Re-target a running governor. Memberships, motion references and camera stability survive; only the adaptive tracks restart. An unusable value throws and changes nothing. |
 | `adapter.setPointDiameterCssPx(pixels)`               | Set point size outside the controller. Omit `onPointDiameterCssPx` when the application owns this value so two policies do not compete.                                    |
 | `adapter.setDevicePixelRatio(ratio)`                  | Update CSS-to-framebuffer scaling without changing selection or the CSS point diameter.                                                                                    |
-| `adapter.setDensityFraction(fraction)`                | Apply progressive prefix drawing directly when policy lives outside the controller.                                                                                        |
+| `adapter.applyDrawPlan(plan)`                         | Apply per-tile prefix counts when draw policy lives outside the controller. Use `controller.setDensityFraction()` when the controller owns draw policy.                    |
 | `adapter.setResourceCeilingBytes(bytes)`              | Bound GPU resources retained in the adapter's actor-reuse pool. A host can feed it the controller's current `memoryBudgetBytes`.                                           |
 | `adapter.setVisible(false)`                           | Hide drawing only. Actors, GPU resources, selection, and streaming remain live for an immediate show.                                                                      |
 | `controller.setActive(false)`                         | Stop selection and tile fetches, emit removals that move actors into the bounded adapter pool, and retain decoded payloads in the bounded CPU cache.                       |
@@ -315,17 +323,17 @@ These methods are useful when application policy lives outside the library:
 
 The main dials and their tradeoffs are:
 
-| Dial                              | Primary effect                                           | Tune when                                                      |
-| --------------------------------- | -------------------------------------------------------- | -------------------------------------------------------------- |
-| `pointBudget` or governor targets | Visible detail and render cost                           | First performance/quality control                              |
-| `presentation`                    | Point coverage and apparent density, not selected detail | Points look porous or overly solid                             |
-| `refinementCutoffPx`              | How far hierarchy traversal is allowed to descend        | Storage has detail finer than the view needs                   |
-| `memory`                          | GPU-resident byte ceiling, converted to a point ceiling  | Multiple clouds compete for GPU memory                         |
-| `cacheBytes`                      | Decoded CPU payloads retained for fast reselection       | Revisiting views causes too much decoding or uses too much RAM |
-| `fetchConcurrency`                | Parallel tile fetch/decode work                          | The source is under-filled or decoding saturates the client    |
-| `hierarchyConcurrency`            | Parallel hierarchy-page work                             | Deep traversal stalls waiting for hierarchy                    |
-| `selectionDelayMs`                | Reselection rate and recent-read cancellation grace      | Camera motion causes selection or cancel/refetch churn         |
-| `interactionSettleMs`             | Governor delay for declaring the rendered camera stable  | Quality rises too early or too late after motion               |
+| Dial                              | Primary effect                                             | Tune when                                                      |
+| --------------------------------- | ---------------------------------------------------------- | -------------------------------------------------------------- |
+| `pointBudget` or governor targets | Visible detail and render cost                             | First performance/quality control                              |
+| `presentation`                    | Point coverage and apparent density, not selected detail   | Points look porous or overly solid                             |
+| `refinementCutoffPx`              | How far hierarchy traversal is allowed to descend          | Storage has detail finer than the view needs                   |
+| `memory`                          | Logical resident payload ceiling, checked during selection | Multiple clouds compete for GPU memory                         |
+| `cacheBytes`                      | Decoded CPU payloads retained for fast reselection         | Revisiting views causes too much decoding or uses too much RAM |
+| `fetchConcurrency`                | Parallel tile fetch/decode work                            | The source is under-filled or decoding saturates the client    |
+| `hierarchyConcurrency`            | Parallel hierarchy-page work                               | Deep traversal stalls waiting for hierarchy                    |
+| `selectionDelayMs`                | Reselection rate and recent-read cancellation grace        | Camera motion causes selection or cancel/refetch churn         |
+| `interactionSettleMs`             | Governor delay for declaring the rendered camera stable    | Quality rises too early or too late after motion               |
 
 Visibility, activity, and disposal answer different questions:
 
@@ -724,7 +732,7 @@ sample near the cursor — it never snaps to the vertex itself. The query runs
 only over the tile set last submitted to the renderer (WYSIWYG: what is not
 drawn cannot be picked), and answers
 
-- `{ status: "hit", pointOnRay, distancePx }` for a supported depth,
+- `{ status: "hit", scenePoint, rayDepth, distancePx }` for a supported depth,
 - `{ status: "miss" }` for a valid sweep that found no sample within any
   pick bucket, or
 - `null` when the query is unavailable (inactive/disposed controller, invalid
@@ -791,14 +799,14 @@ TileSource  ──▶  LOD controller  ──▶  renderer adapter
 - **Renderer adapter** (`createRendererAdapter`) — turns tile batches into
   vtk.js actors, one `vtkPolyData` + `vtkPointGaussianMapper` per tile
   (one gl.POINTS vertex per point, no cell topology), with an anchor base
-  matrix composed onto each tile's origin translation. This is the only
-  module importing `@kitware/vtk.js`, which is why it ships under a separate
+  matrix composed onto each tile's origin translation. Both point and mesh
+  adapters import `@kitware/vtk.js` through the separate
   `pointcloud-lod/vtk` entry point. The `vtkPointGaussianMapper` it uses is
   not yet in a released vtk.js — see [Requirements](#requirements).
   CSS diameter stays separate from framebuffer density: the adapter applies
   device pixel ratio through the mapper at the final rendering boundary.
   `applyDrawPlan` changes each mapper's draw count while its complete
-  point/color VBO remains resident. `setDensityFraction` remains available
+  point/color VBO remains resident. Use `controller.setDensityFraction`
   when an external policy deliberately wants uniform thinning.
   The controller owns residency and the adapter owns actors: `setVisible` is
   a draw switch that keeps every actor alive (batches still apply while

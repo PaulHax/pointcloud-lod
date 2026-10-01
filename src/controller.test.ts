@@ -648,6 +648,35 @@ describe("createLodController", () => {
     controller.dispose();
   });
 
+  it.each(["matrix", "position"])(
+    "reselects after the host mutates its reused camera %s",
+    async (field) => {
+      const { controller, deferred, loadCalls } = makeController(SMALL_TREE);
+      await settle();
+      const matrix = new Float64Array(IDENTITY);
+      const position: [number, number, number] = [0, 0, 0];
+      const camera = { ...VIEW, viewProj: matrix, position };
+      controller.setCamera(camera);
+      await settle();
+      for (const request of deferred.values()) request.resolve();
+      await settle();
+      expect(controller.stats().residentTiles).toBe(3);
+      const requests = [...loadCalls];
+      if (field === "matrix") matrix[12] = 10;
+      else position[2] = 1000;
+      controller.setCamera(camera);
+      await settle();
+      expect(controller.stats().residentTiles).toBe(field === "matrix" ? 0 : 1);
+      matrix[12] = 0;
+      position[2] = 0;
+      controller.setCamera(camera);
+      await settle();
+      expect(controller.stats().residentTiles).toBe(3);
+      expect(loadCalls).toEqual(requests);
+      controller.dispose();
+    },
+  );
+
   it("cancels in-flight fetches when the camera looks away", async () => {
     const { controller, deferred, batches } = makeController(SMALL_TREE);
     await settle();
@@ -3160,6 +3189,172 @@ describe("createLodController — pickPoint", () => {
     }
     expect(controller.pickPoint(VIEW, Number.NaN, 50)).toBeNull();
     expect(controller.pickPoint(VIEW, 50, Number.NEGATIVE_INFINITY)).toBeNull();
+    controller.dispose();
+  });
+});
+
+describe("createLodController — decoded byte admission", () => {
+  it("accounts for sparse RGB tile overhead before submitting any payload", async () => {
+    const tree: Record<string, FakeEntry> = {
+      "0-0-0-0": {
+        pointCount: 1,
+        children: childKeys(ROOT_KEY).map(keyToString),
+      },
+      ...Object.fromEntries(
+        childKeys(ROOT_KEY).map((key) => [keyToString(key), { pointCount: 1 }]),
+      ),
+    };
+    const { controller, deferred, loadCalls, visible, violations } =
+      makeMirrored(tree, {
+        pointBudget: 9,
+        memoryBudgetBytes: 144,
+      });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    for (const pending of deferred.values())
+      pending.resolve({ rgb: new Uint8Array(3) });
+    await settle();
+
+    expect(loadCalls).toEqual(["0-0-0-0"]);
+    expect(controller.stats()).toMatchObject({
+      residentTiles: 1,
+      residentBytes: 79,
+    });
+    expect(visible.size).toBe(1);
+    expect(violations).toEqual([]);
+    controller.dispose();
+  });
+
+  it("admits structural ancestors at no payload cost", async () => {
+    const { controller, deferred, loadCalls } = makeController(
+      {
+        "0-0-0-0": { pointCount: 0, children: ["1-0-0-0"] },
+        "1-0-0-0": { pointCount: 1 },
+      },
+      { pointBudget: 10, memoryBudgetBytes: 79 },
+    );
+    await bootAndLand(controller, deferred);
+    expect(loadCalls).toEqual(["1-0-0-0"]);
+    expect(controller.stats().residentBytes).toBe(76);
+    expect(controller.stats().selection.targetTiles).toBe(2);
+    controller.dispose();
+  });
+
+  it("bounds mixed position-only and RGB payloads as the point estimate grows", async () => {
+    const tree: Record<string, FakeEntry> = {
+      "0-0-0-0": { pointCount: 100_000, children: ["1-0-0-0"] },
+      "1-0-0-0": { pointCount: 165_000 },
+    };
+    const { controller, deferred, loadCalls } = makeController(tree, {
+      pointBudget: 1_000_000,
+      memoryBudgetBytes: 3_200_000,
+    });
+    await bootAndLand(controller, deferred);
+    expect(controller.stats().memoryCeilingPoints).toBeGreaterThan(265_000);
+    controller.refresh();
+    await settle();
+
+    expect(loadCalls).toEqual(["0-0-0-0"]);
+    expect(controller.stats().residentBytes).toBe(1_200_064);
+    controller.setMemoryBudgetBytes(4_000_000);
+    await settle();
+    deferred.get("1-0-0-0")!.resolve({ rgb: new Uint8Array(165_000 * 3) });
+    await settle();
+    expect(controller.stats()).toMatchObject({
+      residentTiles: 2,
+      residentBytes: 3_675_128,
+      memoryBudgetBytes: 4_000_000,
+    });
+    controller.dispose();
+  });
+
+  it("keeps an underestimated child out, then promotes its cached payload when bytes fit", async () => {
+    const { controller, deferred, loadCalls, visible, violations } =
+      makeMirrored(
+        {
+          "0-0-0-0": { pointCount: 100, children: ["1-0-0-0"] },
+          "1-0-0-0": { pointCount: 10 },
+        },
+        { pointBudget: 1_000, memoryBudgetBytes: 2_000 },
+      );
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    deferred.get("0-0-0-0")!.resolve();
+    deferred.get("1-0-0-0")!.resolve(makeTile(100));
+    await settle();
+
+    expect([...visible.keys()]).toEqual(["0-0-0-0"]);
+    expect(controller.stats()).toMatchObject({
+      residentBytes: 1_264,
+      cachedTiles: 1,
+    });
+    for (let pass = 0; pass < 3; pass += 1) controller.refresh();
+    controller.setMemoryBudgetBytes(2_000);
+    controller.setPointBudget(1_000);
+    await settle();
+    expect(loadCalls).toEqual(["0-0-0-0", "1-0-0-0"]);
+
+    controller.setCamera({ ...VIEW, viewProj: LOOK_AWAY });
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    expect([...visible.keys()]).toEqual(["0-0-0-0"]);
+    expect(loadCalls).toHaveLength(2);
+
+    controller.setMemoryBudgetBytes(2_528);
+    await settle();
+    expect(controller.stats()).toMatchObject({
+      residentTiles: 2,
+      residentBytes: 2_528,
+    });
+    expect(visible.size).toBe(2);
+    expect(loadCalls).toHaveLength(2);
+    expect(violations).toEqual([]);
+    controller.dispose();
+  });
+
+  it("retains an oversized tile's learned cost after its CPU payload is evicted", async () => {
+    const { controller, deferred, loadCalls } = makeController(
+      {
+        "0-0-0-0": { pointCount: 100, children: ["1-0-0-0"] },
+        "1-0-0-0": { pointCount: 10 },
+      },
+      { pointBudget: 1_000, memoryBudgetBytes: 2_000, cacheBytes: 100 },
+    );
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    deferred.get("0-0-0-0")!.resolve();
+    deferred.get("1-0-0-0")!.resolve(makeTile(100));
+    await settle();
+    expect(controller.stats().cachedTiles).toBe(0);
+    for (let pass = 0; pass < 3; pass += 1) controller.refresh();
+    await settle();
+    expect(loadCalls.filter((key) => key === "1-0-0-0")).toHaveLength(1);
+    expect(controller.activeKeys().resident).toEqual(["0-0-0-0"]);
+    controller.dispose();
+  });
+
+  it("admits an underestimated payload directly when it fits residency but exceeds the CPU cache", async () => {
+    const { controller, deferred, loadCalls } = makeController(
+      {
+        "0-0-0-0": { pointCount: 0, children: ["1-0-0-0"] },
+        "1-0-0-0": { pointCount: 1 },
+      },
+      { pointBudget: 20, memoryBudgetBytes: 400, cacheBytes: 100 },
+    );
+    await settle();
+    controller.setCamera(VIEW);
+    await settle();
+    deferred.get("1-0-0-0")!.resolve(makeTile(20));
+    await settle();
+    expect(controller.stats()).toMatchObject({
+      residentTiles: 1,
+      residentBytes: 304,
+    });
+    expect(loadCalls).toEqual(["1-0-0-0"]);
     controller.dispose();
   });
 });

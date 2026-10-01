@@ -190,7 +190,8 @@ const alphaShaderReplacement = (
 ): VtkShaderReplacement | undefined => {
   let statement: string;
   if (material.alphaMode === "MASK") {
-    statement = `if (opacity < ${glslFloat(material.alphaCutoff)}) { discard; }`;
+    // MASK survivors must be opaque, even when the authored alpha is fractional.
+    statement = `if (opacity < ${glslFloat(material.alphaCutoff)}) { discard; }\n  opacity = 1.0;`;
   } else if (material.alphaMode === "OPAQUE") {
     // glTF OPAQUE ignores both base-color factor and texture alpha.
     statement = "opacity = 1.0;";
@@ -219,9 +220,12 @@ const rgbaAlphaIsUniform = (
 const hasExactCpuAlphaSampler = (
   texture: Extract<DecodedTexture, { kind: "rgba" }>,
 ): boolean => {
-  if (rgbaAlphaIsUniform(texture)) return true;
   const { magFilter, minFilter } = texture.sampler;
-  return (minFilter === 9728 || minFilter === 9729) && minFilter === magFilter;
+  return (
+    ((minFilter === 9728 || minFilter === 9729) && minFilter === magFilter) ||
+    // Uniform alpha is exact even when mip selection is unknowable.
+    rgbaAlphaIsUniform(texture)
+  );
 };
 
 const VTK_MIN_FILTERS = {
@@ -246,51 +250,58 @@ const vtkSampler = (sampler: DecodedTexture["sampler"]) => ({
   wrapT: VTK_WRAP_MODES[sampler.wrapT],
 });
 
-/**
- * Bytes a primitive costs once submitted, which depends on whether it is
- * split: a chunk is deindexed, so no job retains a whole oversized primitive
- * merely to realize a subset, while a primitive submitted whole keeps the
- * arrays it was decoded with. Both add vtk's `[3, i0, i1, i2]` cell record.
- */
+/** Attribute arrays submitted to VTK plus its `[3, i0, i1, i2]` cells. */
+const wholeGeometryBytes = (primitive: DecodedPrimitive): number =>
+  triangleCount(primitive) * 4 * Uint32Array.BYTES_PER_ELEMENT +
+  primitive.positions.byteLength +
+  (primitive.normals?.byteLength ?? 0) +
+  (primitive.colors?.byteLength ?? 0) +
+  (primitive.uvs?.byteLength ?? 0);
+
+/** Compacted chunks own only the vertices named by their triangle interval. */
 const retainedGeometryBytes = (
   primitive: DecodedPrimitive,
   maxJobBytes: number,
-): number => {
-  const triangles = triangleCount(primitive);
-  if (splits(primitive, maxJobBytes)) {
-    return triangles * bytesPerTriangle(primitive);
+): number =>
+  splits(primitive, maxJobBytes)
+    ? triangleCount(primitive) * bytesPerTriangle(primitive)
+    : wholeGeometryBytes(primitive);
+
+type RgbaTexture = Extract<DecodedTexture, { kind: "rgba" }>;
+
+/** Evaluate each shared MASK texture once, including unavailable CPU samplers. */
+const exactPickAlphaSources = (
+  content: DecodedTileContent,
+): ReadonlySet<RgbaTexture> => {
+  const seen = new Set<DecodedTexture>();
+  const sources = new Set<RgbaTexture>();
+  for (const primitive of content.primitives) {
+    const texture = primitive.material.baseColorTexture;
+    if (
+      primitive.material.raw.alphaMode !== "MASK" ||
+      !primitive.uvs ||
+      !texture ||
+      seen.has(texture)
+    )
+      continue;
+    seen.add(texture);
+    if (texture.kind === "rgba" && hasExactCpuAlphaSampler(texture)) {
+      sources.add(texture);
+    }
   }
-  return (
-    triangles * 4 * Uint32Array.BYTES_PER_ELEMENT +
-    primitive.positions.byteLength +
-    (primitive.normals?.byteLength ?? 0) +
-    (primitive.colors?.byteLength ?? 0) +
-    (primitive.uvs?.byteLength ?? 0)
-  );
+  return sources;
 };
 
 const actualGeometryBytes = (
   content: DecodedTileContent,
   maxJobBytes: number,
+  alphaSources = exactPickAlphaSources(content),
 ): number => {
   let bytes = 0;
   for (const primitive of content.primitives) {
     bytes += retainedGeometryBytes(primitive, maxJobBytes);
   }
-  const retainedAlpha = new Set<DecodedTexture>();
-  for (const primitive of content.primitives) {
-    const texture = primitive.material.baseColorTexture;
-    if (
-      primitive.material.raw.alphaMode === "MASK" &&
-      primitive.uvs &&
-      texture?.kind === "rgba" &&
-      !retainedAlpha.has(texture) &&
-      hasExactCpuAlphaSampler(texture)
-    ) {
-      retainedAlpha.add(texture);
-      bytes += texture.width * texture.height;
-    }
-  }
+  for (const texture of alphaSources) bytes += texture.width * texture.height;
   return bytes;
 };
 
@@ -343,15 +354,11 @@ const cellsFor = (primitive: DecodedPrimitive): Uint32Array => {
   return cells;
 };
 
-/**
- * Whether a primitive has to be cut into more than one submission slice. Its
- * per-triangle cost is the deindexed one either way: that is what a chunk
- * would cost, and a primitive small enough to escape splitting under the
- * larger estimate is small enough under its own.
+/** Preserve authored indices only when the complete representation fits a job.
+ * A sparse accessor may need compaction even when it names just one triangle.
  */
 const splits = (primitive: DecodedPrimitive, maxJobBytes: number): boolean =>
-  triangleCount(primitive) >
-  Math.max(1, Math.floor(maxJobBytes / bytesPerTriangle(primitive)));
+  wholeGeometryBytes(primitive) > maxJobBytes;
 
 const bytesPerTriangle = (primitive: DecodedPrimitive): number =>
   9 * Float32Array.BYTES_PER_ELEMENT +
@@ -582,12 +589,12 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
       actor.setMapper(mapper);
       const factor = primitive.material.baseColorFactor;
       const authored = primitive.material.raw;
-      if (primitive.colors) {
-        const colors = primitive.colors.map((value, index) =>
-          index % 4 === 3 && authored.alphaMode === "OPAQUE"
-            ? 1
-            : value * factor[index % 4]!,
-        );
+      const colors = primitive.colors?.map((value, index) =>
+        index % 4 === 3 && authored.alphaMode === "OPAQUE"
+          ? 1
+          : value * factor[index % 4]!,
+      );
+      if (colors) {
         polyData.getPointData().setScalars(
           vtkDataArray.newInstance({
             name: "Colors",
@@ -622,29 +629,33 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         }
         actor.addTexture(texture);
       }
-      // Keep only the exact geometry arrays submitted to VTK. Retaining the
-      // decoded primitive would also retain material.raw and the original
-      // texture payload after ContentQueue has evicted its CPU-cache entry.
+      const pickTexture =
+        decodedTexture && primitive.uvs
+          ? pickAlphaTextures.get(decodedTexture)
+          : undefined;
+      const alphaMask: SubmittedMeshPrimitive["alphaMask"] =
+        authored.alphaMode === "MASK"
+          ? {
+              // VTK colors already include the base-color factor.
+              factorAlpha: colors ? 1 : factor[3],
+              cutoff: authored.alphaCutoff,
+              ...(colors ? { vertexColors: colors } : {}),
+              ...(decodedTexture && primitive.uvs && !pickTexture
+                ? { kind: "unknown" }
+                : {
+                    kind: "known",
+                    ...(pickTexture ? { texture: pickTexture } : {}),
+                  }),
+            }
+          : undefined;
+      // Keep only geometry arrays and MASK data needed by submitted picks.
+      // Holding the decoded primitive would also retain material metadata and
+      // original texture payloads after their CPU-cache entry was evicted.
       const submittedPrimitive: SubmittedMeshPrimitive = {
         positions: primitive.positions,
         ...(primitive.indices ? { indices: primitive.indices } : {}),
         ...(primitive.uvs ? { uvs: primitive.uvs } : {}),
-        ...(authored.alphaMode !== "MASK"
-          ? {}
-          : decodedTexture &&
-              primitive.uvs &&
-              !pickAlphaTextures.has(decodedTexture)
-            ? { alphaMask: { kind: "unknown" as const } }
-            : {
-                alphaMask: {
-                  kind: "known" as const,
-                  factorAlpha: factor[3],
-                  cutoff: authored.alphaCutoff,
-                  ...(decodedTexture && primitive.uvs
-                    ? { texture: pickAlphaTextures.get(decodedTexture) }
-                    : {}),
-                },
-              }),
+        ...(alphaMask ? { alphaMask } : {}),
       };
       const resources = {
         actor,
@@ -817,7 +828,12 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         }
         return "queued";
       }
-      const geometryBytes = actualGeometryBytes(content, maxJobBytes);
+      const alphaSources = exactPickAlphaSources(content);
+      const geometryBytes = actualGeometryBytes(
+        content,
+        maxJobBytes,
+        alphaSources,
+      );
       const textureBytes = actualTextureBytes(content);
       trimPool(geometryBytes + textureBytes);
       const normalizedReplacements = [...new Set(replacementIds)].filter(
@@ -847,7 +863,9 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
           formats.add(texture.kind === "compressed" ? texture.format : "rgba");
       }
       const oversized = content.primitives.find(
-        (primitive) => bytesPerTriangle(primitive) > maxJobBytes,
+        (primitive) =>
+          splits(primitive, maxJobBytes) &&
+          bytesPerTriangle(primitive) > maxJobBytes,
       );
       if (oversized) {
         failed.add(id);
@@ -887,34 +905,10 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         replacementClaims.set(replacementId, id);
       const textures = new Map<DecodedTexture, any>();
       const pickAlphaTextures = new Map<DecodedTexture, PickAlphaTexture>();
-      const decodedTextures: DecodedTexture[] = [];
+      const decodedTextures = new Set<DecodedTexture>();
       for (const primitive of content.primitives) {
         const texture = primitive.material.baseColorTexture;
-        if (texture && !decodedTextures.includes(texture))
-          decodedTextures.push(texture);
-        if (
-          primitive.material.raw.alphaMode === "MASK" &&
-          primitive.uvs &&
-          texture?.kind === "rgba" &&
-          !pickAlphaTextures.has(texture)
-        ) {
-          const alpha = new Uint8Array(texture.width * texture.height);
-          for (let pixel = 0; pixel < alpha.length; pixel += 1)
-            alpha[pixel] = texture.rgba[pixel * 4 + 3]!;
-          // A pick has one cursor sample, not the rasterizer's pixel
-          // derivatives, so it cannot know whether minification or
-          // magnification applies or which mip levels WebGL blends. Retain an
-          // exact CPU sampler only when both paths are the same non-mip base
-          // filter. A uniform alpha plane is exact under every sampler.
-          if (hasExactCpuAlphaSampler(texture)) {
-            pickAlphaTextures.set(texture, {
-              width: texture.width,
-              height: texture.height,
-              alpha,
-              sampler: texture.sampler,
-            });
-          }
-        }
+        if (texture) decodedTextures.add(texture);
       }
       const enqueue = (
         bytes: number,
@@ -952,13 +946,30 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
         // The tile already passed the residency budget; a large texture gets
         // its own admission frame instead of becoming a permanent load error.
         for (const decodedTexture of decodedTextures) {
-          const bytes = textureByteLength(decodedTexture);
+          const alphaSource =
+            decodedTexture.kind === "rgba" && alphaSources.has(decodedTexture)
+              ? decodedTexture
+              : undefined;
+          const alphaBytes = alphaSource
+            ? alphaSource.width * alphaSource.height
+            : 0;
           enqueue(
-            bytes,
+            textureByteLength(decodedTexture) + alphaBytes,
             () => {
               const texture = createTexture(decodedTexture);
               textures.set(decodedTexture, texture);
               resources.textures.add(texture);
+              if (alphaSource) {
+                const alpha = new Uint8Array(alphaBytes);
+                for (let pixel = 0; pixel < alpha.length; pixel += 1)
+                  alpha[pixel] = alphaSource.rgba[pixel * 4 + 3]!;
+                pickAlphaTextures.set(decodedTexture, {
+                  width: alphaSource.width,
+                  height: alphaSource.height,
+                  alpha,
+                  sampler: alphaSource.sampler,
+                });
+              }
             },
             true,
           );
@@ -977,7 +988,7 @@ export const createMeshAdapter = (options: MeshAdapterOptions): MeshAdapter => {
           // references it, for geometry identical to what the indices already
           // describe.
           if (!splits(primitive, maxJobBytes)) {
-            enqueue(totalTriangles * perTriangle, () =>
+            enqueue(wholeGeometryBytes(primitive), () =>
               createPrimitive(
                 resources,
                 primitive,

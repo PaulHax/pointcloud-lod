@@ -46,6 +46,13 @@ export type OrthographicCameraView = CameraViewCommon & {
  */
 export type CameraView = PerspectiveCameraView | OrthographicCameraView;
 
+/** Own the camera history even when a host reuses its matrix and position. */
+export const copyCameraView = (view: CameraView): CameraView => ({
+  ...view,
+  position: [...view.position],
+  viewProj: Array.from(view.viewProj) as Mat16,
+});
+
 /** Half-space `dot(normal, p) + d >= 0` containing the frustum interior. */
 export type Plane = {
   readonly normal: Vec3;

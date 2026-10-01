@@ -1,11 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import {
-  createSubmissionScheduler,
-  DEFAULT_SUBMISSION_BYTES_PER_FRAME,
-} from "../submissionScheduler";
+import { createSubmissionScheduler } from "../submissionScheduler";
+import type { CameraView } from "../camera";
 import type { DecodedTexture, DecodedTileContent } from "./decode";
 import { createMeshAdapter } from "./meshAdapter";
+import { pickSubmittedTriangles } from "./meshPicking";
 import {
   actorInstances,
   failNextTexturePayload,
@@ -94,6 +93,36 @@ const alphaContent = (
   result.primitives[0]!.material.raw.alphaCutoff = alphaCutoff;
   result.primitives[0]!.material.baseColorFactor[3] = factorAlpha;
   return result;
+};
+
+const pickView: CameraView = {
+  projection: "orthographic",
+  viewProj: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0.2, 0, 0, 0, 0, 1],
+  position: [0, 0, -10],
+  viewportWidthCssPx: 100,
+  viewportHeightCssPx: 100,
+  parallelScale: 1,
+};
+
+const coloredMask = (
+  alphas: readonly number[],
+  factorAlpha: number,
+  cutoff: number,
+  texture?: DecodedTexture,
+): DecodedTileContent => {
+  const payload = alphaContent("MASK", cutoff, factorAlpha);
+  payload.origin = [0, 0, 0];
+  const primitive = payload.primitives[0]!;
+  primitive.positions = new Float32Array([
+    -0.5, -0.5, 0, 0.5, -0.5, 0, 0, 0.5, 0,
+  ]);
+  primitive.colors = new Float32Array(
+    alphas.flatMap((alpha) => [1, 1, 1, alpha]),
+  );
+  primitive.uvs = new Float32Array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]);
+  if (texture) primitive.material.baseColorTexture = texture;
+  else delete primitive.material.baseColorTexture;
+  return payload;
 };
 
 describe("vtk mesh adapter", () => {
@@ -296,9 +325,9 @@ describe("vtk mesh adapter", () => {
       "//VTK::Light::Impl",
       "gl_FragData[0] = vec4(diffuseColor, opacity);",
     );
-    expect(fragment?.indexOf("discard")).toBeLessThan(
-      fragment?.indexOf("gl_FragData") ?? -1,
-    );
+    const opaqueAt = fragment?.indexOf("opacity = 1.0") ?? -1;
+    expect(opaqueAt).toBeGreaterThan(fragment?.indexOf("discard") ?? -1);
+    expect(opaqueAt).toBeLessThan(fragment?.indexOf("gl_FragData") ?? -1);
     adapter.dispose();
   });
 
@@ -473,7 +502,7 @@ describe("vtk mesh adapter", () => {
   it("submits a whole primitive on its own indices rather than as triangle soup", () => {
     const renderer = { addActor: vi.fn(), removeActor: vi.fn() };
     const { adapter, scheduler } = makeAdapter({
-      maxBytesPerFrame: DEFAULT_SUBMISSION_BYTES_PER_FRAME,
+      maxBytesPerFrame: 192,
       renderer,
     });
     const quad = content();
@@ -495,6 +524,76 @@ describe("vtk mesh adapter", () => {
     expect(Array.from(polyDataInstances[0]?.polys as Uint32Array)).toEqual([
       3, 0, 1, 2, 3, 0, 2, 3,
     ]);
+    adapter.dispose();
+  });
+
+  it("compacts a sparse indexed accessor before admitting its bounded job", () => {
+    const { adapter, scheduler } = makeAdapter({ maxBytesPerFrame: 128 });
+    const payload = content();
+    payload.primitives.splice(1);
+    const primitive = payload.primitives[0]!;
+    primitive.positions = new Float32Array(10_000 * 3);
+    primitive.positions.set([0, 0, 0, 1, 0, 0, 0, 1, 0]);
+    primitive.colors = new Float32Array(10_000 * 4).fill(1);
+    delete primitive.normals;
+    delete primitive.uvs;
+    delete primitive.material.baseColorTexture;
+    adapter.setResourceCeilingBytes(100);
+    expect(adapter.submitTile("sparse", payload)).toBe("queued");
+    expect(scheduler.stats().queuedBytes).toBe(100);
+    scheduler.prepareFrame();
+    expect(scheduler.stats().lastFrameAdmittedBytes).toBe(100);
+    expect(polyDataInstances[0]?.points).toHaveLength(9);
+    expect(
+      (polyDataInstances[0]!.scalars as { values: Float32Array }).values,
+    ).toHaveLength(12);
+    expect(adapter.stats()).toMatchObject({
+      residentGeometryBytes: 100,
+      logicalGeometryUploadBytes: 100,
+      submittedActors: 1,
+    });
+    expect(primitive.positions).toHaveLength(30_000);
+    adapter.dispose();
+  });
+
+  it("fails cleanly when one compacted triangle cannot fit a submission job", () => {
+    const onError = vi.fn();
+    const { adapter, scheduler } = makeAdapter({
+      maxBytesPerFrame: 51,
+      onError,
+    });
+    const payload = content();
+    payload.primitives.splice(1);
+    const primitive = payload.primitives[0]!;
+    delete primitive.normals;
+    delete primitive.uvs;
+    delete primitive.material.baseColorTexture;
+    expect(adapter.submitTile("too-small", payload)).toBe("failed");
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining("one mesh triangle requires 52 bytes"),
+      }),
+    );
+    expect(scheduler.hasPending()).toBe(false);
+    expect(adapter.stats().residentBytes).toBe(0);
+    adapter.dispose();
+  });
+
+  it("keeps a fitting degenerate indexed primitive below its deindexed estimate", () => {
+    const { adapter, scheduler } = makeAdapter({ maxBytesPerFrame: 40 });
+    const payload = content();
+    payload.primitives.splice(1);
+    const primitive = payload.primitives[0]!;
+    primitive.positions = new Float32Array([0, 0, 0]);
+    primitive.indices = new Uint16Array([0, 0, 0]);
+    delete primitive.normals;
+    delete primitive.uvs;
+    delete primitive.material.baseColorTexture;
+    expect(adapter.submitTile("degenerate", payload)).toBe("queued");
+    scheduler.prepareFrame();
+    expect(scheduler.stats().lastFrameAdmittedBytes).toBe(28);
+    expect(polyDataInstances[0]?.points).toHaveLength(3);
+    expect(adapter.stats().residentGeometryBytes).toBe(28);
     adapter.dispose();
   });
 
@@ -611,6 +710,8 @@ describe("vtk mesh adapter", () => {
     adapter.setDrawnTiles(["mipped"]);
     expect(adapter.submittedTiles()[0]?.primitives[0]?.alphaMask).toEqual({
       kind: "unknown",
+      factorAlpha: 1,
+      cutoff: 0.5,
     });
     // The alpha plane is discarded and therefore is not charged as residency.
     expect(adapter.stats().residentGeometryBytes).toBe(112);
@@ -624,6 +725,192 @@ describe("vtk mesh adapter", () => {
       "known",
     );
     expect(adapter.stats().residentGeometryBytes).toBe(114);
+    adapter.dispose();
+  });
+
+  it("evaluates a shared unusable MASK sampler once without allocating alpha planes", () => {
+    const { adapter, scheduler } = makeAdapter();
+    const rgba = new Uint8Array([255, 255, 255, 0, 255, 255, 255, 255]);
+    const readAlpha = vi.fn();
+    const texture: Extract<DecodedTexture, { kind: "rgba" }> = {
+      kind: "rgba",
+      width: 2,
+      height: 1,
+      colorSpace: "srgb",
+      rgba: new Proxy(rgba, {
+        get(target, key) {
+          if (key === "3" || key === "7") readAlpha();
+          const value = Reflect.get(target, key, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      }),
+      sampler: { magFilter: 9729, minFilter: 9987, wrapS: 10497, wrapT: 10497 },
+    };
+    const payload = alphaContent("MASK", 0.5, 1);
+    payload.primitives[0]!.material.baseColorTexture = texture;
+    payload.primitives = Array.from(
+      { length: 8 },
+      () => payload.primitives[0]!,
+    );
+    const NativeUint8Array = Uint8Array;
+    const allocateAlpha = vi.fn();
+    class RecordingUint8Array extends NativeUint8Array {
+      constructor(length: number) {
+        super(length);
+        if (length === texture.width * texture.height) allocateAlpha();
+      }
+    }
+    vi.stubGlobal("Uint8Array", RecordingUint8Array);
+    try {
+      expect(adapter.submitTile("shared-mask", payload)).toBe("queued");
+      expect(readAlpha).toHaveBeenCalledTimes(2);
+      expect(allocateAlpha).not.toHaveBeenCalled();
+      while (scheduler.hasPending()) scheduler.prepareFrame();
+      expect(allocateAlpha).not.toHaveBeenCalled();
+      expect(adapter.stats().residentGeometryBytes).toBe(8 * 112);
+    } finally {
+      vi.unstubAllGlobals();
+      adapter.dispose();
+    }
+  });
+
+  it("extracts one useful shared alpha plane inside its charged texture job", () => {
+    const { adapter, scheduler } = makeAdapter({ maxBytesPerFrame: 128 });
+    const texture: Extract<DecodedTexture, { kind: "rgba" }> = {
+      kind: "rgba",
+      width: 2,
+      height: 1,
+      colorSpace: "srgb",
+      rgba: new Uint8Array([255, 255, 255, 0, 255, 255, 255, 255]),
+      sampler: { magFilter: 9728, minFilter: 9728, wrapS: 10497, wrapT: 10497 },
+    };
+    const payload = alphaContent("MASK", 0.5, 1);
+    payload.primitives[0]!.material.baseColorTexture = texture;
+    payload.primitives = Array.from(
+      { length: 3 },
+      () => payload.primitives[0]!,
+    );
+    const NativeUint8Array = Uint8Array;
+    const allocateAlpha = vi.fn();
+    class RecordingUint8Array extends NativeUint8Array {
+      constructor(length: number) {
+        super(length);
+        if (length === texture.width * texture.height) allocateAlpha();
+      }
+    }
+    vi.stubGlobal("Uint8Array", RecordingUint8Array);
+    try {
+      expect(adapter.submitTile("shared-mask", payload)).toBe("queued");
+      expect(allocateAlpha).not.toHaveBeenCalled();
+      expect(scheduler.stats().queuedBytes).toBe(3 * 112 + 8 + 2);
+      scheduler.prepareFrame();
+      expect(allocateAlpha).toHaveBeenCalledTimes(1);
+      expect(scheduler.stats().lastFrameAdmittedBytes).toBe(122);
+      while (scheduler.hasPending()) scheduler.prepareFrame();
+      expect(allocateAlpha).toHaveBeenCalledTimes(1);
+      adapter.setDrawnTiles(["shared-mask"]);
+      const masks = adapter
+        .submittedTiles()[0]!
+        .primitives.map((p) => p.alphaMask);
+      expect(masks.every((mask) => mask?.kind === "known")).toBe(true);
+      expect(masks[0]?.kind === "known" && masks[0].texture).toBe(
+        masks[1]?.kind === "known" && masks[1].texture,
+      );
+      expect(adapter.stats().residentBytes).toBe(3 * 112 + 8 + 2);
+    } finally {
+      vi.unstubAllGlobals();
+      adapter.dispose();
+    }
+  });
+
+  it.each([
+    { alphas: [0, 0, 0], factor: 0.8, cutoff: 0.5, status: "miss" },
+    { alphas: [0, 1, 1], factor: 0.8, cutoff: 0.55, status: "hit" },
+    { alphas: [0, 1, 1], factor: 0.8, cutoff: 0.65, status: "miss" },
+    {
+      alphas: [0.4999 / 0.8, 0.4999 / 0.8, 0.4999 / 0.8],
+      factor: 0.8,
+      cutoff: 0.499,
+      status: "miss",
+    },
+    {
+      alphas: [0.5001 / 0.8, 0.5001 / 0.8, 0.5001 / 0.8],
+      factor: 0.8,
+      cutoff: 0.501,
+      status: "hit",
+    },
+  ])(
+    "picks MASK vertex alpha with factor $factor and cutoff $cutoff as $status",
+    ({ alphas, factor, cutoff, status }) => {
+      const { adapter, scheduler } = makeAdapter();
+      adapter.submitTile("colored-mask", coloredMask(alphas, factor, cutoff));
+      scheduler.prepareFrame();
+      adapter.setDrawnTiles(["colored-mask"]);
+      const tiles = adapter.submittedTiles();
+      expect(tiles[0]?.primitives[0]?.alphaMask?.vertexColors).toBe(
+        (polyDataInstances[0]!.scalars as { values: Float32Array }).values,
+      );
+      expect(pickSubmittedTriangles(pickView, 50, 50, tiles)).toMatchObject({
+        status,
+      });
+      adapter.dispose();
+    },
+  );
+
+  it.each([
+    { cutoff: 0.3, status: "hit" },
+    { cutoff: 0.302, status: "miss" },
+  ])(
+    "multiplies interpolated factored vertex alpha by texture alpha at cutoff $cutoff",
+    ({ cutoff, status }) => {
+      const { adapter, scheduler } = makeAdapter();
+      const texture: Extract<DecodedTexture, { kind: "rgba" }> = {
+        kind: "rgba",
+        width: 1,
+        height: 1,
+        colorSpace: "srgb",
+        rgba: new Uint8Array([255, 255, 255, 128]),
+        sampler: {
+          magFilter: 9728,
+          minFilter: 9728,
+          wrapS: 33071,
+          wrapT: 33071,
+        },
+      };
+      adapter.submitTile(
+        "colored-mask",
+        coloredMask([0, 1, 1], 0.8, cutoff, texture),
+      );
+      scheduler.prepareFrame();
+      adapter.setDrawnTiles(["colored-mask"]);
+      expect(
+        pickSubmittedTriangles(pickView, 50, 50, adapter.submittedTiles()),
+      ).toMatchObject({ status });
+      adapter.dispose();
+    },
+  );
+
+  it("keeps unknown texture sampling conservative after resolving known vertex holes", () => {
+    const { adapter, scheduler } = makeAdapter();
+    adapter.submitTile(
+      "transparent",
+      coloredMask([0, 1, 1], 0.8, 0.65, compressed),
+    );
+    scheduler.prepareFrame();
+    adapter.setDrawnTiles(["transparent"]);
+    expect(
+      pickSubmittedTriangles(pickView, 50, 50, adapter.submittedTiles()),
+    ).toEqual({ status: "miss" });
+    adapter.clearTiles();
+    adapter.submitTile(
+      "uncertain",
+      coloredMask([0, 1, 1], 0.8, 0.55, compressed),
+    );
+    scheduler.prepareFrame();
+    adapter.setDrawnTiles(["uncertain"]);
+    expect(
+      pickSubmittedTriangles(pickView, 50, 50, adapter.submittedTiles()),
+    ).toBeNull();
     adapter.dispose();
   });
 

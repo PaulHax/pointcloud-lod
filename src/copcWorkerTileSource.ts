@@ -194,7 +194,15 @@ export const createCopcWorkerTileSource = async (
     if (index >= 0) decoders.splice(index, 1);
   };
   for (let index = 1; index < workerCount; index += 1) {
-    const decoder: Channel = openChannel(options.createWorker(), (error) =>
+    let worker: Worker;
+    try {
+      worker = options.createWorker();
+    } catch {
+      // Extra decoders only add capacity. Keep the already-open source usable
+      // if the browser cannot allocate another worker.
+      break;
+    }
+    const decoder: Channel = openChannel(worker, (error) =>
       drop(decoder, error),
     );
     channels.add(decoder);

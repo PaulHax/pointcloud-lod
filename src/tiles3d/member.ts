@@ -1,6 +1,6 @@
 /** StreamedMember implementation for the constrained 3D Tiles profile. */
 
-import { sameCameraView, type CameraView } from "../camera";
+import { copyCameraView, sameCameraView, type CameraView } from "../camera";
 import {
   multiply,
   sameMatrix,
@@ -868,7 +868,7 @@ export const createTiles3dMember = (
       // twice per pick — so acting on an unchanged view costs a full tileset
       // traversal for nothing, and does it inside the span the host times.
       if (camera !== null && sameCameraView(camera, view)) return;
-      camera = view;
+      camera = copyCameraView(view);
       retryIfDesiredSelectionChanged();
       refreshSelection();
     },

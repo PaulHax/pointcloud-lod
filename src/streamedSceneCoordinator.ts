@@ -1,4 +1,4 @@
-import { sameCameraView, type CameraView } from "./camera";
+import { copyCameraView, sameCameraView, type CameraView } from "./camera";
 import { sameMatrix, type Mat16 } from "./mat4";
 import type { MemoryPool, MemoryPoolMember } from "./memoryPool";
 import { finiteNonNegative } from "./numeric";
@@ -202,12 +202,6 @@ const sameTargets = (
   left?.interactionTargetMs === right?.interactionTargetMs &&
   left?.stationaryTargetMs === right?.stationaryTargetMs;
 
-const copyCameraView = (view: CameraView): CameraView => ({
-  ...view,
-  position: [...view.position],
-  viewProj: Array.from(view.viewProj) as Mat16,
-});
-
 const isAdaptive = (state: MemberState): boolean =>
   state.active && state.qualityManaged;
 
@@ -217,9 +211,9 @@ const isAdaptive = (state: MemberState): boolean =>
  * each active member's page memory share, and nothing for inactive members.
  *
  * `fractionApplied` says the current allocations were made at this same view
- * fraction. While the camera moves, a visible adaptive member then keeps its
- * share: demand follows the camera, so passing every change on would trade
- * detail between members, and swap their tiles, all through a gesture.
+ * fraction. While the camera moves, adaptive members keep their shares if
+ * the visible contenders have not changed: demand follows the camera, so
+ * passing every change on would swap their tiles all through a gesture.
  */
 const allocate = (
   states: readonly MemberState[],
@@ -227,13 +221,19 @@ const allocate = (
   regime: AllocationRegime,
   fractionApplied: boolean,
 ): ReadonlyMap<MemberState, Allocation> => {
+  const adaptive = states.filter(isAdaptive);
   const quality = allocateViewQuality(
-    states
-      .filter(isAdaptive)
-      .map((state) => ({ key: state, inputs: state.inputs })),
+    adaptive.map((state) => ({ key: state, inputs: state.inputs })),
     viewFraction,
   );
-  const holding = fractionApplied && regime === "moving";
+  const holding =
+    fractionApplied &&
+    regime === "moving" &&
+    adaptive.every((state) => {
+      const hadShare = state.allocation.qualityFraction > 0;
+      const hasShare = (quality.get(state) ?? 0) > 0;
+      return state.allocation.regime === "moving" && hadShare === hasShare;
+    });
   return new Map(
     states.map((state) => {
       const share = !state.active
@@ -532,6 +532,7 @@ export const createStreamedSceneCoordinator = (
         };
       }
       members.add(state);
+      appliedViewFraction = null;
       if (state.active) {
         invalidateCapacity();
         state.memoryMember = memory.register(markStale);
@@ -577,6 +578,7 @@ export const createStreamedSceneCoordinator = (
         setActive(active) {
           if (released || disposed || active === state.active) return;
           state.active = active;
+          appliedViewFraction = null;
           invalidateCapacity();
           if (active) state.memoryMember = memory.register(markStale);
           else {
@@ -601,6 +603,7 @@ export const createStreamedSceneCoordinator = (
           )
             return;
           state.qualityManaged = managed;
+          appliedViewFraction = null;
           state.qualityTargets = targets;
           if (state.active) invalidateCapacity();
           updateTargets();
@@ -610,6 +613,7 @@ export const createStreamedSceneCoordinator = (
           if (released) return;
           released = true;
           if (!members.delete(state)) return;
+          appliedViewFraction = null;
           if (state.active) invalidateCapacity();
           state.memoryMember?.release();
           state.memoryMember = null;

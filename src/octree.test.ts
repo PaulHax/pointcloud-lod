@@ -142,3 +142,48 @@ describe("point spacing", () => {
     expect(pointSpacing(1.28, 5)).toBeCloseTo(0.04, 12);
   });
 });
+
+describe("deep octree addressing", () => {
+  it("treats the deepest safe grid keys as leaves", () => {
+    const key = keyFromString("53-9007199254740991-0-0");
+    expect(childKeys(key)).toEqual([]);
+    const parent: VoxelKey = { level: 52, x: 2 ** 52 - 1, y: 0, z: 0 };
+    const children = childKeys(parent);
+    expect(children).toHaveLength(8);
+    for (const child of children) {
+      expect(keyFromString(keyToString(child))).toEqual(child);
+      expect(childKeys(child)).toEqual([]);
+    }
+  });
+
+  it.each([31, 32])(
+    "keeps level %i keys and geometry beyond signed bit-shift depths",
+    (level) => {
+      const key: VoxelKey = { level, x: 1, y: 0, z: 0 };
+      expect(keyFromString(keyToString(key))).toEqual(key);
+      const root: Cube = { center: [0, 0, 0], halfSize: 1 };
+      const bounds = nodeBounds(root, key);
+      const cube = nodeCube(root, key);
+      expect(bounds.max[0] - bounds.min[0]).toBe(2 ** (1 - level));
+      expect(cube.halfSize).toBe(2 ** -level);
+      expect(cube.center[0] - cube.halfSize).toBe(bounds.min[0]);
+      expect(cube.center[0] + cube.halfSize).toBe(bounds.max[0]);
+    },
+  );
+
+  it("accepts safe-integer grid coordinates and rejects unrepresentable keys", () => {
+    expect(keyFromString("53-9007199254740991-0-0")).toEqual({
+      level: 53,
+      x: Number.MAX_SAFE_INTEGER,
+      y: 0,
+      z: 0,
+    });
+    for (const key of [
+      "54-0-0-0",
+      "53-9007199254740992-0-0",
+      "9007199254740992-0-0-0",
+      "999999999999999999999999999999999999-0-0-0",
+    ])
+      expect(() => keyFromString(key)).toThrow();
+  });
+});
