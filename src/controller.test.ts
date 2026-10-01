@@ -3358,3 +3358,200 @@ describe("createLodController — decoded byte admission", () => {
     controller.dispose();
   });
 });
+
+describe("createLodController — lazy fixed-spacing diagnostics", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const countedLeaf = () => {
+    let reads = 0;
+    const coordinates = (values: [number, number, number]) =>
+      new Proxy(values, {
+        get(target, property, receiver) {
+          if (property === "0" || property === "1" || property === "2")
+            reads += 1;
+          return Reflect.get(target, property, receiver);
+        },
+      });
+    const entry: FakeEntry = {
+      pointCount: 100,
+      spacing: 2,
+      bounds: {
+        min: coordinates([-0.5, -0.5, -0.5]),
+        max: coordinates([0.5, 0.5, 0.5]),
+      },
+    };
+    return {
+      entry,
+      reads: () => reads,
+      clear: () => {
+        reads = 0;
+      },
+    };
+  };
+
+  it("changes fixed draw prefixes without walking bounds, then caches accurate diagnostics", async () => {
+    const leaf = countedLeaf();
+    const plans: Parameters<
+      NonNullable<LodControllerOptions["onDrawPlan"]>
+    >[0][] = [];
+    const { controller, deferred } = makeController(
+      { "0-0-0-0": leaf.entry },
+      {
+        onDrawPlan: (plan) => plans.push(plan),
+      },
+    );
+    await settle();
+    controller.setCamera(ORTHOGRAPHIC_VIEW);
+    await settle();
+    deferred.get("0-0-0-0")!.resolve();
+    await settle();
+
+    leaf.clear();
+    controller.setDensityFraction(0.5);
+    controller.setDensityFraction(0.25);
+    expect(leaf.reads()).toBe(0);
+    expect(plans.at(-1)?.entries).toEqual([{ key: ROOT_KEY, pointCount: 25 }]);
+
+    const stats = controller.stats();
+    expect(stats.drawnPoints).toBe(25);
+    expect(stats.presentation.diameterCssPx).toBe(2);
+    expect(stats.selection.projectedSpacingCssPx).toBeCloseTo(200);
+    expect(leaf.reads()).toBeGreaterThan(0);
+    leaf.clear();
+    expect(controller.stats().selection.projectedSpacingCssPx).toBeCloseTo(200);
+    expect(leaf.reads()).toBe(0);
+    controller.dispose();
+  });
+
+  it("applies Auto transitions and density changes immediately without a stats call", async () => {
+    const leaf = countedLeaf();
+    const diameters: number[] = [];
+    const { controller, deferred } = makeController(
+      { "0-0-0-0": leaf.entry },
+      {
+        onPointDiameterCssPx: (value) => diameters.push(value),
+      },
+    );
+    await settle();
+    controller.setCamera(ORTHOGRAPHIC_VIEW);
+    await settle();
+    deferred.get("0-0-0-0")!.resolve();
+    await settle();
+    leaf.clear();
+    controller.setDensityFraction(0.25);
+    expect(leaf.reads()).toBe(0);
+    controller.setPresentation({
+      mode: "auto",
+      userScale: 1,
+      minDiameterCssPx: 0.1,
+      maxDiameterCssPx: 1_000,
+    });
+    expect(diameters.at(-1)).toBeCloseTo(200);
+    expect(leaf.reads()).toBeGreaterThan(0);
+    leaf.clear();
+    controller.setDensityFraction(0.5);
+    expect(diameters.at(-1)).toBeCloseTo(100 * Math.SQRT2);
+    expect(leaf.reads()).toBeGreaterThan(0);
+
+    controller.setPresentation({ mode: "fixed", diameterCssPx: 3 });
+    leaf.clear();
+    controller.setDensityFraction(0.25);
+    expect(leaf.reads()).toBe(0);
+    expect(diameters.at(-1)).toBe(3);
+    controller.dispose();
+  });
+
+  it("keeps the diagnostic's prior camera while a newer camera is debounced", async () => {
+    const leaf = countedLeaf();
+    const { controller, deferred } = makeController(
+      { "0-0-0-0": leaf.entry },
+      {
+        selectionDelayMs: 150,
+      },
+    );
+    await settle();
+    controller.setCamera(ORTHOGRAPHIC_VIEW);
+    await settle();
+    deferred.get("0-0-0-0")!.resolve();
+    await settle();
+    controller.setDensityFraction(0.25);
+    controller.setCamera({
+      ...ORTHOGRAPHIC_VIEW,
+      parallelScale: 2,
+      viewProj: [0.5, 0, 0, 0, 0, 0.5, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+    });
+    expect(controller.stats()).toMatchObject({
+      selectionPending: true,
+      selection: { projectedSpacingCssPx: 200 },
+    });
+    vi.advanceTimersByTime(150);
+    await settle();
+    expect(controller.stats()).toMatchObject({
+      selectionPending: false,
+      selection: { projectedSpacingCssPx: 100 },
+    });
+    controller.dispose();
+  });
+
+  it("resolves the prior diagnostic before hierarchy merging changes its inputs", async () => {
+    const child = keyFromString("1-0-0-0");
+    const bounds: NodeInfo["bounds"] = {
+      min: [-0.5, -0.5, -0.5],
+      max: [0.5, 0.5, 0.5],
+    };
+    const root: NodeInfo = {
+      key: ROOT_KEY,
+      pointCount: 100,
+      bounds,
+      spacing: 2,
+      children: [child],
+    };
+    let resolvePage!: (entries: NodeInfo[]) => void;
+    const source: TileSource = {
+      metadata: () => ({ pointCount: 200 }),
+      nodes: (key) =>
+        key.level === 0
+          ? Promise.resolve([
+              root,
+              { key: child, pointCount: 0, bounds, spacing: 1, pageRef: true },
+            ])
+          : new Promise<NodeInfo[]>((resolve) => {
+              resolvePage = resolve;
+            }),
+      loadTile: async () => makeTile(100),
+    };
+    let controller: LodController;
+    let inspectMerge = false;
+    let priorSpacing: number | null | undefined;
+    controller = createLodController({
+      source,
+      scheduleRender: () => {},
+      onTiles: () => {},
+      onDrawPlan: () => {
+        if (inspectMerge)
+          priorSpacing = controller.stats().selection.projectedSpacingCssPx;
+      },
+      selectionDelayMs: 0,
+      pointBudget: 1_000,
+    });
+    await settle();
+    controller.setCamera(ORTHOGRAPHIC_VIEW);
+    await settle();
+    controller.setDensityFraction(0.25);
+    inspectMerge = true;
+    resolvePage([
+      { ...root, spacing: 4 },
+      { key: child, pointCount: 100, bounds, spacing: 1, children: [] },
+    ]);
+    await settle();
+    expect(priorSpacing).toBeCloseTo(200);
+    expect(controller.stats().selection.projectedSpacingCssPx).toBeCloseTo(100);
+    controller.dispose();
+  });
+});

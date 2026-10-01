@@ -63,4 +63,29 @@ describe("allocateViewQuality", () => {
     );
     expect([...allocation.values()]).toEqual([0, 0, 1]);
   });
+
+  it("preserves contender order while redistributing through successive demand caps", () => {
+    const allocation = allocateViewQuality(
+      [
+        { key: "small", inputs: inputs(1, 0.1) },
+        { key: "open", inputs: inputs(1) },
+        { key: "medium", inputs: inputs(1, 0.52) },
+        { key: "large", inputs: inputs(1, 0.75) },
+        { key: "culled", inputs: inputs(0) },
+      ],
+      0.4,
+    );
+    expect([...allocation.keys()]).toEqual([
+      "small",
+      "open",
+      "medium",
+      "large",
+      "culled",
+    ]);
+    expect(allocation.get("small")).toBe(0.1);
+    expect(allocation.get("medium")).toBe(0.52);
+    expect(allocation.get("open")).toBeCloseTo(0.69);
+    expect(allocation.get("large")).toBeCloseTo(0.69);
+    expect(allocation.get("culled")).toBe(0);
+  });
 });
