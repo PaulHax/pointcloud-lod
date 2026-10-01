@@ -32,7 +32,7 @@ import type { TileDrawPlan } from "./controller";
 import type { TileBatch } from "./payloadResidency";
 import { IDENTITY, sameMatrix, translatedMatrix } from "./mat4";
 import { finiteAbove, finiteNonNegative } from "./numeric";
-import { keyToString } from "./octree";
+import { keyToString, type VoxelKey } from "./octree";
 import { setActorPointSize, setMapperPointCount } from "./drawState";
 import { tileBytes, type TileData } from "./tileSource";
 
@@ -53,6 +53,19 @@ export type RendererAdapterOptions = {
 };
 
 export type RendererAdapter = {
+  /**
+   * Experimental producer notification after editing a resident tile's arrays
+   * in place. Offsets are point indices [startPoint, endPoint); the producer
+   * remains responsible for source bounds and cache invalidation. This does
+   * not change tile size, origin, residency or progressive draw prefixes.
+   * Returns false for an absent/pooled tile or an invalid declaration.
+   */
+  markTileRangeModified(
+    key: VoxelKey,
+    startPoint: number,
+    endPoint: number,
+    attributes: { positions?: boolean; rgb?: boolean },
+  ): boolean;
   /**
    * Apply one controller batch (typically wired as `onTiles`). Batches apply
    * whether or not the adapter is visible; an addition for a key already on
@@ -373,6 +386,34 @@ export const createRendererAdapter = (
   };
 
   return {
+    markTileRangeModified(key, startPoint, endPoint, attributes) {
+      if (disposed) return false;
+      const entry = tiles.get(keyToString(key));
+      if (
+        !entry ||
+        !Number.isInteger(startPoint) ||
+        !Number.isInteger(endPoint) ||
+        startPoint < 0 ||
+        endPoint <= startPoint ||
+        endPoint > entry.tile.pointCount ||
+        (!attributes.positions && !attributes.rgb) ||
+        (attributes.rgb && !entry.tile.rgb)
+      )
+        return false;
+      if (attributes.positions) {
+        entry.polyData.getPoints().dataChange(startPoint * 3, endPoint * 3);
+      }
+      if (attributes.rgb) {
+        entry.polyData
+          .getPointData()
+          .getScalars()
+          .dataChange(startPoint * 3, endPoint * 3);
+      }
+      workRevision += 1;
+      scheduleRender();
+      return true;
+    },
+
     applyDrawPlan(plan) {
       if (disposed) return;
       const next = new Map(

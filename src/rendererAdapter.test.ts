@@ -849,3 +849,58 @@ describe("adapter driven by a live controller", () => {
     expect(adapter.stats().gpuResidentTiles).toBe(0);
   });
 });
+
+describe("resident tile range notifications", () => {
+  it("keeps actors, residency and prefixes while notifying edited source arrays", () => {
+    const { adapter, scheduleRender } = makeAdapter({ visible: false });
+    const data = tile([10, 20, 30], 10);
+    add(adapter, { key: KEY_A, tile: data });
+    adapter.applyDrawPlan({ entries: [{ key: KEY_A, pointCount: 5 }] });
+    const before = adapter.stats();
+    data.positions.set([1, 2, 3], 6);
+    data.rgb!.set([4, 5, 6], 6);
+    expect(
+      adapter.markTileRangeModified(KEY_A, 2, 3, {
+        positions: true,
+        rgb: true,
+      }),
+    ).toBe(true);
+    expect(actorInstances).toHaveLength(1);
+    expect(polyDataInstances[0]!.pointChanges).toEqual([[6, 9]]);
+    expect((polyDataInstances[0]!.scalars as any).changes).toEqual([[6, 9]]);
+    expect(adapter.workState().workRevision).toBe(before.workRevision + 1);
+    expect(adapter.stats().submittedBytes).toBe(before.submittedBytes);
+    adapter.setVisible(true);
+    expect(adapter.stats().drawnPoints).toBe(5);
+    expect(scheduleRender).toHaveBeenCalled();
+    adapter.dispose();
+  });
+
+  it("rejects invalid, absent, pooled and disposed targets without changing work", () => {
+    const { adapter } = makeAdapter();
+    add(adapter, { key: KEY_A, tile: tile([0, 0, 0], 10, false) });
+    const revision = adapter.workState().workRevision;
+    expect(
+      adapter.markTileRangeModified(KEY_A, -1, 1, { positions: true }),
+    ).toBe(false);
+    expect(
+      adapter.markTileRangeModified(KEY_A, 0, 11, { positions: true }),
+    ).toBe(false);
+    expect(adapter.markTileRangeModified(KEY_A, 0, 1, { rgb: true })).toBe(
+      false,
+    );
+    expect(adapter.markTileRangeModified(KEY_A, 0, 1, {})).toBe(false);
+    expect(
+      adapter.markTileRangeModified(KEY_B, 0, 1, { positions: true }),
+    ).toBe(false);
+    expect(adapter.workState().workRevision).toBe(revision);
+    drop(adapter, KEY_A);
+    expect(
+      adapter.markTileRangeModified(KEY_A, 0, 1, { positions: true }),
+    ).toBe(false);
+    adapter.dispose();
+    expect(
+      adapter.markTileRangeModified(KEY_A, 0, 1, { positions: true }),
+    ).toBe(false);
+  });
+});

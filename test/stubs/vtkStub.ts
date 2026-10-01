@@ -176,8 +176,13 @@ export const makeMapper = (): StubMapper => {
 };
 
 export type StubPolyData = {
-  getPoints: () => { setData: (values: unknown, components: number) => void };
+  getPoints: () => {
+    setData: (values: unknown, components: number) => void;
+    dataChange: (start?: number, end?: number) => void;
+  };
+  pointChanges: Array<[number | undefined, number | undefined]>;
   getPointData: () => {
+    getScalars: () => any;
     setScalars: (array: unknown) => void;
     setNormals: (array: unknown) => void;
     setTCoords: (array: unknown) => void;
@@ -197,6 +202,7 @@ export const polyDataInstances: StubPolyData[] = [];
 export const makePolyData = (): StubPolyData => {
   const polyData: StubPolyData = {
     points: null,
+    pointChanges: [],
     scalars: null,
     normals: null,
     tcoords: null,
@@ -204,6 +210,9 @@ export const makePolyData = (): StubPolyData => {
     deleted: false,
     getPoints() {
       return {
+        dataChange(start, end) {
+          polyData.pointChanges.push([start, end]);
+        },
         setData(values: unknown) {
           polyData.points = values;
         },
@@ -211,6 +220,9 @@ export const makePolyData = (): StubPolyData => {
     },
     getPointData() {
       return {
+        getScalars() {
+          return polyData.scalars;
+        },
         setScalars(array: unknown) {
           polyData.scalars = array;
         },
