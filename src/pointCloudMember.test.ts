@@ -202,6 +202,8 @@ describe("createPointCloudMember", () => {
 
       failing = false;
       await vi.advanceTimersByTimeAsync(1_000);
+      member.prepareFrame();
+      context.submissions.prepareFrame();
       expect(member.governorInputs().work.operations).toBe(0);
       member.dispose();
     } finally {
@@ -269,6 +271,11 @@ describe("createPointCloudMember", () => {
     });
     member.setCamera(VIEW);
     await settle();
+    expect(member.pick(VIEW, 50, 50)).toEqual({ status: "miss" });
+    expect(member.governorInputs().work.operations).toBeGreaterThan(0);
+    member.prepareFrame();
+    context.submissions.prepareFrame();
+    expect(member.governorInputs().work.operations).toBe(0);
     const pick = member.pick(VIEW, 50, 50);
     expect(pick).toMatchObject({ status: "hit", rayDepth: 1 });
     expect(member.occlusionDepth(VIEW, 50, 50)).toEqual({

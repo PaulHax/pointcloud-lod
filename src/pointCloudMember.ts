@@ -90,11 +90,14 @@ export const createPointCloudMember = (
     scheduleRender: context.scheduleRender,
     devicePixelRatio: context.devicePixelRatio,
     visible: active,
+    submissions: context.submissions,
+    onWorkChange: context.onWorkChange,
   });
   const controller = createLodController({
     source: config.source,
     onTiles: adapter.applyBatch,
     onDrawPlan: adapter.applyDrawPlan,
+    getDrawnPointCount: adapter.drawnPointCount,
     scheduleRender: context.scheduleRender,
     onWorkChange: context.onWorkChange,
     onPointDiameterCssPx: adapter.setPointDiameterCssPx,
@@ -177,7 +180,7 @@ export const createPointCloudMember = (
 
     beginInteraction: controller.beginInteraction,
     endInteraction: controller.endInteraction,
-    prepareFrame() {},
+    prepareFrame: adapter.prepareFrame,
 
     governorInputs(): GovernorInputs {
       const narrow = controller.governorInputs();
@@ -196,14 +199,17 @@ export const createPointCloudMember = (
         work: {
           // Backoff remains one logical obligation even when physical counts
           // are temporarily zero.
-          operations: narrow.workPending
-            ? Math.max(
-                1,
-                narrow.physicalTileOperations +
-                  narrow.physicalHierarchyOperations,
-              )
-            : 0,
-          progressSerial: narrow.workRevision,
+          operations:
+            narrow.workPending || adapter.pendingUploads() > 0
+              ? Math.max(
+                  1,
+                  narrow.physicalTileOperations +
+                    narrow.physicalHierarchyOperations +
+                    adapter.pendingUploads(),
+                )
+              : 0,
+          progressSerial:
+            narrow.workRevision + adapter.workState().workRevision,
         },
         physicalTileOperations: narrow.physicalTileOperations,
         physicalHierarchyOperations: narrow.physicalHierarchyOperations,

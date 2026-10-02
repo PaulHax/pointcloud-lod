@@ -30,6 +30,7 @@ import vtkPointGaussianMapper from "@kitware/vtk.js/Rendering/Core/PointGaussian
 
 import type { TileDrawPlan } from "./controller";
 import type { TileBatch } from "./payloadResidency";
+import type { SubmissionScheduler, Submission } from "./submissionScheduler";
 import { IDENTITY, sameMatrix, translatedMatrix } from "./mat4";
 import { finiteAbove, finiteNonNegative } from "./numeric";
 import { keyToString } from "./octree";
@@ -50,9 +51,16 @@ export type RendererAdapterOptions = {
   devicePixelRatio?: number;
   /** Initial visibility. Default true. Tiles added while hidden stay hidden. */
   visible?: boolean;
+  /** Shared frame budget; without it, prefixes are admitted immediately. */
+  submissions?: SubmissionScheduler;
+  onWorkChange?: () => void;
 };
 
 export type RendererAdapter = {
+  /** Queue one upload slice per pending tile for this frame. */
+  prepareFrame(): void;
+  drawnPointCount(keyString: string): number;
+  pendingUploads(): number;
   /**
    * Apply one controller batch (typically wired as `onTiles`). Batches apply
    * whether or not the adapter is visible; an addition for a key already on
@@ -175,6 +183,9 @@ type TileActors = {
   tile: TileData;
   resourceBytes: number;
   drawnPointCount: number;
+  uploadedPointCount: number;
+  ranges: { min: number; max: number }[];
+  submission?: Submission;
   /** Pool insertions before this one, so a hit's depth in the pool is known. */
   pooledSerial: number;
 };
@@ -215,6 +226,7 @@ export const createRendererAdapter = (
   // teardown releases each actor exactly once.
   const tiles = new Map<string, TileActors>();
   const pendingRelease = new Map<string, TileActors>();
+  const pendingUploads = new Map<string, TileActors>();
   let resourceCeilingBytes = 256 * 1024 * 1024;
   let disposed = false;
 
@@ -248,6 +260,9 @@ export const createRendererAdapter = (
 
   const dropSubmitted = (keyString: string, entry: TileActors): void => {
     tiles.delete(keyString);
+    pendingUploads.delete(keyString);
+    entry.submission?.cancel();
+    entry.submission = undefined;
     submittedPoints -= entry.tile.pointCount;
     submittedBytes -= entry.resourceBytes;
   };
@@ -283,15 +298,47 @@ export const createRendererAdapter = (
           Math.max(0, Math.floor(pointPrefixes.get(keyString) ?? 0)),
         );
 
-  /** Re-read every tile's planned prefix; true when any drawn count moved. */
+  const admit = (keyString: string, entry: TileActors, count: number): void => {
+    if (count > entry.uploadedPointCount) {
+      const points = entry.polyData.getPoints();
+      points.resize(count);
+      // Stable full-tile ranges keep the GPU transform unchanged as prefixes grow.
+      entry.ranges.forEach((range, component) =>
+        points.setRange(range, component),
+      );
+      entry.polyData.getPointData().getScalars()?.resize(count);
+      entry.uploadedPointCount = count;
+      workRevision += 1;
+      options.onWorkChange?.();
+    }
+    entry.drawnPointCount = count;
+    setMapperPointCount(entry.mapper, count);
+    entry.actor.setVisibility(visible && count > 0);
+    if (count < prefixFor(keyString, entry))
+      pendingUploads.set(keyString, entry);
+    else pendingUploads.delete(keyString);
+  };
+
+  const refreshPrefix = (keyString: string, entry: TileActors): boolean => {
+    const target = prefixFor(keyString, entry);
+    const count = options.submissions
+      ? Math.min(target, entry.uploadedPointCount)
+      : target;
+    if (count < target) pendingUploads.set(keyString, entry);
+    else {
+      pendingUploads.delete(keyString);
+      entry.submission?.cancel();
+      entry.submission = undefined;
+    }
+    if (count === entry.drawnPointCount) return false;
+    admit(keyString, entry, count);
+    return true;
+  };
+
   const refreshPrefixes = (): boolean => {
     let changed = false;
     for (const [keyString, entry] of tiles) {
-      const count = prefixFor(keyString, entry);
-      if (count === entry.drawnPointCount) continue;
-      entry.drawnPointCount = count;
-      setMapperPointCount(entry.mapper, count);
-      changed = true;
+      changed = refreshPrefix(keyString, entry) || changed;
     }
     return changed;
   };
@@ -301,23 +348,29 @@ export const createRendererAdapter = (
     // The actor property remains in CSS pixels. The custom dense-point mapper
     // multiplies it by pointSizeScale before assigning physical gl_PointSize.
     entry.mapper.setPointSizeScale(devicePixelRatio);
-    entry.drawnPointCount = prefixFor(keyString, entry);
-    setMapperPointCount(entry.mapper, entry.drawnPointCount);
+    refreshPrefix(keyString, entry);
     setActorPointSize(entry.actor, diameterCssPx);
-    entry.actor.setVisibility(visible);
+    entry.actor.setVisibility(visible && entry.drawnPointCount > 0);
     entry.actor.setUserMatrix(translatedMatrix(baseMatrix, entry.tile.origin));
   };
 
   const createTile = (keyString: string, tile: TileData): TileActors => {
     builtTiles += 1;
     const polyData = vtkPolyData.newInstance();
-    polyData.getPoints().setData(tile.positions, 3);
+    const points = polyData.getPoints();
+    points.setData(tile.positions, 3);
+    const ranges = [0, 1, 2].map((component) => {
+      const [min, max] = points.getRange(component);
+      return { min, max };
+    });
+    points.resize(0);
     if (tile.rgb !== undefined) {
       polyData.getPointData().setScalars(
         vtkDataArray.newInstance({
           name: "RGB",
           values: tile.rgb,
           numberOfComponents: 3,
+          size: 0,
         }),
       );
     }
@@ -336,13 +389,18 @@ export const createRendererAdapter = (
       tile,
       resourceBytes: tileBytes(tile),
       drawnPointCount: 0,
+      uploadedPointCount: 0,
+      ranges,
       pooledSerial: 0,
     };
+    setMapperPointCount(mapper, 0);
     applyTileState(keyString, entry);
     return entry;
   };
 
   const releaseTile = (entry: TileActors): void => {
+    entry.submission?.cancel();
+    entry.submission = undefined;
     renderer.removeActor(entry.actor);
     entry.actor.delete?.();
     entry.mapper.delete?.();
@@ -373,6 +431,42 @@ export const createRendererAdapter = (
   };
 
   return {
+    prepareFrame() {
+      if (disposed || !visible || !options.submissions) return;
+      const maxBytes = options.submissions.stats().maxBytesPerFrame;
+      const maxPoints = Math.max(1, Math.min(8192, Math.floor(maxBytes / 16)));
+      for (const [keyString, entry] of pendingUploads) {
+        if (entry.submission) continue;
+        const count = Math.min(
+          prefixFor(keyString, entry),
+          entry.uploadedPointCount + maxPoints,
+        );
+        const bytes =
+          Math.max(0, count - entry.uploadedPointCount) *
+          (entry.tile.rgb ? 16 : 12);
+        entry.submission = options.submissions.enqueue({
+          bytes,
+          atomic: bytes > maxBytes,
+          run() {
+            entry.submission = undefined;
+            if (tiles.get(keyString) !== entry) return;
+            admit(
+              keyString,
+              entry,
+              Math.min(count, prefixFor(keyString, entry)),
+            );
+            scheduleRender();
+          },
+        });
+      }
+    },
+
+    drawnPointCount(keyString) {
+      return visible ? (tiles.get(keyString)?.drawnPointCount ?? 0) : 0;
+    },
+
+    pendingUploads: () => pendingUploads.size,
+
     applyDrawPlan(plan) {
       if (disposed) return;
       const next = new Map(
@@ -382,7 +476,7 @@ export const createRendererAdapter = (
         ]),
       );
       pointPrefixes = next;
-      if (refreshPrefixes()) scheduleRender();
+      if (refreshPrefixes() || pendingUploads.size > 0) scheduleRender();
     },
 
     applyBatch(batch) {
@@ -496,7 +590,13 @@ export const createRendererAdapter = (
       // state that only new controller batches could rebuild, or a show with
       // no selection change behind it would leave the cloud blank forever.
       // Pooled entries stay hidden either way — they are not submitted.
-      for (const entry of tiles.values()) entry.actor.setVisibility(visible);
+      for (const entry of tiles.values()) {
+        if (!visible) {
+          entry.submission?.cancel();
+          entry.submission = undefined;
+        }
+        entry.actor.setVisibility(visible && entry.drawnPointCount > 0);
+      }
       scheduleRender();
     },
 
@@ -551,6 +651,7 @@ export const createRendererAdapter = (
 
     dispose() {
       if (disposed) return;
+      pendingUploads.clear();
       disposed = true;
       // Submitted and pooled entries are disjoint, so this releases every
       // actor exactly once.

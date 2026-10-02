@@ -85,7 +85,7 @@ describe("createRendererAdapter", () => {
     add(adapter, { key: KEY_A, tile: data });
 
     expect(adapter.stats()).toEqual({
-      workRevision: 1,
+      workRevision: 2,
       submittedTiles: 1,
       submittedPoints: 2,
       submittedBytes: 94,
@@ -847,5 +847,124 @@ describe("adapter driven by a live controller", () => {
     expect(attached.size).toBe(0);
     expect(actorInstances.every((actor) => actor.deletes === 1)).toBe(true);
     expect(adapter.stats().gpuResidentTiles).toBe(0);
+  });
+});
+
+describe("scheduled point admission", () => {
+  const scheduled = async (maxBytesPerFrame = 32) => {
+    const { createSubmissionScheduler } = await import("./submissionScheduler");
+    const scheduleRender = vi.fn();
+    const submissions = createSubmissionScheduler({
+      scheduleRender,
+      maxBytesPerFrame,
+      maxTimeMsPerFrame: 100,
+      now: () => 0,
+    });
+    const adapter = createRendererAdapter({
+      renderer: { addActor() {}, removeActor() {} },
+      scheduleRender,
+      submissions,
+    });
+    const frame = () => {
+      adapter.prepareFrame();
+      submissions.prepareFrame();
+    };
+    return { adapter, submissions, frame };
+  };
+
+  it("admits only planned prefixes and appends without replacing payloads", async () => {
+    const { adapter, frame, submissions } = await scheduled();
+    const data = tile([0, 0, 0], 10);
+    adapter.applyDrawPlan({ entries: [{ key: KEY_A, pointCount: 5 }] });
+    add(adapter, { key: KEY_A, tile: data });
+    expect(adapter.drawnPointCount(keyToString(KEY_A))).toBe(0);
+    expect(actorInstances[0]!.visibility).toBe(false);
+    frame();
+    expect(adapter.drawnPointCount(keyToString(KEY_A))).toBe(2);
+    expect(submissions.stats().lastFrameAdmittedBytes).toBe(32);
+    frame();
+    frame();
+    expect(adapter.drawnPointCount(keyToString(KEY_A))).toBe(5);
+    expect(adapter.pendingUploads()).toBe(0);
+    expect(polyDataInstances[0]!.pointCount).toBe(5);
+    expect(polyDataInstances[0]!.points).toBe(data.positions);
+    expect((polyDataInstances[0]!.scalars as any).size).toBe(15);
+    adapter.applyDrawPlan({ entries: [{ key: KEY_A, pointCount: 1 }] });
+    expect(adapter.drawnPointCount(keyToString(KEY_A))).toBe(1);
+    expect(polyDataInstances[0]!.pointCount).toBe(5);
+    adapter.applyDrawPlan({ entries: [{ key: KEY_A, pointCount: 9 }] });
+    expect(adapter.drawnPointCount(keyToString(KEY_A))).toBe(5);
+    frame();
+    expect(adapter.drawnPointCount(keyToString(KEY_A))).toBe(7);
+    expect(polyDataInstances).toHaveLength(1);
+    adapter.dispose();
+  });
+
+  it("cancels retired, replaced and disposed uploads; pooled prefixes resume", async () => {
+    const { adapter, frame, submissions } = await scheduled();
+    const data = tile([0, 0, 0], 10);
+    add(adapter, { key: KEY_A, tile: data });
+    frame();
+    adapter.prepareFrame();
+    drop(adapter, KEY_A);
+    submissions.prepareFrame();
+    expect(adapter.drawnPointCount(keyToString(KEY_A))).toBe(0);
+    expect(adapter.pendingUploads()).toBe(0);
+    add(adapter, { key: KEY_A, tile: data });
+    expect(adapter.drawnPointCount(keyToString(KEY_A))).toBe(2);
+    frame();
+    expect(adapter.drawnPointCount(keyToString(KEY_A))).toBe(4);
+    adapter.prepareFrame();
+    add(adapter, { key: KEY_A, tile: tile([0, 0, 0], 3) });
+    submissions.prepareFrame();
+    expect(polyDataInstances[0]!.deleted).toBe(true);
+    expect(adapter.drawnPointCount(keyToString(KEY_A))).toBe(0);
+    adapter.prepareFrame();
+    adapter.dispose();
+    submissions.prepareFrame();
+    expect(submissions.hasPending()).toBe(false);
+    expect(adapter.pendingUploads()).toBe(0);
+  });
+
+  it("drops obsolete and hidden jobs without consuming another member's budget", async () => {
+    for (const hide of [false, true]) {
+      const { adapter, submissions } = await scheduled();
+      add(adapter, { key: KEY_A, tile: tile([0, 0, 0], 10) });
+      adapter.prepareFrame();
+      if (hide) adapter.setVisible(false);
+      else adapter.applyDrawPlan({ entries: [] });
+      const run = vi.fn();
+      submissions.enqueue({ bytes: 32, run });
+      submissions.prepareFrame();
+      expect(run).toHaveBeenCalledOnce();
+      expect(adapter.drawnPointCount(keyToString(KEY_A))).toBe(0);
+      if (hide) {
+        adapter.setVisible(true);
+        adapter.prepareFrame();
+        submissions.prepareFrame();
+        expect(adapter.drawnPointCount(keyToString(KEY_A))).toBe(2);
+      }
+      adapter.dispose();
+      submissions.dispose();
+    }
+  });
+
+  it("rechecks a prefix reduced while queued and restores hidden tiles", async () => {
+    const { adapter, frame, submissions } = await scheduled();
+    add(adapter, { key: KEY_A, tile: tile([0, 0, 0], 10) });
+    adapter.prepareFrame();
+    adapter.applyDrawPlan({ entries: [{ key: KEY_A, pointCount: 1 }] });
+    submissions.prepareFrame();
+    expect(adapter.drawnPointCount(keyToString(KEY_A))).toBe(1);
+    adapter.setVisible(false);
+    expect(adapter.drawnPointCount(keyToString(KEY_A))).toBe(0);
+    adapter.applyDrawPlan({ entries: [{ key: KEY_A, pointCount: 3 }] });
+    frame();
+    expect(polyDataInstances[0]!.pointCount).toBe(1);
+    adapter.setVisible(true);
+    frame();
+    expect(adapter.drawnPointCount(keyToString(KEY_A))).toBe(3);
+    expect(actorInstances[0]!.visibility).toBe(true);
+    adapter.dispose();
   });
 });
