@@ -437,6 +437,8 @@ describe("hardware telemetry capture", { tags: ["perf"] }, () => {
         // Pick another support depth below the horizontal focal point and drag
         // that projected point to centre.
         await session.frame();
+        // The new frustum must finish selection and tile reads before picking.
+        await session.settle(300_000);
         const horizontalTarget = await pickBelowFocus(session, box, 0.6);
         await session.markTelemetry("horizontal-pan-start");
         await centerPointWithPan(session, box, horizontalTarget);

@@ -33,7 +33,7 @@ import type { TileBatch } from "./payloadResidency";
 import type { SubmissionScheduler, Submission } from "./submissionScheduler";
 import { IDENTITY, sameMatrix, translatedMatrix } from "./mat4";
 import { finiteAbove, finiteNonNegative } from "./numeric";
-import { keyToString, type VoxelKey } from "./octree";
+import { keyToString } from "./octree";
 import { setActorPointSize, setMapperPointCount } from "./drawState";
 import { tileBytes, type TileData } from "./tileSource";
 
@@ -59,7 +59,7 @@ export type RendererAdapterOptions = {
 export type RendererAdapter = {
   /** Queue one upload slice per pending tile for this frame. */
   prepareFrame(): void;
-  drawnPointCount(key: VoxelKey): number;
+  drawnPointCount(keyString: string): number;
   pendingUploads(): number;
   /**
    * Apply one controller batch (typically wired as `onTiles`). Batches apply
@@ -461,8 +461,8 @@ export const createRendererAdapter = (
       }
     },
 
-    drawnPointCount(key) {
-      return visible ? (tiles.get(keyToString(key))?.drawnPointCount ?? 0) : 0;
+    drawnPointCount(keyString) {
+      return visible ? (tiles.get(keyString)?.drawnPointCount ?? 0) : 0;
     },
 
     pendingUploads: () => pendingUploads.size,
