@@ -179,8 +179,12 @@ export type StubPolyData = {
   getPoints: () => {
     setData: (values: unknown, components: number) => void;
     dataChange: (start?: number, end?: number) => void;
+    resize: (count: number) => void;
+    getRange: (component: number) => number[];
+    setRange: (range: { min: number; max: number }, component: number) => void;
   };
   pointChanges: Array<[number | undefined, number | undefined]>;
+  pointCount: number;
   getPointData: () => {
     getScalars: () => any;
     setScalars: (array: unknown) => void;
@@ -203,6 +207,7 @@ export const makePolyData = (): StubPolyData => {
   const polyData: StubPolyData = {
     points: null,
     pointChanges: [],
+    pointCount: 0,
     scalars: null,
     normals: null,
     tcoords: null,
@@ -213,7 +218,22 @@ export const makePolyData = (): StubPolyData => {
         dataChange(start, end) {
           polyData.pointChanges.push([start, end]);
         },
+        resize(count) {
+          polyData.pointCount = count;
+        },
+        getRange(component) {
+          let min = Infinity;
+          let max = -Infinity;
+          const values = polyData.points as Float32Array;
+          for (let i = component; i < values.length; i += 3) {
+            min = Math.min(min, values[i]!);
+            max = Math.max(max, values[i]!);
+          }
+          return [min, max];
+        },
+        setRange() {},
         setData(values: unknown) {
+          polyData.pointCount = (values as Float32Array).length / 3;
           polyData.points = values;
         },
       };

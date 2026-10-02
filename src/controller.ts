@@ -86,6 +86,8 @@ export type LodControllerOptions = {
   onTiles: (batch: TileBatch) => void;
   /** Receives per-tile progressive prefixes without changing tile residency. */
   onDrawPlan?: (plan: TileDrawPlan) => void;
+  /** Clamp picking to prefixes admitted by the renderer. */
+  getDrawnPointCount?: (key: VoxelKey) => number;
   /**
    * Coalescing render request — called once per applied batch, never once per
    * tile. Must not render synchronously more than once per event loop turn.
@@ -614,7 +616,11 @@ export const createLodController = (
    * counts, which need not match the decoded tile.
    */
   const drawnPointsOf = (keyString: string, tile: TileData): number =>
-    Math.min(tile.pointCount, plan.prefixes.get(keyString) ?? 0);
+    Math.min(
+      tile.pointCount,
+      plan.prefixes.get(keyString) ?? 0,
+      options.getDrawnPointCount?.(keyFromString(keyString)) ?? Infinity,
+    );
 
   /** Hand the consumer the residency delta once per microtask burst. */
   let flushScheduled = false;

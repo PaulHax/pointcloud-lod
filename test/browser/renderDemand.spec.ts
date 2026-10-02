@@ -78,6 +78,9 @@ describe("render demand", () => {
         "a stable view to wait on held refinement without requesting frames",
         (stats) =>
           (stats.controller?.physicalHierarchyOperations ?? 0) > 0 &&
+          stats.controller?.physicalTileOperations === 0 &&
+          stats.controller.queuedTiles === 0 &&
+          stats.controller.selectionPending === false &&
           stats.governor?.activity.cameraStable === true &&
           stats.governor.activity.workPending === true &&
           stats.governor.needsFrame === false,
@@ -106,6 +109,7 @@ describe("render demand", () => {
         activity: { workPending: false },
       });
 
+      await session.frame();
       await session.clearTelemetry();
       await session.page.waitForTimeout(300);
       expect((await session.telemetrySummary()).frames).toBe(0);

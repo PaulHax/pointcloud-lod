@@ -85,7 +85,7 @@ describe("createRendererAdapter", () => {
     add(adapter, { key: KEY_A, tile: data });
 
     expect(adapter.stats()).toEqual({
-      workRevision: 1,
+      workRevision: 2,
       submittedTiles: 1,
       submittedPoints: 2,
       submittedBytes: 94,
@@ -850,57 +850,98 @@ describe("adapter driven by a live controller", () => {
   });
 });
 
-describe("resident tile range notifications", () => {
-  it("keeps actors, residency and prefixes while notifying edited source arrays", () => {
-    const { adapter, scheduleRender } = makeAdapter({ visible: false });
-    const data = tile([10, 20, 30], 10);
-    add(adapter, { key: KEY_A, tile: data });
+describe("scheduled point admission", () => {
+  const scheduled = async (maxBytesPerFrame = 32) => {
+    const { createSubmissionScheduler } = await import("./submissionScheduler");
+    const scheduleRender = vi.fn();
+    const submissions = createSubmissionScheduler({
+      scheduleRender,
+      maxBytesPerFrame,
+      maxTimeMsPerFrame: 100,
+      now: () => 0,
+    });
+    const adapter = createRendererAdapter({
+      renderer: { addActor() {}, removeActor() {} },
+      scheduleRender,
+      submissions,
+    });
+    const frame = () => {
+      adapter.prepareFrame();
+      submissions.prepareFrame();
+    };
+    return { adapter, submissions, frame };
+  };
+
+  it("admits only planned prefixes and appends without replacing payloads", async () => {
+    const { adapter, frame, submissions } = await scheduled();
+    const data = tile([0, 0, 0], 10);
     adapter.applyDrawPlan({ entries: [{ key: KEY_A, pointCount: 5 }] });
-    const before = adapter.stats();
-    data.positions.set([1, 2, 3], 6);
-    data.rgb!.set([4, 5, 6], 6);
-    expect(
-      adapter.markTileRangeModified(KEY_A, 2, 3, {
-        positions: true,
-        rgb: true,
-      }),
-    ).toBe(true);
-    expect(actorInstances).toHaveLength(1);
-    expect(polyDataInstances[0]!.pointChanges).toEqual([[6, 9]]);
-    expect((polyDataInstances[0]!.scalars as any).changes).toEqual([[6, 9]]);
-    expect(adapter.workState().workRevision).toBe(before.workRevision + 1);
-    expect(adapter.stats().submittedBytes).toBe(before.submittedBytes);
-    adapter.setVisible(true);
-    expect(adapter.stats().drawnPoints).toBe(5);
-    expect(scheduleRender).toHaveBeenCalled();
+    add(adapter, { key: KEY_A, tile: data });
+    expect(adapter.drawnPointCount(KEY_A)).toBe(0);
+    expect(actorInstances[0]!.visibility).toBe(false);
+    frame();
+    expect(adapter.drawnPointCount(KEY_A)).toBe(2);
+    expect(submissions.stats().lastFrameAdmittedBytes).toBe(32);
+    frame();
+    frame();
+    expect(adapter.drawnPointCount(KEY_A)).toBe(5);
+    expect(adapter.pendingUploads()).toBe(0);
+    expect(polyDataInstances[0]!.pointCount).toBe(5);
+    expect(polyDataInstances[0]!.points).toBe(data.positions);
+    expect((polyDataInstances[0]!.scalars as any).size).toBe(15);
+    adapter.applyDrawPlan({ entries: [{ key: KEY_A, pointCount: 1 }] });
+    expect(adapter.drawnPointCount(KEY_A)).toBe(1);
+    expect(polyDataInstances[0]!.pointCount).toBe(5);
+    adapter.applyDrawPlan({ entries: [{ key: KEY_A, pointCount: 9 }] });
+    expect(adapter.drawnPointCount(KEY_A)).toBe(5);
+    frame();
+    expect(adapter.drawnPointCount(KEY_A)).toBe(7);
+    expect(polyDataInstances).toHaveLength(1);
     adapter.dispose();
   });
 
-  it("rejects invalid, absent, pooled and disposed targets without changing work", () => {
-    const { adapter } = makeAdapter();
-    add(adapter, { key: KEY_A, tile: tile([0, 0, 0], 10, false) });
-    const revision = adapter.workState().workRevision;
-    expect(
-      adapter.markTileRangeModified(KEY_A, -1, 1, { positions: true }),
-    ).toBe(false);
-    expect(
-      adapter.markTileRangeModified(KEY_A, 0, 11, { positions: true }),
-    ).toBe(false);
-    expect(adapter.markTileRangeModified(KEY_A, 0, 1, { rgb: true })).toBe(
-      false,
-    );
-    expect(adapter.markTileRangeModified(KEY_A, 0, 1, {})).toBe(false);
-    expect(
-      adapter.markTileRangeModified(KEY_B, 0, 1, { positions: true }),
-    ).toBe(false);
-    expect(adapter.workState().workRevision).toBe(revision);
+  it("cancels retired, replaced and disposed uploads; pooled prefixes resume", async () => {
+    const { adapter, frame, submissions } = await scheduled();
+    const data = tile([0, 0, 0], 10);
+    add(adapter, { key: KEY_A, tile: data });
+    frame();
+    adapter.prepareFrame();
     drop(adapter, KEY_A);
-    expect(
-      adapter.markTileRangeModified(KEY_A, 0, 1, { positions: true }),
-    ).toBe(false);
+    submissions.prepareFrame();
+    expect(adapter.drawnPointCount(KEY_A)).toBe(0);
+    expect(adapter.pendingUploads()).toBe(0);
+    add(adapter, { key: KEY_A, tile: data });
+    expect(adapter.drawnPointCount(KEY_A)).toBe(2);
+    frame();
+    expect(adapter.drawnPointCount(KEY_A)).toBe(4);
+    adapter.prepareFrame();
+    add(adapter, { key: KEY_A, tile: tile([0, 0, 0], 3) });
+    submissions.prepareFrame();
+    expect(polyDataInstances[0]!.deleted).toBe(true);
+    expect(adapter.drawnPointCount(KEY_A)).toBe(0);
+    adapter.prepareFrame();
     adapter.dispose();
-    expect(
-      adapter.markTileRangeModified(KEY_A, 0, 1, { positions: true }),
-    ).toBe(false);
+    submissions.prepareFrame();
+    expect(submissions.hasPending()).toBe(false);
+    expect(adapter.pendingUploads()).toBe(0);
+  });
+
+  it("rechecks a prefix reduced while queued and restores hidden tiles", async () => {
+    const { adapter, frame, submissions } = await scheduled();
+    add(adapter, { key: KEY_A, tile: tile([0, 0, 0], 10) });
+    adapter.prepareFrame();
+    adapter.applyDrawPlan({ entries: [{ key: KEY_A, pointCount: 1 }] });
+    submissions.prepareFrame();
+    expect(adapter.drawnPointCount(KEY_A)).toBe(1);
+    adapter.setVisible(false);
+    expect(adapter.drawnPointCount(KEY_A)).toBe(0);
+    adapter.applyDrawPlan({ entries: [{ key: KEY_A, pointCount: 3 }] });
+    frame();
+    expect(polyDataInstances[0]!.pointCount).toBe(1);
+    adapter.setVisible(true);
+    frame();
+    expect(adapter.drawnPointCount(KEY_A)).toBe(3);
+    expect(actorInstances[0]!.visibility).toBe(true);
+    adapter.dispose();
   });
 });
