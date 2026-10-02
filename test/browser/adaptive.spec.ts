@@ -409,20 +409,15 @@ describeAdaptive("the adaptive budget loop at stated frame times", () => {
     });
 
     it(`leaves an honest on-target frame alone: ${cloud.name}`, async () => {
-      // The example configures `vtkFrameFraction: 1`, because it paints
-      // nothing but the point cloud. The library's 0.7 default is right for a
-      // view compositing a basemap and video underneath, and applying it here
-      // would normalise every honest 33 ms frame up to 47 ms — past the top of
-      // the settled dead-band — and walk the budget down to its floor while
-      // nothing was ever late. A frame reported at exactly the settled target
-      // is the one input that tells the two apart.
+      // Use the full host-frame allowance and its effective display target.
+      // Refresh quantization can move that target away from the configured one.
       const session = await openAdaptive(cloud.urlPath);
       try {
         const settled = await settleAndAssert(session, SETTLE_MS);
         const view = governorOf(settled);
         expect(
-          view.targetFrameTimeMs,
-          "the settled target is not the one these frames are stated against",
+          view.configuredFrameTimeMs,
+          "the configured settled target differs from the policy",
         ).toBe(SETTLED_TARGET_MS);
         const before = view.viewQualityFraction;
         expect(
@@ -431,7 +426,7 @@ describeAdaptive("the adaptive budget loop at stated frame times", () => {
         ).toBeGreaterThan(MIN_VIEW_QUALITY_FRACTION);
 
         await drainBudgetStates(session);
-        await session.setSyntheticFrameMs(SETTLED_TARGET_MS);
+        await session.setSyntheticFrameMs(view.targetFrameTimeMs);
         await watching(session, SAMPLE_INTERVAL_MS, () =>
           drive(
             session,

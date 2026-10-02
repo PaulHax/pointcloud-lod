@@ -926,6 +926,29 @@ describe("scheduled point admission", () => {
     expect(adapter.pendingUploads()).toBe(0);
   });
 
+  it("drops obsolete and hidden jobs without consuming another member's budget", async () => {
+    for (const hide of [false, true]) {
+      const { adapter, submissions } = await scheduled();
+      add(adapter, { key: KEY_A, tile: tile([0, 0, 0], 10) });
+      adapter.prepareFrame();
+      if (hide) adapter.setVisible(false);
+      else adapter.applyDrawPlan({ entries: [] });
+      const run = vi.fn();
+      submissions.enqueue({ bytes: 32, run });
+      submissions.prepareFrame();
+      expect(run).toHaveBeenCalledOnce();
+      expect(adapter.drawnPointCount(KEY_A)).toBe(0);
+      if (hide) {
+        adapter.setVisible(true);
+        adapter.prepareFrame();
+        submissions.prepareFrame();
+        expect(adapter.drawnPointCount(KEY_A)).toBe(2);
+      }
+      adapter.dispose();
+      submissions.dispose();
+    }
+  });
+
   it("rechecks a prefix reduced while queued and restores hidden tiles", async () => {
     const { adapter, frame, submissions } = await scheduled();
     add(adapter, { key: KEY_A, tile: tile([0, 0, 0], 10) });

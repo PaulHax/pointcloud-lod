@@ -325,7 +325,11 @@ export const createRendererAdapter = (
       ? Math.min(target, entry.uploadedPointCount)
       : target;
     if (count < target) pendingUploads.set(keyString, entry);
-    else pendingUploads.delete(keyString);
+    else {
+      pendingUploads.delete(keyString);
+      entry.submission?.cancel();
+      entry.submission = undefined;
+    }
     if (count === entry.drawnPointCount) return false;
     admit(keyString, entry, count);
     return true;
@@ -429,13 +433,8 @@ export const createRendererAdapter = (
   return {
     prepareFrame() {
       if (disposed || !visible || !options.submissions) return;
-      const maxPoints = Math.max(
-        1,
-        Math.min(
-          8192,
-          Math.floor(options.submissions.stats().maxBytesPerFrame / 16),
-        ),
-      );
+      const maxBytes = options.submissions.stats().maxBytesPerFrame;
+      const maxPoints = Math.max(1, Math.min(8192, Math.floor(maxBytes / 16)));
       for (const [keyString, entry] of pendingUploads) {
         if (entry.submission) continue;
         const count = Math.min(
@@ -447,7 +446,7 @@ export const createRendererAdapter = (
           (entry.tile.rgb ? 16 : 12);
         entry.submission = options.submissions.enqueue({
           bytes,
-          atomic: bytes > options.submissions.stats().maxBytesPerFrame,
+          atomic: bytes > maxBytes,
           run() {
             entry.submission = undefined;
             if (tiles.get(keyString) !== entry) return;
@@ -591,8 +590,13 @@ export const createRendererAdapter = (
       // state that only new controller batches could rebuild, or a show with
       // no selection change behind it would leave the cloud blank forever.
       // Pooled entries stay hidden either way — they are not submitted.
-      for (const entry of tiles.values())
+      for (const entry of tiles.values()) {
+        if (!visible) {
+          entry.submission?.cancel();
+          entry.submission = undefined;
+        }
         entry.actor.setVisibility(visible && entry.drawnPointCount > 0);
+      }
       scheduleRender();
     },
 
